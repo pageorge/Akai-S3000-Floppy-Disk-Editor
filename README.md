@@ -1,6 +1,6 @@
 # Akai S3000 Editor — macOS App
 
-A native macOS SwiftUI application for reading, editing, and writing Akai S3000 `.img` disk images. Browse samples and programs, export/import WAV files, and edit keyzone mappings — all without needing a hardware sampler.
+A native macOS SwiftUI application for reading, editing, and writing Akai S3000 `.img` disk images. Browse samples and programs, export/import WAV files, and edit keyzone mappings. The perfect companion to GreaseWeazel.
 
 ---
 

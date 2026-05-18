@@ -59,19 +59,19 @@ struct ProgramDetailView: View {
                                     }
                                 }
                                 .labelsHidden()
-                                .onChange(of: editedProgram.midiChannel) { _ in isDirty = true }
+                                .onChange(of: editedProgram.midiChannel) { isDirty = true }
                             }
                             HStack {
                                 Text("Polyphony")
                                     .frame(width: 100, alignment: .leading)
                                 Stepper("\(editedProgram.polyphony)", value: $editedProgram.polyphony, in: 1...16)
-                                    .onChange(of: editedProgram.polyphony) { _ in isDirty = true }
+                                    .onChange(of: editedProgram.polyphony) { isDirty = true }
                             }
                             HStack {
                                 Text("Bend Range")
                                     .frame(width: 100, alignment: .leading)
                                 Stepper("\(editedProgram.bendRange) st", value: $editedProgram.bendRange, in: 0...12)
-                                    .onChange(of: editedProgram.bendRange) { _ in isDirty = true }
+                                    .onChange(of: editedProgram.bendRange) { isDirty = true }
                             }
                         }
                     }
@@ -250,7 +250,7 @@ struct KeyzoneEditorView: View {
                         }
                     }
                     .labelsHidden()
-                    .onChange(of: keyzone.sampleName) { _ in onChange() }
+                    .onChange(of: keyzone.sampleName) { onChange() }
                 }
 
                 // Key range
@@ -298,7 +298,7 @@ struct KeyzoneEditorView: View {
                                 .frame(width: 100, alignment: .leading)
                                 .font(.subheadline)
                             Stepper("\(keyzone.tuneOffset)", value: $keyzone.tuneOffset, in: -24...24)
-                                .onChange(of: keyzone.tuneOffset) { _ in onChange() }
+                                .onChange(of: keyzone.tuneOffset) { onChange() }
                         }
                         HStack {
                             Text("Fine (¢)")
@@ -334,7 +334,7 @@ struct KeyzoneEditorView: View {
                                 .font(.system(.caption, design: .monospaced))
                         }
                         Toggle("Loop", isOn: $keyzone.loopEnabled)
-                            .onChange(of: keyzone.loopEnabled) { _ in onChange() }
+                            .onChange(of: keyzone.loopEnabled) { onChange() }
                     }
                 }
             }
@@ -362,7 +362,7 @@ struct MidiKeyPicker: View {
                 }
             }
             .labelsHidden()
-            .onChange(of: value) { _ in onChange() }
+            .onChange(of: value) { onChange() }
         }
     }
 

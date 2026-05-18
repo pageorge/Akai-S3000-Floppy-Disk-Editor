@@ -157,7 +157,7 @@ struct BlackPianoKey: View {
     var body: some View {
         ZStack(alignment: .bottom) {
             Rectangle()
-                .fill(Color(nsColor: .controlDarkShadowColor))
+                .fill(Color.black.opacity(0.85))
                 .cornerRadius(2, corners: [.bottomLeft, .bottomRight])
             if isRootOfAnyZone {
                 Circle()

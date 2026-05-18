@@ -45,7 +45,7 @@ struct WaveformView: View {
                 }
             }
             .onAppear { computeWaveform(width: geo.size.width) }
-            .onChange(of: geo.size.width) { w in computeWaveform(width: w) }
+            .onChange(of: geo.size.width) { computeWaveform(width: geo.size.width) }
         }
     }
 
@@ -53,26 +53,26 @@ struct WaveformView: View {
         guard !audioData.isEmpty else { return }
         let buckets = Int(width * 2)
         guard buckets > 0 else { return }
+        let localData = audioData  // capture local copy for thread safety
 
         DispatchQueue.global(qos: .userInitiated).async {
-            let samplesPerBucket = max(1, (audioData.count / 2) / buckets)
+            let samplesPerBucket = max(1, (localData.count / 2) / buckets)
             var points: [CGFloat] = []
 
             for b in 0..<buckets {
-                var maxAmp: Int16 = 0
+                var maxAmp: Int32 = 0
                 let startSample = b * samplesPerBucket
-                let endSample = min(startSample + samplesPerBucket, audioData.count / 2)
+                let endSample = min(startSample + samplesPerBucket, localData.count / 2)
                 for s in startSample..<endSample {
                     let byteIdx = s * 2
-                    if byteIdx + 1 < audioData.count {
-                        // S3000 audio is 16-bit signed little-endian
-                        let sample = Int16(bitPattern:
-                            UInt16(audioData[byteIdx]) | (UInt16(audioData[byteIdx + 1]) << 8)
-                        )
-                        if abs(sample) > abs(maxAmp) { maxAmp = sample }
+                    if byteIdx + 1 < localData.count {
+                        let sample = Int32(Int16(bitPattern:
+                            UInt16(localData[byteIdx]) | (UInt16(localData[byteIdx + 1]) << 8)
+                        ))
+                        if abs(sample) > maxAmp { maxAmp = abs(sample) }
                     }
                 }
-                points.append(CGFloat(abs(maxAmp)) / 32768.0)
+                points.append(CGFloat(maxAmp) / 32768.0)
             }
 
             DispatchQueue.main.async { self.waveformPoints = points }

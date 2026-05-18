@@ -1,26 +1,77 @@
 import Foundation
 
 // MARK: - Akai S3000 Disk Format Constants
-// Confirmed by reverse engineering real S3000 disks:
-// - 80 cylinders, 2 heads, 10 sectors/track, 1024 bytes/sector
-// - Total: 1,638,400 bytes (1600 blocks of 1024 bytes)
-// - Audio: 16-bit signed little-endian PCM
-// - Character encoding: 0=space, 1=A...26=Z, 27=0...36=9, 37=-, 38=+
+// All confirmed by reverse engineering real S3000 HD floppy disks and cross-referencing
+// with the akaiutil open-source project (github.com/dialtr/akai-fs).
+//
+// Physical format:  80 cylinders × 2 heads × 10 sectors × 1024 bytes = 1,638,400 bytes
+// Audio encoding:   16-bit signed little-endian PCM (same as WAV — no conversion needed)
+// Character set:    0=space, 1=A … 26=Z, 27=0 … 36=9, 37=-, 38=+
+//
+// HD floppy header layout (akai_flhhead_s):
+//   Offset 0x000:  file[64]   — 64 directory entries × 24 bytes = 1536 bytes
+//   Offset 0x600:  fatblk[1600][2] — FAT, 2 bytes LE per block = 3200 bytes
+//   Offset 0xD80:  label (64 bytes)
+//   Total: 5 blocks (5120 bytes)
+//
+// S3000 volume directory:  starts at block 5, 510 entries × 24 bytes
+//
+// Directory entry format (akai_voldir_entry_s, 24 bytes):
+//   [0-11]  name (12 bytes, Akai encoding)
+//   [12-15] tag[4]
+//   [16]    type  (0xF0=program, 0xF3=sample)
+//   [17-19] size  (24-bit LE, bytes)
+//   [20-21] start (16-bit LE, block number)
+//   [22-23] osver (16-bit LE)
+//
+// FAT codes:
+//   0x0000 = free block
+//   0x4000 = system block
+//   0xC000 = end of chain (AKAI_FAT_CODE_FILEEND)
+//   other  = next block number (16-bit LE)
+//
+// Sample header (252 bytes = 0xFC):
+//   [0x00]       file type (0xF3)
+//   [0x03-0x0E]  name (12 bytes, Akai encoding)
+//   [0x22-0x23]  sample rate (16-bit LE, e.g. 0xAC44 = 44100)
+//   [0x58-0x5B]  sample count (32-bit LE)
+//   [0xFC]       audio data begins
+//
+// Large samples are split into multiple directory entries, each with its own FAT chain.
+// All parts after the first also begin with a 0xFC-byte header that must be skipped.
 
 struct AkaiDiskFormat {
-    static let sectorSize = 1024        // confirmed: 1024-byte sectors
-    static let sectorsPerTrack = 10     // confirmed: 10 sectors per track
-    static let tracksPerSide = 80
-    static let sides = 2
-    static let totalBlocks = sectorsPerTrack * tracksPerSide * sides // 1600
-    static let diskSize = totalBlocks * sectorSize // 1,638,400 bytes
+    static let blockSize            = 1024
+    static let blocksPerTrack       = 10
+    static let tracks               = 80
+    static let sides                = 2
+    static let totalBlocks          = blocksPerTrack * tracks * sides   // 1600
 
-    // File types (first byte of each file)
-    static let fileTypeProgram: UInt8 = 0x01
-    static let fileTypeSample: UInt8  = 0x03
+    // Header layout
+    static let dirEntryCount        = 64        // entries in floppy header
+    static let dirEntrySize         = 24
+    static let fatOffset            = dirEntryCount * dirEntrySize      // 1536 = 0x600
 
-    // Sample header: 150 bytes (0x96), audio data follows immediately after
-    static let sampleHeaderSize = 0x96
+    // S3000 volume directory (behind header)
+    static let volDirStartBlock     = 5
+    static let volDirEntryCount     = 510
+
+    // File types (byte 16 of directory entry)
+    static let ftypeSample: UInt8   = 0xF3
+    static let ftypeProgram: UInt8  = 0xF0
+
+    // FAT codes
+    static let fatFree: UInt16      = 0x0000
+    static let fatSystem: UInt16    = 0x4000
+    static let fatEnd: UInt16       = 0xC000    // AKAI_FAT_CODE_FILEEND
+
+    // Sample header size (sizeof akai_sample3000_s = 252 bytes)
+    static let sampleHeaderSize     = 0xFC      // 252
+
+    // Sample header field offsets
+    static let hdrNameOffset        = 0x03      // 12 bytes, Akai encoding
+    static let hdrSampleRateOffset  = 0x22      // 16-bit LE
+    static let hdrSampleCountOffset = 0x58      // 32-bit LE
 }
 
 // MARK: - Data Model
@@ -29,18 +80,16 @@ struct AkaiDirectoryEntry {
     var name: String
     var fileType: UInt8
     var startBlock: UInt16
-    var length: UInt32
+    var size: UInt32            // file size in bytes (from directory)
     var rawEntry: Data
 
-    var isValid: Bool {
-        return fileType == AkaiDiskFormat.fileTypeSample ||
-               fileType == AkaiDiskFormat.fileTypeProgram
-    }
+    var isSample:  Bool { fileType == AkaiDiskFormat.ftypeSample }
+    var isProgram: Bool { fileType == AkaiDiskFormat.ftypeProgram }
 
     var displayType: String {
         switch fileType {
-        case AkaiDiskFormat.fileTypeSample:  return "Sample"
-        case AkaiDiskFormat.fileTypeProgram: return "Program"
+        case AkaiDiskFormat.ftypeSample:  return "Sample"
+        case AkaiDiskFormat.ftypeProgram: return "Program"
         default: return String(format: "0x%02X", fileType)
         }
     }
@@ -84,12 +133,14 @@ struct AkaiProgram {
     var rawData: Data
 }
 
+/// A decoded sample, potentially assembled from multiple FAT chains.
 struct AkaiSample: Identifiable {
     var id = UUID()
     var directoryEntry: AkaiDirectoryEntry
     var header: AkaiSampleHeader
-    var audioData: Data
-    var offset: Int
+    var audioData: Data         // complete audio, all chains concatenated
+    var offset: Int             // byte offset of primary block in disk image
+    var additionalEntries: [AkaiDirectoryEntry] = []  // continuation parts
 }
 
 struct AkaiProgramFile: Identifiable {
@@ -99,243 +150,285 @@ struct AkaiProgramFile: Identifiable {
     var offset: Int
 }
 
-// MARK: - Disk Image Parser
+// MARK: - Disk Image
 
 class AkaiDiskImage: ObservableObject {
-    @Published var isLoaded = false
-    @Published var diskName: String = ""
-    @Published var samples: [AkaiSample] = []
+    @Published var isLoaded    = false
+    @Published var diskName    = ""
+    @Published var samples:  [AkaiSample]      = []
     @Published var programs: [AkaiProgramFile] = []
-    @Published var errorMessage: String? = nil
-    @Published var freeBlocks: Int = 0
-    @Published var totalBlocks: Int = AkaiDiskFormat.totalBlocks
+    @Published var freeBlocks  = 0
+    @Published var totalBlocks = AkaiDiskFormat.totalBlocks
 
     var imageData: Data?
-    var imageURL: URL?
+    var imageURL:  URL?
 
-    // MARK: - Loading
+    // MARK: - Load
 
     func load(from url: URL) throws {
         let data = try Data(contentsOf: url)
-        guard data.count >= AkaiDiskFormat.sectorSize else {
-            throw AkaiError.invalidImage("File too small to be a disk image")
+        guard data.count >= AkaiDiskFormat.blockSize * 5 else {
+            throw AkaiError.invalidImage("File too small")
         }
         imageData = data
-        imageURL = url
-        try parseVolume(data: data)
+        imageURL  = url
+        try parseImage(data: data)
     }
 
-    private func parseVolume(data: Data) throws {
-        diskName = akaiString(from: data, offset: 0x03, length: 12)
-        freeBlocks = parseFreeBlocks(data: data)
-        try parseDirectory(data: data)
-        DispatchQueue.main.async { self.isLoaded = true }
+    // MARK: - Parse
+
+    private func parseImage(data: Data) throws {
+        // Volume name is in the floppy header label at block 4 offset 0, length 12
+        let labelOffset = 4 * AkaiDiskFormat.blockSize
+        diskName = labelOffset + 12 <= data.count
+            ? akaiString(from: data, offset: labelOffset, length: 12)
+            : ""
+
+        freeBlocks = countFreeBlocks(data: data)
+
+        let (parsedSamples, parsedPrograms) = try parseDirectory(data: data)
+
+        DispatchQueue.main.async {
+            self.samples  = parsedSamples
+            self.programs = parsedPrograms
+            self.isLoaded = true
+        }
     }
 
-    private func parseFreeBlocks(data: Data) -> Int {
-        guard data.count > 0x14 else { return 0 }
-        let free = UInt16(data[0x12]) | (UInt16(data[0x13]) << 8)
-        return Int(free)
+    private func countFreeBlocks(data: Data) -> Int {
+        var free = 0
+        for block in 0..<AkaiDiskFormat.totalBlocks {
+            if fatValue(block: block, data: data) == AkaiDiskFormat.fatFree { free += 1 }
+        }
+        return free
     }
 
-    // MARK: - Directory Parsing
-    // The S3000 directory is found by scanning blocks for file type markers.
-    // File type 0x01 = program, 0x03 = sample (first byte of each file block).
+    // MARK: - FAT
 
-    private func parseDirectory(data: Data) throws {
-        var parsedSamples: [AkaiSample] = []
+    /// Read a FAT entry for the given block (16-bit LE).
+    private func fatValue(block: Int, data: Data) -> UInt16 {
+        let offset = AkaiDiskFormat.fatOffset + block * 2
+        guard offset + 2 <= data.count else { return AkaiDiskFormat.fatEnd }
+        return UInt16(data[offset]) | (UInt16(data[offset + 1]) << 8)
+    }
+
+    /// Follow the FAT chain from startBlock, returning all block numbers in order.
+    private func fatChain(from startBlock: Int, data: Data) -> [Int] {
+        var chain = [startBlock]
+        var seen  = Set([startBlock])
+        var block = startBlock
+        for _ in 0..<2000 {
+            let val = fatValue(block: block, data: data)
+            if val >= AkaiDiskFormat.fatEnd || val == AkaiDiskFormat.fatFree { break }
+            let next = Int(val)
+            if seen.contains(next) { break }
+            chain.append(next)
+            seen.insert(next)
+            block = next
+        }
+        return chain
+    }
+
+    /// Read exactly `length` bytes from a FAT chain, starting at `fileOffset` within the file.
+    private func readFromChain(_ chain: [Int], fileOffset: Int, length: Int, data: Data) -> Data {
+        var result = Data()
+        result.reserveCapacity(length)
+        let bs = AkaiDiskFormat.blockSize
+        for (i, block) in chain.enumerated() {
+            let blockStart = i * bs
+            let readStart  = max(0, fileOffset - blockStart)
+            let readEnd    = min(bs, fileOffset + length - blockStart)
+            guard readStart < readEnd else { continue }
+            let diskOffset = block * bs + readStart
+            let diskEnd    = block * bs + readEnd
+            guard diskEnd <= data.count else { break }
+            result.append(data[diskOffset..<diskEnd])
+            if result.count >= length { break }
+        }
+        return result
+    }
+
+    // MARK: - Directory
+
+    private func parseDirectory(data: Data) throws -> ([AkaiSample], [AkaiProgramFile]) {
+        // S3000 HD floppy: volume directory starts at block 5
+        let dirStart  = AkaiDiskFormat.volDirStartBlock * AkaiDiskFormat.blockSize
+        let entrySize = AkaiDiskFormat.dirEntrySize
+        let maxEntries = AkaiDiskFormat.volDirEntryCount
+
+        var entries: [AkaiDirectoryEntry] = []
+        for i in 0..<maxEntries {
+            let base = dirStart + i * entrySize
+            guard base + entrySize <= data.count else { break }
+
+            let ftype = data[base + 16]
+            guard ftype != 0x00 else { break }
+            guard ftype == AkaiDiskFormat.ftypeSample ||
+                  ftype == AkaiDiskFormat.ftypeProgram else { continue }
+
+            let name  = akaiString(from: data, offset: base, length: 12)
+            let size  = UInt32(data[base+17]) | (UInt32(data[base+18]) << 8) | (UInt32(data[base+19]) << 16)
+            let start = UInt16(data[base+20]) | (UInt16(data[base+21]) << 8)
+
+            entries.append(AkaiDirectoryEntry(
+                name: name, fileType: ftype, startBlock: start, size: size,
+                rawEntry: Data(data[base..<base+entrySize])
+            ))
+        }
+
+        // Group sample entries by name (large samples split into multiple entries)
+        var parsedSamples:  [AkaiSample]      = []
         var parsedPrograms: [AkaiProgramFile] = []
-        let blockSize = AkaiDiskFormat.sectorSize
-        let totalBlocks = data.count / blockSize
+        var processedNames = Set<String>()
 
-        for blockNum in 0..<totalBlocks {
-            let offset = blockNum * blockSize
-            guard offset + 16 <= data.count else { break }
-
-            let fileType = data[offset]
-            guard fileType == AkaiDiskFormat.fileTypeSample ||
-                  fileType == AkaiDiskFormat.fileTypeProgram else { continue }
-
-            // Validate: name bytes 0x03-0x0E must all be valid Akai chars (< 39)
-            let nameBytes = data[offset+3..<offset+15]
-            guard nameBytes.allSatisfy({ $0 < 39 }),
-                  nameBytes.contains(where: { $0 > 0 }) else { continue }
-
-            let name = akaiString(from: data, offset: offset + 3, length: 12)
-
-            let entry = AkaiDirectoryEntry(
-                name: name,
-                fileType: fileType,
-                startBlock: UInt16(blockNum),
-                length: 0,
-                rawEntry: Data(data[offset..<min(offset+24, data.count)])
-            )
-
-            if fileType == AkaiDiskFormat.fileTypeSample {
-                if let sample = try? parseSample(data: data, entry: entry, blockOffset: offset) {
-                    parsedSamples.append(sample)
-                }
-            } else if fileType == AkaiDiskFormat.fileTypeProgram {
-                if let prog = try? parseProgram(data: data, entry: entry, blockOffset: offset) {
+        for entry in entries {
+            if entry.isProgram {
+                if let prog = try? parseProgram(entry: entry, data: data) {
                     parsedPrograms.append(prog)
+                }
+            } else if entry.isSample {
+                if processedNames.contains(entry.name) { continue }
+                processedNames.insert(entry.name)
+                let parts = entries
+                    .filter { $0.isSample && $0.name == entry.name }
+                    .sorted { $0.startBlock < $1.startBlock }
+                if let sample = try? parseSample(parts: parts, data: data) {
+                    parsedSamples.append(sample)
                 }
             }
         }
 
-        DispatchQueue.main.async {
-            self.samples = parsedSamples
-            self.programs = parsedPrograms
-        }
+        return (parsedSamples.sorted { $0.header.name < $1.header.name },
+                parsedPrograms.sorted { $0.program.name < $1.program.name })
     }
 
     // MARK: - Sample Parsing
-    //
-    // Confirmed S3000 sample header layout (offset from file start):
-    //   0x00: File type (0x03 = sample)
-    //   0x01: Version
-    //   0x02: Sub-type
-    //   0x03-0x0E: Name (12 bytes, Akai encoding)
-    //   0x0F: Attribute flags
-    //   0x18: Number of channels (1=mono, 2=stereo)
-    //   0x1A-0x1B: Sample rate (16-bit LE, e.g. 0xAC44 = 44100)
-    //   0x58-0x5B: Number of samples (32-bit LE)
-    //   0x96: Audio data begins (16-bit signed LE PCM)
 
-    private func parseSample(data: Data, entry: AkaiDirectoryEntry, blockOffset: Int) throws -> AkaiSample {
-        guard blockOffset + AkaiDiskFormat.sampleHeaderSize < data.count else {
-            throw AkaiError.dataError("Sample \(entry.name) is out of bounds")
+    private func parseSample(parts: [AkaiDirectoryEntry], data: Data) throws -> AkaiSample {
+        guard let first = parts.first else { throw AkaiError.dataError("Empty sample parts") }
+
+        let startBlock = Int(first.startBlock)
+        let headerSize = AkaiDiskFormat.sampleHeaderSize
+
+        let chain0     = fatChain(from: startBlock, data: data)
+        let headerData = readFromChain(chain0, fileOffset: 0, length: headerSize, data: data)
+
+        guard headerData.count >= headerSize else {
+            throw AkaiError.dataError("Sample header too short: \(first.name)")
         }
 
-        let hdr = data
-
-        let sampleRate: UInt32
-        if blockOffset + 0x1C <= data.count {
-            sampleRate = UInt32(hdr[blockOffset + 0x1A]) | (UInt32(hdr[blockOffset + 0x1B]) << 8)
-        } else {
-            sampleRate = 44100
+        let name       = akaiString(from: headerData, offset: AkaiDiskFormat.hdrNameOffset, length: 12)
+        // Always use sample rate from first part's header.
+        // Continuation headers have different bytes at this offset.
+        // Scan all common offsets and take the one that gives a valid rate.
+        let candidateOffsets = [0x22, 0x1A, 0x1C, 0x20, 0x24]
+        let validRates: Set<UInt32> = [11025, 22050, 44100]
+        var sampleRate: UInt32 = 44100
+        for off in candidateOffsets {
+            if off + 1 < headerData.count {
+                let val = UInt32(headerData[off]) | (UInt32(headerData[off+1]) << 8)
+                if validRates.contains(val) { sampleRate = val; break }
+            }
         }
+        let numSamples = UInt32(headerData[AkaiDiskFormat.hdrSampleCountOffset]) |
+                         (UInt32(headerData[AkaiDiskFormat.hdrSampleCountOffset + 1]) << 8) |
+                         (UInt32(headerData[AkaiDiskFormat.hdrSampleCountOffset + 2]) << 16) |
+                         (UInt32(headerData[AkaiDiskFormat.hdrSampleCountOffset + 3]) << 24)
 
-        let numChannels = blockOffset + 0x19 <= data.count ? Int(hdr[blockOffset + 0x18]) : 1
-        let rootNote: UInt8 = blockOffset + 0x10 <= data.count ? hdr[blockOffset + 0x0F] : 60
-
-        let numSamples: UInt32
-        if blockOffset + 0x5C <= data.count {
-            numSamples = UInt32(hdr[blockOffset + 0x58]) |
-                         (UInt32(hdr[blockOffset + 0x59]) << 8) |
-                         (UInt32(hdr[blockOffset + 0x5A]) << 16) |
-                         (UInt32(hdr[blockOffset + 0x5B]) << 24)
-        } else {
-            numSamples = 0
+        // Assemble audio from all parts, skipping the header in each
+        var audioData = Data()
+        for part in parts {
+            let chain     = fatChain(from: Int(part.startBlock), data: data)
+            let audioSize = Int(part.size) - headerSize
+            guard audioSize > 0 else { continue }
+            let audio = readFromChain(chain, fileOffset: headerSize, length: audioSize, data: data)
+            audioData.append(audio)
         }
 
         let header = AkaiSampleHeader(
-            name: entry.name,
+            name: name.isEmpty ? first.name : name,
             sampleRate: sampleRate > 0 ? sampleRate : 44100,
             loopStart: 0,
             loopEnd: numSamples > 0 ? numSamples - 1 : 0,
             numSamples: numSamples,
-            midiRootNote: rootNote,
-            loopEnabled: false,
-            bitDepth: 16,
-            numChannels: max(1, numChannels),
-            fineTune: 0,
-            loudness: 99,
-            rawHeader: Data(data[blockOffset..<min(blockOffset + AkaiDiskFormat.sampleHeaderSize, data.count)])
+            midiRootNote: 60, loopEnabled: false,
+            bitDepth: 16, numChannels: 1,
+            fineTune: 0, loudness: 99,
+            rawHeader: headerData
         )
 
-        let audioStart = blockOffset + AkaiDiskFormat.sampleHeaderSize
-        let audioEnd = min(audioStart + Int(numSamples) * (numChannels > 1 ? 2 : 1) * 2, data.count)
-        let audioData = audioStart < data.count ? Data(data[audioStart..<audioEnd]) : Data()
-
         return AkaiSample(
-            directoryEntry: entry,
-            header: header,
-            audioData: audioData,
-            offset: blockOffset
+            directoryEntry:    first,
+            header:            header,
+            audioData:         audioData,
+            offset:            startBlock * AkaiDiskFormat.blockSize,
+            additionalEntries: Array(parts.dropFirst())
         )
     }
 
     // MARK: - Program Parsing
 
-    private func parseProgram(data: Data, entry: AkaiDirectoryEntry, blockOffset: Int) throws -> AkaiProgramFile {
-        guard blockOffset < data.count else {
-            throw AkaiError.dataError("Program \(entry.name) out of bounds")
-        }
-
-        let end = min(blockOffset + AkaiDiskFormat.sectorSize, data.count)
-        let fileData = data.subdata(in: blockOffset..<end)
+    private func parseProgram(entry: AkaiDirectoryEntry, data: Data) throws -> AkaiProgramFile {
+        let startBlock = Int(entry.startBlock)
+        let chain      = fatChain(from: startBlock, data: data)
+        let fileData   = readFromChain(chain, fileOffset: 0, length: Int(entry.size), data: data)
 
         let midiChannel = fileData.count > 0x0C ? fileData[0x0C] : 0
         let polyphony   = fileData.count > 0x0D ? fileData[0x0D] : 16
         let bendRange   = fileData.count > 0x0E ? fileData[0x0E] : 2
 
         var keyzones: [AkaiProgramKeyzone] = []
-        let keyzoneStart = 0x14
-        let keyzoneSize  = 22
-
-        var kzOffset = keyzoneStart
-        while kzOffset + keyzoneSize <= fileData.count {
-            if fileData[kzOffset] == 0x00 { break }
-            let kzName = akaiString(from: fileData, offset: kzOffset, length: 12)
+        var kzOff = 0x14
+        while kzOff + 22 <= fileData.count {
+            if fileData[kzOff] == 0x00 { break }
+            let kzName = akaiString(from: fileData, offset: kzOff, length: 12)
             keyzones.append(AkaiProgramKeyzone(
-                sampleName: kzName,
-                lowKey:      fileData[kzOffset + 0x0C],
-                highKey:     fileData[kzOffset + 0x0D],
-                rootNote:    fileData[kzOffset + 0x0E],
-                tuneOffset:  Int8(bitPattern: fileData[kzOffset + 0x0F]),
-                fineTune:    Int8(bitPattern: fileData[kzOffset + 0x10]),
-                volume:      fileData[kzOffset + 0x11],
-                pan:         fileData.count > kzOffset + 0x12 ? Int8(bitPattern: fileData[kzOffset + 0x12]) : 0,
-                loopEnabled: fileData.count > kzOffset + 0x13 ? fileData[kzOffset + 0x13] != 0 : false,
-                velocityLow: fileData.count > kzOffset + 0x14 ? fileData[kzOffset + 0x14] : 0,
-                velocityHigh: fileData.count > kzOffset + 0x15 ? fileData[kzOffset + 0x15] : 127
+                sampleName:   kzName,
+                lowKey:       fileData[kzOff + 0x0C],
+                highKey:      fileData[kzOff + 0x0D],
+                rootNote:     fileData[kzOff + 0x0E],
+                tuneOffset:   Int8(bitPattern: fileData[kzOff + 0x0F]),
+                fineTune:     Int8(bitPattern: fileData[kzOff + 0x10]),
+                volume:       fileData[kzOff + 0x11],
+                pan:          fileData.count > kzOff+0x12 ? Int8(bitPattern: fileData[kzOff+0x12]) : 0,
+                loopEnabled:  fileData.count > kzOff+0x13 ? fileData[kzOff+0x13] != 0 : false,
+                velocityLow:  fileData.count > kzOff+0x14 ? fileData[kzOff+0x14] : 0,
+                velocityHigh: fileData.count > kzOff+0x15 ? fileData[kzOff+0x15] : 127
             ))
-            kzOffset += keyzoneSize
+            kzOff += 22
         }
 
         let program = AkaiProgram(
-            name: entry.name,
-            keyzones: keyzones,
-            midiChannel: midiChannel,
-            polyphony: polyphony,
-            bendRange: bendRange,
+            name: entry.name, keyzones: keyzones,
+            midiChannel: midiChannel, polyphony: polyphony, bendRange: bendRange,
             rawData: fileData
         )
-
-        return AkaiProgramFile(directoryEntry: entry, program: program, offset: blockOffset)
+        return AkaiProgramFile(directoryEntry: entry, program: program,
+                               offset: startBlock * AkaiDiskFormat.blockSize)
     }
 
     // MARK: - WAV Export
 
     func exportSampleAsWAV(sample: AkaiSample) throws -> Data {
-        // S3000 audio is 16-bit signed little-endian PCM — same as WAV, no conversion needed
-        return buildWAVFile(
-            pcmData: sample.audioData,
-            sampleRate: sample.header.sampleRate,
-            numChannels: UInt16(sample.header.numChannels),
-            bitsPerSample: 16
-        )
+        // S3000 audio is 16-bit LE PCM — same as WAV, no conversion needed
+        return buildWAV(pcmData: sample.audioData,
+                        sampleRate: sample.header.sampleRate,
+                        numChannels: UInt16(max(1, sample.header.numChannels)),
+                        bitsPerSample: 16)
     }
 
-    private func buildWAVFile(pcmData: Data, sampleRate: UInt32, numChannels: UInt16, bitsPerSample: UInt16) -> Data {
+    private func buildWAV(pcmData: Data, sampleRate: UInt32, numChannels: UInt16, bitsPerSample: UInt16) -> Data {
         var wav = Data()
         let byteRate   = sampleRate * UInt32(numChannels) * UInt32(bitsPerSample) / 8
         let blockAlign = numChannels * bitsPerSample / 8
         let dataSize   = UInt32(pcmData.count)
-
-        wav.append(contentsOf: "RIFF".utf8)
-        wav.appendLE32(36 + dataSize)
+        wav.append(contentsOf: "RIFF".utf8); wav.appendLE32(36 + dataSize)
         wav.append(contentsOf: "WAVE".utf8)
-        wav.append(contentsOf: "fmt ".utf8)
-        wav.appendLE32(16)
-        wav.appendLE16(1)
-        wav.appendLE16(numChannels)
-        wav.appendLE32(sampleRate)
-        wav.appendLE32(byteRate)
-        wav.appendLE16(blockAlign)
-        wav.appendLE16(bitsPerSample)
-        wav.append(contentsOf: "data".utf8)
-        wav.appendLE32(dataSize)
+        wav.append(contentsOf: "fmt ".utf8); wav.appendLE32(16)
+        wav.appendLE16(1); wav.appendLE16(numChannels)
+        wav.appendLE32(sampleRate); wav.appendLE32(byteRate)
+        wav.appendLE16(blockAlign); wav.appendLE16(bitsPerSample)
+        wav.append(contentsOf: "data".utf8); wav.appendLE32(dataSize)
         wav.append(pcmData)
         return wav
     }
@@ -344,58 +437,47 @@ class AkaiDiskImage: ObservableObject {
 
     func importWAVAsSample(wavURL: URL, targetSampleName: String? = nil) throws -> AkaiSample {
         let wavData = try Data(contentsOf: wavURL)
-        let (pcmData, sampleRate, numChannels, bitsPerSample) = try parseWAVFile(wavData)
-        let name = targetSampleName ?? String(wavURL.deletingPathExtension().lastPathComponent.prefix(12).uppercased())
-        let numSamples = UInt32(pcmData.count) / (UInt32(bitsPerSample) / 8 * UInt32(numChannels))
+        let (pcmData, sampleRate, numChannels, _) = try parseWAV(wavData)
+        let name = targetSampleName ??
+            String(wavURL.deletingPathExtension().lastPathComponent.prefix(12).uppercased())
+        let numSamples = UInt32(pcmData.count) / UInt32(numChannels) / 2
 
         let header = AkaiSampleHeader(
-            name: String(name.prefix(12)),
-            sampleRate: UInt32(sampleRate),
-            loopStart: 0,
-            loopEnd: numSamples > 0 ? numSamples - 1 : 0,
-            numSamples: numSamples,
-            midiRootNote: 60,
-            loopEnabled: false,
-            bitDepth: 16,
-            numChannels: Int(numChannels),
-            fineTune: 0,
-            loudness: 99,
+            name: String(name.prefix(12)), sampleRate: UInt32(sampleRate),
+            loopStart: 0, loopEnd: numSamples > 0 ? numSamples - 1 : 0,
+            numSamples: numSamples, midiRootNote: 60, loopEnabled: false,
+            bitDepth: 16, numChannels: numChannels, fineTune: 0, loudness: 99,
             rawHeader: Data(repeating: 0, count: AkaiDiskFormat.sampleHeaderSize)
         )
         let entry = AkaiDirectoryEntry(
-            name: String(name.prefix(12)),
-            fileType: AkaiDiskFormat.fileTypeSample,
-            startBlock: 0,
-            length: UInt32(AkaiDiskFormat.sampleHeaderSize + pcmData.count),
+            name: String(name.prefix(12)), fileType: AkaiDiskFormat.ftypeSample,
+            startBlock: 0, size: UInt32(AkaiDiskFormat.sampleHeaderSize + pcmData.count),
             rawEntry: Data(repeating: 0, count: 24)
         )
         return AkaiSample(directoryEntry: entry, header: header, audioData: pcmData, offset: 0)
     }
 
-    private func parseWAVFile(_ data: Data) throws -> (Data, Int, Int, Int) {
-        guard data.count > 44 else { throw AkaiError.dataError("WAV too small") }
-        guard data[0..<4] == Data("RIFF".utf8) else { throw AkaiError.dataError("Not a RIFF file") }
-        guard data[8..<12] == Data("WAVE".utf8) else { throw AkaiError.dataError("Not a WAVE file") }
-
+    private func parseWAV(_ data: Data) throws -> (Data, Int, Int, Int) {
+        guard data.count > 44,
+              data[0..<4] == Data("RIFF".utf8),
+              data[8..<12] == Data("WAVE".utf8) else {
+            throw AkaiError.dataError("Not a valid WAV file")
+        }
         var offset = 12
-        var sampleRate = 44100
-        var numChannels = 1
-        var bitsPerSample = 16
+        var sampleRate = 44100, numChannels = 1, bitsPerSample = 16
         var pcmData = Data()
-
         while offset + 8 <= data.count {
-            let chunkID   = String(bytes: data[offset..<offset+4], encoding: .ascii) ?? ""
-            let chunkSize = Int(data.readLE32(at: offset + 4))
-            offset += 8
-            if chunkID == "fmt " {
+            let id   = String(bytes: data[offset..<offset+4], encoding: .ascii) ?? ""
+            let size = Int(data.readLE32(at: offset + 4))
+            offset  += 8
+            if id == "fmt " {
                 numChannels   = Int(data.readLE16(at: offset + 2))
                 sampleRate    = Int(data.readLE32(at: offset + 4))
                 bitsPerSample = Int(data.readLE16(at: offset + 14))
-            } else if chunkID == "data" {
-                pcmData = data.subdata(in: offset..<min(offset + chunkSize, data.count))
+            } else if id == "data" {
+                pcmData = data.subdata(in: offset..<min(offset + size, data.count))
             }
-            offset += chunkSize
-            if chunkSize % 2 != 0 { offset += 1 }
+            offset += size + (size % 2)
         }
         guard !pcmData.isEmpty else { throw AkaiError.dataError("No audio data in WAV") }
         return (pcmData, sampleRate, numChannels, bitsPerSample)
@@ -405,11 +487,18 @@ class AkaiDiskImage: ObservableObject {
 
     func writeSampleToImage(sample: AkaiSample) throws {
         guard var data = imageData else { throw AkaiError.noImageLoaded }
+        let chain    = fatChain(from: sample.offset / AkaiDiskFormat.blockSize, data: data)
         let fileData = sample.header.rawHeader + sample.audioData
-        guard sample.offset + fileData.count <= data.count else {
-            throw AkaiError.dataError("Sample too large to fit in current location")
+        let bs = AkaiDiskFormat.blockSize
+        for (i, block) in chain.enumerated() {
+            let srcStart = i * bs
+            guard srcStart < fileData.count else { break }
+            let srcEnd   = min(srcStart + bs, fileData.count)
+            let dstStart = block * bs
+            data.replaceSubrange(dstStart..<dstStart+bs,
+                                 with: fileData[srcStart..<srcEnd] +
+                                       Data(repeating: 0, count: bs - (srcEnd - srcStart)))
         }
-        data.replaceSubrange(sample.offset..<sample.offset + fileData.count, with: fileData)
         imageData = data
         if let url = imageURL { try data.write(to: url) }
     }
@@ -422,50 +511,43 @@ class AkaiDiskImage: ObservableObject {
         if fileData.count > 0x0C { fileData[0x0C] = programFile.program.midiChannel }
         if fileData.count > 0x0D { fileData[0x0D] = programFile.program.polyphony }
         if fileData.count > 0x0E { fileData[0x0E] = programFile.program.bendRange }
-        let keyzoneStart = 0x14
-        let keyzoneSize  = 22
-        for (idx, kz) in programFile.program.keyzones.enumerated() {
-            let kzOffset = keyzoneStart + idx * keyzoneSize
-            guard kzOffset + keyzoneSize <= fileData.count else { break }
-            let kzNameBytes = akaiBytes(from: kz.sampleName, length: 12)
-            for (i, b) in kzNameBytes.enumerated() { fileData[kzOffset + i] = b }
-            fileData[kzOffset + 0x0C] = kz.lowKey
-            fileData[kzOffset + 0x0D] = kz.highKey
-            fileData[kzOffset + 0x0E] = kz.rootNote
-            fileData[kzOffset + 0x0F] = UInt8(bitPattern: kz.tuneOffset)
-            fileData[kzOffset + 0x10] = UInt8(bitPattern: kz.fineTune)
-            fileData[kzOffset + 0x11] = kz.volume
-            if fileData.count > kzOffset + 0x12 { fileData[kzOffset + 0x12] = UInt8(bitPattern: kz.pan) }
-            if fileData.count > kzOffset + 0x13 { fileData[kzOffset + 0x13] = kz.loopEnabled ? 1 : 0 }
-            if fileData.count > kzOffset + 0x14 { fileData[kzOffset + 0x14] = kz.velocityLow }
-            if fileData.count > kzOffset + 0x15 { fileData[kzOffset + 0x15] = kz.velocityHigh }
+        let chain = fatChain(from: programFile.offset / AkaiDiskFormat.blockSize, data: data)
+        let bs    = AkaiDiskFormat.blockSize
+        for (i, block) in chain.enumerated() {
+            let srcStart = i * bs
+            guard srcStart < fileData.count else { break }
+            let srcEnd   = min(srcStart + bs, fileData.count)
+            let dstStart = block * bs
+            data.replaceSubrange(dstStart..<dstStart+bs,
+                                 with: fileData[srcStart..<srcEnd] +
+                                       Data(repeating: 0, count: bs - (srcEnd - srcStart)))
         }
-        guard programFile.offset + fileData.count <= data.count else {
-            throw AkaiError.dataError("Program data out of bounds")
-        }
-        data.replaceSubrange(programFile.offset..<programFile.offset + fileData.count, with: fileData)
         imageData = data
         if let url = imageURL { try data.write(to: url) }
     }
 
-    // MARK: - Akai String Encoding
-    // Confirmed S3000 character set:
-    // 0x00=space, 0x01=A...0x1A=Z, 0x1B=0...0x24=9, 0x25=-, 0x26=+
+    // MARK: - Akai Character Encoding
 
     private func akaiString(from data: Data, offset: Int, length: Int) -> String {
         guard offset + length <= data.count else { return "" }
-        let akaiChars: [Character] = Array(" ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-+")
-        let str = data[offset..<(offset + length)].compactMap { byte -> Character? in
+        // Akai S3000 character set (confirmed):
+        // 0x00=space, 0x01=A, 0x02=B ... 0x1A=Z, 0x1B=0, 0x1C=1 ... 0x24=9, 0x25=-, 0x26=+
+        let table: [Character] = [
+            " ",                                    // 0x00
+            "A","B","C","D","E","F","G","H",       // 0x01-0x08
+            "I","J","K","L","M","N","O","P",       // 0x09-0x10
+            "Q","R","S","T","U","V","W","X",       // 0x11-0x18
+            "Y","Z",                                // 0x19-0x1A
+            "0","1","2","3","4","5","6","7","8","9", // 0x1B-0x24
+            "-","+"                                 // 0x25-0x26
+        ]
+        let str = data[offset..<offset+length].compactMap { byte -> Character? in
             if byte == 0 { return nil }
-            if Int(byte) < akaiChars.count { return akaiChars[Int(byte)] }
-            if byte >= 0x20, let scalar = Unicode.Scalar(byte) { return Character(scalar) }
+            if Int(byte) < table.count { return table[Int(byte)] }
+            if byte >= 0x20 { return Character(UnicodeScalar(byte)) }
             return nil
         }
         return String(str).trimmingCharacters(in: .whitespaces)
-    }
-
-    private func akaiString(from data: Data, offset: Int, length: Int) -> String {
-        akaiString(from: data as Data, offset: offset, length: length)
     }
 
     private func akaiBytes(from string: String, length: Int) -> [UInt8] {
@@ -478,15 +560,12 @@ class AkaiDiskImage: ObservableObject {
 // MARK: - Errors
 
 enum AkaiError: LocalizedError {
-    case invalidImage(String)
-    case dataError(String)
-    case noImageLoaded
-
+    case invalidImage(String), dataError(String), noImageLoaded
     var errorDescription: String? {
         switch self {
         case .invalidImage(let s): return "Invalid image: \(s)"
         case .dataError(let s):    return "Data error: \(s)"
-        case .noImageLoaded:       return "No disk image is loaded"
+        case .noImageLoaded:       return "No disk image loaded"
         }
     }
 }
@@ -494,23 +573,18 @@ enum AkaiError: LocalizedError {
 // MARK: - Data Extensions
 
 extension Data {
-    mutating func appendLE16(_ value: UInt16) {
-        append(UInt8(value & 0xFF))
-        append(UInt8((value >> 8) & 0xFF))
+    mutating func appendLE16(_ v: UInt16) { append(UInt8(v & 0xFF)); append(UInt8(v >> 8)) }
+    mutating func appendLE32(_ v: UInt32) {
+        append(UInt8(v & 0xFF)); append(UInt8((v >> 8) & 0xFF))
+        append(UInt8((v >> 16) & 0xFF)); append(UInt8(v >> 24))
     }
-    mutating func appendLE32(_ value: UInt32) {
-        append(UInt8(value & 0xFF))
-        append(UInt8((value >> 8) & 0xFF))
-        append(UInt8((value >> 16) & 0xFF))
-        append(UInt8((value >> 24) & 0xFF))
+    func readLE16(at i: Int) -> UInt16 {
+        guard i+1 < count else { return 0 }
+        return UInt16(self[i]) | (UInt16(self[i+1]) << 8)
     }
-    func readLE16(at offset: Int) -> UInt16 {
-        guard offset + 1 < count else { return 0 }
-        return UInt16(self[offset]) | (UInt16(self[offset+1]) << 8)
-    }
-    func readLE32(at offset: Int) -> UInt32 {
-        guard offset + 3 < count else { return 0 }
-        return UInt32(self[offset]) | (UInt32(self[offset+1]) << 8) |
-               (UInt32(self[offset+2]) << 16) | (UInt32(self[offset+3]) << 24)
+    func readLE32(at i: Int) -> UInt32 {
+        guard i+3 < count else { return 0 }
+        return UInt32(self[i]) | (UInt32(self[i+1]) << 8) |
+               (UInt32(self[i+2]) << 16) | (UInt32(self[i+3]) << 24)
     }
 }

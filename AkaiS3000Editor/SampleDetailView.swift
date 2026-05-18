@@ -16,6 +16,7 @@ struct SampleDetailView: View {
     @State private var showingSaveAlert = false
     @State private var saveMessage = ""
     @State private var isDirty = false
+    @State private var keyMonitor: Any?
 
     init(sample: AkaiSample, diskImage: AkaiDiskImage) {
         self.sample = sample
@@ -37,7 +38,8 @@ struct SampleDetailView: View {
                     VStack(alignment: .leading, spacing: 4) {
                         Text(sample.header.name.isEmpty ? sample.directoryEntry.name : sample.header.name)
                             .font(.system(.title, design: .monospaced).bold())
-                        Text("Sample · \(formatSize(Int(sample.directoryEntry.length)))")
+                            .textSelection(.enabled)
+                        Text("Sample · \(formatSize(Int(sample.directoryEntry.size)))")
                             .font(.subheadline)
                             .foregroundStyle(.secondary)
                     }
@@ -58,7 +60,7 @@ struct SampleDetailView: View {
                         Image(systemName: isPlaying ? "stop.fill" : "play.fill")
                     }
                     .buttonStyle(.bordered)
-                    .help(isPlaying ? "Stop" : "Preview")
+                    .help(isPlaying ? "Stop (Space)" : "Preview (Space)")
                 }
 
                 // Waveform
@@ -94,7 +96,7 @@ struct SampleDetailView: View {
                                 }
                                 .labelsHidden()
                                 .frame(width: 80)
-                                .onChange(of: editedRootNote) { _ in isDirty = true }
+                                .onChange(of: editedRootNote) { isDirty = true }
                             }
 
                             VStack(alignment: .leading, spacing: 4) {
@@ -107,7 +109,7 @@ struct SampleDetailView: View {
                                         .font(.system(.body, design: .monospaced))
                                 }
                                 Slider(value: $editedFineTune, in: -50...50, step: 1)
-                                    .onChange(of: editedFineTune) { _ in isDirty = true }
+                                    .onChange(of: editedFineTune) { isDirty = true }
                             }
 
                             HStack {
@@ -119,7 +121,7 @@ struct SampleDetailView: View {
                                     .font(.system(.body, design: .monospaced))
                             }
                             Slider(value: $editedLoudness, in: 0...99, step: 1)
-                                .onChange(of: editedLoudness) { _ in isDirty = true }
+                                .onChange(of: editedLoudness) { isDirty = true }
                         }
                     }
                 }
@@ -128,7 +130,7 @@ struct SampleDetailView: View {
                 InfoCard(title: "Loop") {
                     VStack(alignment: .leading, spacing: 12) {
                         Toggle("Loop Enabled", isOn: $editedLoopEnabled)
-                            .onChange(of: editedLoopEnabled) { _ in isDirty = true }
+                            .onChange(of: editedLoopEnabled) { isDirty = true }
 
                         if editedLoopEnabled {
                             let maxSamples = Double(max(sample.header.numSamples, 1))
@@ -143,7 +145,7 @@ struct SampleDetailView: View {
                                         .font(.system(.caption, design: .monospaced))
                                 }
                                 Slider(value: $editedLoopStart, in: 0...max(maxSamples - 1, 1))
-                                    .onChange(of: editedLoopStart) { _ in
+                                    .onChange(of: editedLoopStart) {
                                         if editedLoopStart >= editedLoopEnd { editedLoopEnd = editedLoopStart + 1 }
                                         isDirty = true
                                     }
@@ -159,7 +161,7 @@ struct SampleDetailView: View {
                                         .font(.system(.caption, design: .monospaced))
                                 }
                                 Slider(value: $editedLoopEnd, in: 0...maxSamples)
-                                    .onChange(of: editedLoopEnd) { _ in
+                                    .onChange(of: editedLoopEnd) {
                                         if editedLoopEnd <= editedLoopStart { editedLoopStart = max(0, editedLoopEnd - 1) }
                                         isDirty = true
                                     }
@@ -186,7 +188,13 @@ struct SampleDetailView: View {
             }
             .padding(24)
         }
-        .alert(showingSaveAlert ? "Saved" : "Error", isPresented: .constant(showingSaveAlert || !saveMessage.isEmpty && saveMessage != "OK")) {
+        .onKeyPress(.space) {
+            togglePlayback()
+            return .handled
+        }
+        .focusable()
+        .focused($isFocused)
+        .onAppear { isFocused = true }(showingSaveAlert ? "Saved" : "Error", isPresented: .constant(showingSaveAlert || !saveMessage.isEmpty && saveMessage != "OK")) {
             Button("OK") { saveMessage = ""; showingSaveAlert = false }
         } message: {
             Text(saveMessage)
@@ -358,7 +366,7 @@ struct SampleListView: View {
                     }
                     .width(40)
                     TableColumn("Size") { s in
-                        Text(formatSize(Int(s.directoryEntry.length)))
+                        Text(formatSize(Int(s.directoryEntry.size)))
                             .foregroundStyle(.secondary)
                     }
                     .width(70)

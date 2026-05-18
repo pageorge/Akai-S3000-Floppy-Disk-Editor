@@ -298,8 +298,7 @@ class AkaiDiskImage: ObservableObject {
             }
         }
 
-        return (parsedSamples.sorted { $0.header.name < $1.header.name },
-                parsedPrograms.sorted { $0.program.name < $1.program.name })
+        return (parsedSamples, parsedPrograms)
     }
 
     // MARK: - Sample Parsing
@@ -318,18 +317,8 @@ class AkaiDiskImage: ObservableObject {
         }
 
         let name       = akaiString(from: headerData, offset: AkaiDiskFormat.hdrNameOffset, length: 12)
-        // Always use sample rate from first part's header.
-        // Continuation headers have different bytes at this offset.
-        // Scan all common offsets and take the one that gives a valid rate.
-        let candidateOffsets = [0x22, 0x1A, 0x1C, 0x20, 0x24]
-        let validRates: Set<UInt32> = [11025, 22050, 44100]
-        var sampleRate: UInt32 = 44100
-        for off in candidateOffsets {
-            if off + 1 < headerData.count {
-                let val = UInt32(headerData[off]) | (UInt32(headerData[off+1]) << 8)
-                if validRates.contains(val) { sampleRate = val; break }
-            }
-        }
+        let sampleRate = UInt32(headerData[AkaiDiskFormat.hdrSampleRateOffset]) |
+                         (UInt32(headerData[AkaiDiskFormat.hdrSampleRateOffset + 1]) << 8)
         let numSamples = UInt32(headerData[AkaiDiskFormat.hdrSampleCountOffset]) |
                          (UInt32(headerData[AkaiDiskFormat.hdrSampleCountOffset + 1]) << 8) |
                          (UInt32(headerData[AkaiDiskFormat.hdrSampleCountOffset + 2]) << 16) |
@@ -530,17 +519,7 @@ class AkaiDiskImage: ObservableObject {
 
     private func akaiString(from data: Data, offset: Int, length: Int) -> String {
         guard offset + length <= data.count else { return "" }
-        // Akai S3000 character set (confirmed):
-        // 0x00=space, 0x01=A, 0x02=B ... 0x1A=Z, 0x1B=0, 0x1C=1 ... 0x24=9, 0x25=-, 0x26=+
-        let table: [Character] = [
-            " ",                                    // 0x00
-            "A","B","C","D","E","F","G","H",       // 0x01-0x08
-            "I","J","K","L","M","N","O","P",       // 0x09-0x10
-            "Q","R","S","T","U","V","W","X",       // 0x11-0x18
-            "Y","Z",                                // 0x19-0x1A
-            "0","1","2","3","4","5","6","7","8","9", // 0x1B-0x24
-            "-","+"                                 // 0x25-0x26
-        ]
+        let table: [Character] = Array(" ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-+")
         let str = data[offset..<offset+length].compactMap { byte -> Character? in
             if byte == 0 { return nil }
             if Int(byte) < table.count { return table[Int(byte)] }

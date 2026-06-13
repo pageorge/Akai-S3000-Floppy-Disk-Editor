@@ -2,7 +2,7 @@ import Foundation
 
 // MARK: - Akai S3000 Disk Format Constants
 // All confirmed by reverse engineering real S3000 HD floppy disks and cross-referencing
-// with the akaiutil open-source project (github.com/dialtr/akai-fs).
+// with the akaiutil open-source project (github.com/Midi-In/akaiutil).
 //
 // Physical format:  80 cylinders × 2 heads × 10 sectors × 1024 bytes = 1,638,400 bytes
 // Audio encoding:   16-bit signed little-endian PCM (same as WAV — no conversion needed)
@@ -31,14 +31,11 @@ import Foundation
 //   other  = next block number (16-bit LE)
 //
 // Sample header (252 bytes = 0xFC):
-//   [0x00]       file type (0xF3)
 //   [0x03-0x0E]  name (12 bytes, Akai encoding)
-//   [0x22-0x23]  sample rate (16-bit LE, e.g. 0xAC44 = 44100)
+//   [0x22-0x23]  sample rate (16-bit LE) — unreliable on some samples, also check 0x8A
 //   [0x58-0x5B]  sample count (32-bit LE)
+//   [0x8A-0x8B]  sample rate (16-bit LE) — more reliable location
 //   [0xFC]       audio data begins
-//
-// Large samples are split into multiple directory entries, each with its own FAT chain.
-// All parts after the first also begin with a 0xFC-byte header that must be skipped.
 
 struct AkaiDiskFormat {
     static let blockSize            = 1024
@@ -64,8 +61,10 @@ struct AkaiDiskFormat {
     static let sampleHeaderSize     = 0xFC
 
     static let hdrNameOffset        = 0x03
-    static let hdrSampleRateOffset  = 0x22
     static let hdrSampleCountOffset = 0x58
+    // Sample rate scan order — 0x8A is most reliable, 0x22 is the documented location
+    static let hdrSampleRateOffsets = [0x8A, 0x22, 0x1A, 0x1C, 0x20, 0x24]
+    static let validSampleRates: Set<UInt32> = [11025, 22050, 44100]
 }
 
 // MARK: - Data Model
@@ -261,7 +260,8 @@ class AkaiDiskImage: ObservableObject {
             } else if entry.isSample {
                 if processedNames.contains(entry.name) { continue }
                 processedNames.insert(entry.name)
-                let parts = entries.filter { $0.isSample && $0.name == entry.name }.sorted { $0.startBlock < $1.startBlock }
+                let parts = entries.filter { $0.isSample && $0.name == entry.name }
+                    .sorted { $0.startBlock < $1.startBlock }
                 if let sample = try? parseSample(parts: parts, data: data) { parsedSamples.append(sample) }
             }
         }
@@ -284,13 +284,13 @@ class AkaiDiskImage: ObservableObject {
 
         let name = akaiString(from: headerData, offset: AkaiDiskFormat.hdrNameOffset, length: 12)
 
-        // Always use sample rate from first part's header; scan common offsets for a valid rate
-        let validRates: Set<UInt32> = [11025, 22050, 44100]
+        // Scan known offsets in priority order for a valid sample rate.
+        // 0x8A is the most reliable location; 0x22 is documented but unreliable on some samples.
         var sampleRate: UInt32 = 44100
-        for off in [0x22, 0x1A, 0x1C, 0x20, 0x24] {
+        for off in AkaiDiskFormat.hdrSampleRateOffsets {
             if off + 1 < headerData.count {
                 let val = UInt32(headerData[off]) | (UInt32(headerData[off+1]) << 8)
-                if validRates.contains(val) { sampleRate = val; break }
+                if AkaiDiskFormat.validSampleRates.contains(val) { sampleRate = val; break }
             }
         }
 
@@ -462,10 +462,7 @@ class AkaiDiskImage: ObservableObject {
     //   0-9   → '0'-'9'
     //   10    → ' ' (space)
     //   11-36 → 'A'-'Z'
-    //   37    → '#'
-    //   38    → '+'
-    //   39    → '-'
-    //   40    → '.'
+    //   37    → '#', 38 → '+', 39 → '-', 40 → '.'
 
     private func akaiString(from data: Data, offset: Int, length: Int) -> String {
         guard offset + length <= data.count else { return "" }

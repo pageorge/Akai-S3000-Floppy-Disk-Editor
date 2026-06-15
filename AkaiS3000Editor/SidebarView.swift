@@ -43,8 +43,7 @@ struct SidebarView: View {
                                     sampleToDelete = sample
                                     showDeleteConfirm = true
                                 } label: {
-                                    let name = sample.header.name.isEmpty ? sample.directoryEntry.name : sample.header.name
-                                    Label("Delete \"\(name)\"", systemImage: "trash")
+                                    Label("Delete \"" + (sample.header.name.isEmpty ? sample.directoryEntry.name : sample.header.name) + "\"", systemImage: "trash")
                                 }
                             }
                     }

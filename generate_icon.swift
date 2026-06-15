@@ -10,23 +10,22 @@ func drawIcon(size: CGFloat) -> NSImage {
 
     let s = size
     let r = s * 0.18
-    let border = s * 0.06
+    let border = s * 0.035  // thinner border
 
-    // Clip everything to rounded rect
     let clip = NSBezierPath(roundedRect: NSRect(x: 0, y: 0, width: s, height: s), xRadius: r, yRadius: r)
     clip.addClip()
 
-    // Red fills entire canvas = border colour
+    // Red fills entire canvas
     red.setFill()
     NSBezierPath(rect: NSRect(x: 0, y: 0, width: s, height: s)).fill()
 
-    // Dark inset rect = the actual content area, giving uniform red border
+    // Dark inset = uniform red border all round
     let inset = border
     dark.setFill()
     NSBezierPath(roundedRect: NSRect(x: inset, y: inset, width: s-inset*2, height: s-inset*2),
                  xRadius: r - inset, yRadius: r - inset).fill()
 
-    // Floppy disk body
+    // Floppy disk
     let fx = s*0.10, fy = s*0.28, fw = s*0.26, fh = s*0.34
     red.setFill()
     NSBezierPath(roundedRect: NSRect(x: fx, y: fy, width: fw, height: fh), xRadius: s*0.02, yRadius: s*0.02).fill()
@@ -38,26 +37,21 @@ func drawIcon(size: CGFloat) -> NSImage {
     NSBezierPath(ovalIn: NSRect(x: fx+fw*0.43, y: fy+fh*0.69, width: fw*0.14, height: fw*0.14)).fill()
 
     // AKAI text
-    let akaiSize = s * 0.24
     let akaiAttrs: [NSAttributedString.Key: Any] = [
-        .font: NSFont.boldSystemFont(ofSize: akaiSize),
+        .font: NSFont.boldSystemFont(ofSize: s * 0.24),
         .foregroundColor: NSColor.white
     ]
     let akaiStr = NSAttributedString(string: "AKAI", attributes: akaiAttrs)
-    let akaiW = akaiStr.size().width
-    let rightStart = s * 0.40
-    let rightWidth = s * 0.52
-    akaiStr.draw(at: NSPoint(x: rightStart + (rightWidth - akaiW) / 2, y: s*0.52))
+    let rightStart = s * 0.40, rightWidth = s * 0.52
+    akaiStr.draw(at: NSPoint(x: rightStart + (rightWidth - akaiStr.size().width) / 2, y: s*0.52))
 
     // S3000 text
-    let s3Size = s * 0.13
     let s3Attrs: [NSAttributedString.Key: Any] = [
-        .font: NSFont.boldSystemFont(ofSize: s3Size),
+        .font: NSFont.boldSystemFont(ofSize: s * 0.13),
         .foregroundColor: red
     ]
     let s3Str = NSAttributedString(string: "S3000", attributes: s3Attrs)
-    let s3W = s3Str.size().width
-    s3Str.draw(at: NSPoint(x: rightStart + (rightWidth - s3W) / 2, y: s*0.37))
+    s3Str.draw(at: NSPoint(x: rightStart + (rightWidth - s3Str.size().width) / 2, y: s*0.37))
 
     // Waveform along bottom
     let wavePath = NSBezierPath()
@@ -102,7 +96,5 @@ let outputDir = CommandLine.arguments.count > 1
     ? CommandLine.arguments[1]
     : FileManager.default.currentDirectoryPath
 
-for (size, filename) in sizes {
-    savePNG(drawIcon(size: size), to: "\(outputDir)/\(filename)")
-}
+for (size, filename) in sizes { savePNG(drawIcon(size: size), to: "\(outputDir)/\(filename)") }
 print("Done!")

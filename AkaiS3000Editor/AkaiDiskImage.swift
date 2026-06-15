@@ -418,6 +418,10 @@ class AkaiDiskImage: ObservableObject {
         return (pcmData, sampleRate, numChannels, bitsPerSample)
     }
 
+    func deleteSample(id: UUID) {
+        samples.removeAll { $0.id == id }
+    }
+
     // MARK: - Write Back
 
     func writeSampleToImage(sample: AkaiSample) throws {

@@ -53,7 +53,13 @@ struct SampleDetailView: View {
                     .help(isPlaying ? "Stop (Space)" : "Preview (Space)")
                 }
 
-                WaveformView(audioData: sample.audioData)
+                WaveformView(
+                    audioData: sample.audioData,
+                    numSamples: Int(sample.header.numSamples),
+                    loopEnabled: editedLoopEnabled,
+                    loopStart: $editedLoopStart,
+                    loopEnd: $editedLoopEnd
+                )
                     .frame(height: 120)
                     .clipShape(RoundedRectangle(cornerRadius: 8))
 
@@ -100,7 +106,7 @@ struct SampleDetailView: View {
 
                 InfoCard(title: "Loop") {
                     VStack(alignment: .leading, spacing: 12) {
-                        Toggle("Loop Enabled", isOn: $editedLoopEnabled)
+                        Toggle("Loop", isOn: $editedLoopEnabled)
                             .onChange(of: editedLoopEnabled) { isDirty = true }
                         if editedLoopEnabled {
                             let maxSamples = Double(max(sample.header.numSamples, 1))
@@ -182,10 +188,14 @@ struct SampleDetailView: View {
         do {
             let wavData = try diskImage.exportSampleAsWAV(sample: sample)
             audioPlayer = try AVAudioPlayer(data: wavData)
+            audioPlayer?.numberOfLoops = editedLoopEnabled ? -1 : 0  // -1 = loop forever
             audioPlayer?.play()
             isPlaying = true
-            DispatchQueue.main.asyncAfter(deadline: .now() + (audioPlayer?.duration ?? 1) + 0.1) {
-                isPlaying = false
+            // Only auto-stop when not looping
+            if !editedLoopEnabled {
+                DispatchQueue.main.asyncAfter(deadline: .now() + (audioPlayer?.duration ?? 1) + 0.1) {
+                    self.isPlaying = false
+                }
             }
         } catch {}
     }

@@ -4,44 +4,85 @@ import SwiftUI
 
 struct WaveformView: View {
     let audioData: Data
+    let numSamples: Int
+    let loopEnabled: Bool
+    let loopStart: Binding<Double>?
+    let loopEnd: Binding<Double>?
     @State private var waveformPoints: [CGFloat] = []
+
+    init(audioData: Data, numSamples: Int = 0, loopEnabled: Bool = false,
+         loopStart: Binding<Double>? = nil, loopEnd: Binding<Double>? = nil) {
+        self.audioData = audioData
+        self.numSamples = numSamples
+        self.loopEnabled = loopEnabled
+        self.loopStart = loopStart
+        self.loopEnd = loopEnd
+    }
 
     var body: some View {
         GeometryReader { geo in
             ZStack {
                 LinearGradient(
                     colors: [Color(nsColor: .controlBackgroundColor), Color(nsColor: .windowBackgroundColor)],
-                    startPoint: .top,
-                    endPoint: .bottom
+                    startPoint: .top, endPoint: .bottom
                 )
 
                 if waveformPoints.isEmpty {
-                    Text("No audio data")
-                        .font(.caption)
-                        .foregroundStyle(.tertiary)
+                    Text("No audio data").font(.caption).foregroundStyle(.tertiary)
                 } else {
-                    Rectangle()
-                        .fill(Color.secondary.opacity(0.15))
-                        .frame(height: 1)
+                    Rectangle().fill(Color.secondary.opacity(0.15)).frame(height: 1)
 
                     WaveformShape(points: waveformPoints)
-                        .fill(
-                            LinearGradient(
-                                colors: [Color.blue.opacity(0.8), Color.blue.opacity(0.4)],
-                                startPoint: .top,
-                                endPoint: .bottom
-                            )
-                        )
+                        .fill(LinearGradient(
+                            colors: [Color.blue.opacity(0.8), Color.blue.opacity(0.4)],
+                            startPoint: .top, endPoint: .bottom))
 
                     WaveformShape(points: waveformPoints)
-                        .fill(
-                            LinearGradient(
-                                colors: [Color.blue.opacity(0.4), Color.blue.opacity(0.1)],
-                                startPoint: .top,
-                                endPoint: .bottom
-                            )
-                        )
+                        .fill(LinearGradient(
+                            colors: [Color.blue.opacity(0.4), Color.blue.opacity(0.1)],
+                            startPoint: .top, endPoint: .bottom))
                         .scaleEffect(x: 1, y: -1)
+
+                    // Loop region overlay
+                    if loopEnabled, numSamples > 0,
+                       let startBinding = loopStart, let endBinding = loopEnd {
+                        let startFrac = CGFloat(startBinding.wrappedValue) / CGFloat(numSamples)
+                        let endFrac   = CGFloat(endBinding.wrappedValue)   / CGFloat(numSamples)
+                        let startX    = startFrac * geo.size.width
+                        let endX      = endFrac   * geo.size.width
+
+                        // Shaded loop region
+                        Rectangle()
+                            .fill(Color.green.opacity(0.15))
+                            .frame(width: max(0, endX - startX))
+                            .offset(x: startX - geo.size.width / 2 + (endX - startX) / 2)
+
+                        // Loop start handle
+                        LoopHandle(color: .green, label: "S")
+                            .offset(x: startX - geo.size.width / 2)
+                            .gesture(DragGesture(minimumDistance: 0)
+                                .onChanged { value in
+                                    let frac = max(0, min(1, value.location.x / geo.size.width))
+                                    let newVal = frac * Double(numSamples)
+                                    if newVal < endBinding.wrappedValue {
+                                        startBinding.wrappedValue = newVal
+                                    }
+                                }
+                            )
+
+                        // Loop end handle
+                        LoopHandle(color: .red, label: "E")
+                            .offset(x: endX - geo.size.width / 2)
+                            .gesture(DragGesture(minimumDistance: 0)
+                                .onChanged { value in
+                                    let frac = max(0, min(1, value.location.x / geo.size.width))
+                                    let newVal = frac * Double(numSamples)
+                                    if newVal > startBinding.wrappedValue {
+                                        endBinding.wrappedValue = newVal
+                                    }
+                                }
+                            )
+                    }
                 }
             }
             .onAppear { computeWaveform(width: geo.size.width) }
@@ -53,7 +94,7 @@ struct WaveformView: View {
         guard !audioData.isEmpty else { return }
         let buckets = Int(width * 2)
         guard buckets > 0 else { return }
-        let localData = audioData  // capture local copy for thread safety
+        let localData = audioData
 
         DispatchQueue.global(qos: .userInitiated).async {
             let samplesPerBucket = max(1, (localData.count / 2) / buckets)
@@ -76,6 +117,38 @@ struct WaveformView: View {
             }
 
             DispatchQueue.main.async { self.waveformPoints = points }
+        }
+    }
+}
+
+// MARK: - Loop Handle
+
+struct LoopHandle: View {
+    let color: Color
+    let label: String
+
+    var body: some View {
+        VStack(spacing: 0) {
+            Text(label)
+                .font(.system(size: 8, weight: .bold))
+                .foregroundStyle(.white)
+                .frame(width: 14, height: 14)
+                .background(color)
+                .clipShape(RoundedRectangle(cornerRadius: 3))
+            Rectangle()
+                .fill(color)
+                .frame(width: 2)
+                .frame(maxHeight: .infinity)
+        }
+        .frame(width: 14)
+        .cursor(.resizeLeftRight)
+    }
+}
+
+extension View {
+    func cursor(_ cursor: NSCursor) -> some View {
+        self.onHover { inside in
+            if inside { cursor.push() } else { NSCursor.pop() }
         }
     }
 }

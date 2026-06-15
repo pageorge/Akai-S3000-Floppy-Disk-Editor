@@ -6,6 +6,10 @@ struct SidebarView: View {
     @Binding var selectedSampleID: UUID?
     @Binding var selectedProgramID: UUID?
 
+    @State private var sampleToDelete: AkaiSample? = nil
+    @State private var showDeleteConfirm = false
+    @State private var deleteKeyMonitor: Any? = nil
+
     var body: some View {
         List {
             if diskImage.isLoaded {
@@ -14,57 +18,52 @@ struct SidebarView: View {
                     EmptyView()
                 } header: {
                     HStack {
-                        Image(systemName: "internaldrive.fill")
-                            .foregroundStyle(.red)
+                        Image(systemName: "internaldrive.fill").foregroundStyle(.red)
                         Text(diskImage.diskName.isEmpty ? "Akai Disk" : diskImage.diskName)
-                            .font(.headline)
-                            .lineLimit(1)
+                            .font(.headline).lineLimit(1)
                     }
                     .padding(.vertical, 4)
                 }
 
                 Section {
                     ForEach(diskImage.samples) { sample in
-                        SidebarSampleRow(
-                            sample: sample,
-                            isSelected: selectedSampleID == sample.id
-                        )
-                        .contentShape(Rectangle())
-                        .onTapGesture {
-                            selectedTab = .samples
-                            selectedSampleID = sample.id
-                        }
+                        SidebarSampleRow(sample: sample, isSelected: selectedSampleID == sample.id)
+                            .contentShape(Rectangle())
+                            .onTapGesture {
+                                selectedTab = .samples
+                                selectedSampleID = sample.id
+                            }
+                            .contextMenu {
+                                Button(role: .destructive) {
+                                    sampleToDelete = sample
+                                    showDeleteConfirm = true
+                                } label: {
+                                    let name = sample.header.name.isEmpty ? sample.directoryEntry.name : sample.header.name
+                                    Label("Delete \"\(name)\"", systemImage: "trash")
+                                }
+                            }
                     }
                 } header: {
                     Label("Samples (\(diskImage.samples.count))", systemImage: "waveform")
                         .font(.subheadline.weight(.semibold))
                         .foregroundStyle(.secondary)
-                        .onTapGesture {
-                            selectedTab = .samples
-                            selectedSampleID = nil
-                        }
+                        .onTapGesture { selectedTab = .samples; selectedSampleID = nil }
                 }
 
                 Section {
                     ForEach(diskImage.programs) { prog in
-                        SidebarProgramRow(
-                            program: prog,
-                            isSelected: selectedProgramID == prog.id
-                        )
-                        .contentShape(Rectangle())
-                        .onTapGesture {
-                            selectedTab = .programs
-                            selectedProgramID = prog.id
-                        }
+                        SidebarProgramRow(program: prog, isSelected: selectedProgramID == prog.id)
+                            .contentShape(Rectangle())
+                            .onTapGesture {
+                                selectedTab = .programs
+                                selectedProgramID = prog.id
+                            }
                     }
                 } header: {
                     Label("Programs (\(diskImage.programs.count))", systemImage: "pianokeys")
                         .font(.subheadline.weight(.semibold))
                         .foregroundStyle(.secondary)
-                        .onTapGesture {
-                            selectedTab = .programs
-                            selectedProgramID = nil
-                        }
+                        .onTapGesture { selectedTab = .programs; selectedProgramID = nil }
                 }
 
                 Section {
@@ -78,14 +77,45 @@ struct SidebarView: View {
                     Label("No Disk Loaded", systemImage: "externaldrive.badge.questionmark")
                         .foregroundStyle(.secondary)
                     Text("Open a .img file to begin")
-                        .font(.caption)
-                        .foregroundStyle(.tertiary)
+                        .font(.caption).foregroundStyle(.tertiary)
                 }
                 .padding(.vertical, 8)
             }
         }
         .listStyle(.sidebar)
         .navigationTitle("S3000 Editor")
+        .onAppear {
+            deleteKeyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
+                // Delete (51) or Forward Delete (117)
+                if (event.keyCode == 51 || event.keyCode == 117),
+                   let id = self.selectedSampleID,
+                   let sample = self.diskImage.samples.first(where: { $0.id == id }) {
+                    self.sampleToDelete = sample
+                    self.showDeleteConfirm = true
+                    return nil
+                }
+                return event
+            }
+        }
+        .onDisappear {
+            if let m = deleteKeyMonitor { NSEvent.removeMonitor(m); deleteKeyMonitor = nil }
+        }
+        .confirmationDialog(
+            "Delete \"\(sampleToDelete.map { $0.header.name.isEmpty ? $0.directoryEntry.name : $0.header.name } ?? "")\"?",
+            isPresented: $showDeleteConfirm,
+            titleVisibility: .visible
+        ) {
+            Button("Delete Sample", role: .destructive) {
+                if let sample = sampleToDelete {
+                    diskImage.deleteSample(id: sample.id)
+                    if selectedSampleID == sample.id { selectedSampleID = nil }
+                    sampleToDelete = nil
+                }
+            }
+            Button("Cancel", role: .cancel) { sampleToDelete = nil }
+        } message: {
+            Text("This removes the sample from the list. The disk image file is not modified until you save.")
+        }
     }
 }
 
@@ -111,10 +141,7 @@ struct SidebarSampleRow: View {
         .padding(.vertical, 3)
         .padding(.horizontal, 8)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(
-            RoundedRectangle(cornerRadius: 6)
-                .fill(isSelected ? Color.red : Color.clear)
-        )
+        .background(RoundedRectangle(cornerRadius: 6).fill(isSelected ? Color.red : Color.clear))
         .listRowInsets(EdgeInsets(top: 2, leading: 4, bottom: 2, trailing: 4))
     }
 
@@ -146,10 +173,7 @@ struct SidebarProgramRow: View {
         .padding(.vertical, 3)
         .padding(.horizontal, 8)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(
-            RoundedRectangle(cornerRadius: 6)
-                .fill(isSelected ? Color.purple : Color.clear)
-        )
+        .background(RoundedRectangle(cornerRadius: 6).fill(isSelected ? Color.purple : Color.clear))
         .listRowInsets(EdgeInsets(top: 2, leading: 4, bottom: 2, trailing: 4))
     }
 }

@@ -59,12 +59,11 @@ struct SidebarView: View {
 
                 Section {
                     ForEach(diskImage.programs) { prog in
-                        SidebarProgramRow(program: prog, isSelected: selectedProgramID == prog.id)
-                            .contentShape(Rectangle())
-                            .onTapGesture {
-                                selectedTab = .programs
-                                selectedProgramID = prog.id
-                            }
+                        SidebarProgramRow(
+                            program: prog,
+                            isSelected: selectedProgramID == prog.id,
+                            onTap: { selectedTab = .programs; selectedProgramID = prog.id }
+                        )
                     }
                 } header: {
                     Label("Programs (\(diskImage.programs.count))", systemImage: "pianokeys")
@@ -173,6 +172,11 @@ struct SidebarSampleRow: View {
 struct SidebarProgramRow: View {
     let program: AkaiProgramFile
     let isSelected: Bool
+    let onTap: () -> Void
+
+    private var displayName: String {
+        program.program.name.isEmpty ? program.directoryEntry.name : program.program.name
+    }
 
     var body: some View {
         HStack(spacing: 8) {
@@ -180,7 +184,7 @@ struct SidebarProgramRow: View {
                 .foregroundStyle(isSelected ? .white : .purple)
                 .font(.system(size: 14))
             VStack(alignment: .leading, spacing: 1) {
-                Text(program.program.name.isEmpty ? program.directoryEntry.name : program.program.name)
+                Text(displayName)
                     .font(.system(.body, design: .monospaced))
                     .lineLimit(1)
                     .foregroundStyle(isSelected ? .white : .primary)
@@ -194,5 +198,7 @@ struct SidebarProgramRow: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(RoundedRectangle(cornerRadius: 6).fill(isSelected ? Color.purple : Color.clear))
         .listRowInsets(EdgeInsets(top: 2, leading: 4, bottom: 2, trailing: 4))
+        .contentShape(Rectangle())
+        .onTapGesture { onTap() }
     }
 }

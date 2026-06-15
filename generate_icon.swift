@@ -10,38 +10,34 @@ func drawIcon(size: CGFloat) -> NSImage {
 
     let s = size
     let r = s * 0.18
+    let border = s * 0.06
 
-    // Clip everything to the rounded rect
+    // Clip everything to rounded rect
     let clip = NSBezierPath(roundedRect: NSRect(x: 0, y: 0, width: s, height: s), xRadius: r, yRadius: r)
     clip.addClip()
 
-    // Dark background
-    dark.setFill()
+    // Red fills entire canvas = border colour
+    red.setFill()
     NSBezierPath(rect: NSRect(x: 0, y: 0, width: s, height: s)).fill()
 
-    // Red border bars — inside the clip so corners are clean
-    let bar = s * 0.05
-    red.setFill()
-    NSBezierPath(rect: NSRect(x: 0, y: s-bar, width: s, height: bar)).fill()  // top
-    NSBezierPath(rect: NSRect(x: 0, y: 0,     width: s, height: bar)).fill()  // bottom
-    NSBezierPath(rect: NSRect(x: 0, y: 0,     width: bar, height: s)).fill()  // left
-    NSBezierPath(rect: NSRect(x: s-bar, y: 0, width: bar, height: s)).fill()  // right
+    // Dark inset rect = the actual content area, giving uniform red border
+    let inset = border
+    dark.setFill()
+    NSBezierPath(roundedRect: NSRect(x: inset, y: inset, width: s-inset*2, height: s-inset*2),
+                 xRadius: r - inset, yRadius: r - inset).fill()
 
     // Floppy disk body
-    let fx = s*0.08, fy = s*0.28, fw = s*0.26, fh = s*0.34
+    let fx = s*0.10, fy = s*0.28, fw = s*0.26, fh = s*0.34
     red.setFill()
     NSBezierPath(roundedRect: NSRect(x: fx, y: fy, width: fw, height: fh), xRadius: s*0.02, yRadius: s*0.02).fill()
-    // Label area
     NSColor(red: 0.12, green: 0.12, blue: 0.12, alpha: 1).setFill()
     NSBezierPath(roundedRect: NSRect(x: fx+fw*0.08, y: fy+fh*0.54, width: fw*0.84, height: fh*0.38), xRadius: s*0.01, yRadius: s*0.01).fill()
-    // Shutter slot
     NSBezierPath(roundedRect: NSRect(x: fx+fw*0.22, y: fy+fh*0.08, width: fw*0.56, height: fh*0.07), xRadius: s*0.005, yRadius: s*0.005).fill()
-    // Hub
     NSBezierPath(ovalIn: NSRect(x: fx+fw*0.36, y: fy+fh*0.62, width: fw*0.28, height: fw*0.28)).fill()
     red.setFill()
     NSBezierPath(ovalIn: NSRect(x: fx+fw*0.43, y: fy+fh*0.69, width: fw*0.14, height: fw*0.14)).fill()
 
-    // AKAI text — centred in right portion
+    // AKAI text
     let akaiSize = s * 0.24
     let akaiAttrs: [NSAttributedString.Key: Any] = [
         .font: NSFont.boldSystemFont(ofSize: akaiSize),
@@ -49,8 +45,8 @@ func drawIcon(size: CGFloat) -> NSImage {
     ]
     let akaiStr = NSAttributedString(string: "AKAI", attributes: akaiAttrs)
     let akaiW = akaiStr.size().width
-    let rightStart = s * 0.38
-    let rightWidth = s * 0.56
+    let rightStart = s * 0.40
+    let rightWidth = s * 0.52
     akaiStr.draw(at: NSPoint(x: rightStart + (rightWidth - akaiW) / 2, y: s*0.52))
 
     // S3000 text
@@ -69,12 +65,12 @@ func drawIcon(size: CGFloat) -> NSImage {
     wavePath.lineCapStyle = .round
     wavePath.lineJoinStyle = .round
     let pts: [(CGFloat,CGFloat)] = [
-        (0.08,0.20),(0.17,0.11),(0.26,0.22),(0.35,0.07),(0.44,0.18),
-        (0.53,0.04),(0.62,0.15),(0.71,0.09),(0.80,0.17),(0.90,0.11)
+        (0.10,0.20),(0.19,0.11),(0.28,0.22),(0.37,0.07),(0.46,0.18),
+        (0.55,0.04),(0.64,0.15),(0.73,0.09),(0.82,0.17),(0.90,0.11)
     ]
     wavePath.move(to: NSPoint(x: s*pts[0].0, y: s*pts[0].1))
     for p in pts.dropFirst() { wavePath.line(to: NSPoint(x: s*p.0, y: s*p.1)) }
-    red.withAlphaComponent(0.7).setStroke()
+    red.withAlphaComponent(0.8).setStroke()
     wavePath.stroke()
 
     img.unlockFocus()

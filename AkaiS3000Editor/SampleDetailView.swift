@@ -33,7 +33,6 @@ struct SampleDetailView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 24) {
 
-                // Header
                 HStack {
                     VStack(alignment: .leading, spacing: 4) {
                         Text(sample.header.name.isEmpty ? sample.directoryEntry.name : sample.header.name)
@@ -44,35 +43,23 @@ struct SampleDetailView: View {
                             .foregroundStyle(.secondary)
                     }
                     Spacer()
-
-                    // Export button
-                    Button {
-                        exportWAV()
-                    } label: {
+                    Button { exportWAV() } label: {
                         Label("Export WAV", systemImage: "square.and.arrow.up")
-                    }
-                    .buttonStyle(.borderedProminent)
-
-                    // Play button
-                    Button {
-                        togglePlayback()
-                    } label: {
+                    }.buttonStyle(.borderedProminent)
+                    Button { togglePlayback() } label: {
                         Image(systemName: isPlaying ? "stop.fill" : "play.fill")
                     }
                     .buttonStyle(.bordered)
                     .help(isPlaying ? "Stop (Space)" : "Preview (Space)")
                 }
 
-                // Waveform
                 WaveformView(audioData: sample.audioData)
                     .frame(height: 120)
                     .clipShape(RoundedRectangle(cornerRadius: 8))
 
                 Divider()
 
-                // Properties grid
                 LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 20) {
-                    // Sample info
                     InfoCard(title: "Sample Info") {
                         InfoRow(label: "Sample Rate", value: "\(sample.header.sampleRate) Hz")
                         InfoRow(label: "Duration", value: formatDuration())
@@ -80,45 +67,30 @@ struct SampleDetailView: View {
                         InfoRow(label: "Bit Depth", value: "\(sample.header.bitDepth)-bit")
                         InfoRow(label: "Samples", value: "\(sample.header.numSamples)")
                     }
-
-                    // Pitch settings (editable)
                     InfoCard(title: "Pitch") {
                         VStack(alignment: .leading, spacing: 12) {
                             HStack {
-                                Text("Root Note")
-                                    .font(.subheadline)
-                                    .foregroundStyle(.secondary)
+                                Text("Root Note").font(.subheadline).foregroundStyle(.secondary)
                                 Spacer()
                                 Picker("", selection: $editedRootNote) {
-                                    ForEach(0..<128) { note in
-                                        Text(midiNoteName(UInt8(note))).tag(note)
-                                    }
+                                    ForEach(0..<128) { note in Text(midiNoteName(UInt8(note))).tag(note) }
                                 }
-                                .labelsHidden()
-                                .frame(width: 80)
+                                .labelsHidden().frame(width: 80)
                                 .onChange(of: editedRootNote) { isDirty = true }
                             }
-
                             VStack(alignment: .leading, spacing: 4) {
                                 HStack {
-                                    Text("Fine Tune")
-                                        .font(.subheadline)
-                                        .foregroundStyle(.secondary)
+                                    Text("Fine Tune").font(.subheadline).foregroundStyle(.secondary)
                                     Spacer()
-                                    Text("\(Int(editedFineTune))¢")
-                                        .font(.system(.body, design: .monospaced))
+                                    Text("\(Int(editedFineTune))¢").font(.system(.body, design: .monospaced))
                                 }
                                 Slider(value: $editedFineTune, in: -50...50, step: 1)
                                     .onChange(of: editedFineTune) { isDirty = true }
                             }
-
                             HStack {
-                                Text("Loudness")
-                                    .font(.subheadline)
-                                    .foregroundStyle(.secondary)
+                                Text("Loudness").font(.subheadline).foregroundStyle(.secondary)
                                 Spacer()
-                                Text("\(Int(editedLoudness))")
-                                    .font(.system(.body, design: .monospaced))
+                                Text("\(Int(editedLoudness))").font(.system(.body, design: .monospaced))
                             }
                             Slider(value: $editedLoudness, in: 0...99, step: 1)
                                 .onChange(of: editedLoudness) { isDirty = true }
@@ -126,23 +98,17 @@ struct SampleDetailView: View {
                     }
                 }
 
-                // Loop settings
                 InfoCard(title: "Loop") {
                     VStack(alignment: .leading, spacing: 12) {
                         Toggle("Loop Enabled", isOn: $editedLoopEnabled)
                             .onChange(of: editedLoopEnabled) { isDirty = true }
-
                         if editedLoopEnabled {
                             let maxSamples = Double(max(sample.header.numSamples, 1))
-
                             VStack(alignment: .leading, spacing: 4) {
                                 HStack {
-                                    Text("Loop Start")
-                                        .font(.subheadline)
-                                        .foregroundStyle(.secondary)
+                                    Text("Loop Start").font(.subheadline).foregroundStyle(.secondary)
                                     Spacer()
-                                    Text("\(Int(editedLoopStart))")
-                                        .font(.system(.caption, design: .monospaced))
+                                    Text("\(Int(editedLoopStart))").font(.system(.caption, design: .monospaced))
                                 }
                                 Slider(value: $editedLoopStart, in: 0...max(maxSamples - 1, 1))
                                     .onChange(of: editedLoopStart) {
@@ -150,15 +116,11 @@ struct SampleDetailView: View {
                                         isDirty = true
                                     }
                             }
-
                             VStack(alignment: .leading, spacing: 4) {
                                 HStack {
-                                    Text("Loop End")
-                                        .font(.subheadline)
-                                        .foregroundStyle(.secondary)
+                                    Text("Loop End").font(.subheadline).foregroundStyle(.secondary)
                                     Spacer()
-                                    Text("\(Int(editedLoopEnd))")
-                                        .font(.system(.caption, design: .monospaced))
+                                    Text("\(Int(editedLoopEnd))").font(.system(.caption, design: .monospaced))
                                 }
                                 Slider(value: $editedLoopEnd, in: 0...maxSamples)
                                     .onChange(of: editedLoopEnd) {
@@ -170,38 +132,33 @@ struct SampleDetailView: View {
                     }
                 }
 
-                // Save changes button
                 if isDirty {
                     HStack {
                         Spacer()
-                        Button("Revert") {
-                            revert()
-                        }
-                        .buttonStyle(.bordered)
-
-                        Button("Save to Disk Image") {
-                            saveChanges()
-                        }
-                        .buttonStyle(.borderedProminent)
+                        Button("Revert") { revert() }.buttonStyle(.bordered)
+                        Button("Save to Disk Image") { saveChanges() }.buttonStyle(.borderedProminent)
                     }
                 }
             }
             .padding(24)
         }
-        .onKeyPress(.space) {
-            togglePlayback()
-            return .handled
+        .onAppear {
+            keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
+                if event.keyCode == 49 { self.togglePlayback(); return nil }
+                return event
+            }
         }
-        .focusable()
-        .focused($isFocused)
-        .onAppear { isFocused = true }(showingSaveAlert ? "Saved" : "Error", isPresented: .constant(showingSaveAlert || !saveMessage.isEmpty && saveMessage != "OK")) {
+        .onDisappear {
+            if let m = keyMonitor { NSEvent.removeMonitor(m); keyMonitor = nil }
+            audioPlayer?.stop()
+        }
+        .alert(showingSaveAlert ? "Saved" : "Error",
+               isPresented: .constant(showingSaveAlert || (!saveMessage.isEmpty && saveMessage != "OK"))) {
             Button("OK") { saveMessage = ""; showingSaveAlert = false }
         } message: {
             Text(saveMessage)
         }
     }
-
-    // MARK: - Actions
 
     private func exportWAV() {
         let panel = NSSavePanel()
@@ -210,43 +167,30 @@ struct SampleDetailView: View {
         panel.nameFieldStringValue = "\(safeName).wav"
         panel.allowedContentTypes = [.audio]
         panel.title = "Export Sample as WAV"
-
         if panel.runModal() == .OK, let url = panel.url {
             do {
                 let wavData = try diskImage.exportSampleAsWAV(sample: sample)
                 try wavData.write(to: url)
-                saveMessage = "Exported successfully to \(url.lastPathComponent)"
+                saveMessage = "Exported to \(url.lastPathComponent)"
                 showingSaveAlert = true
-            } catch {
-                saveMessage = error.localizedDescription
-            }
+            } catch { saveMessage = error.localizedDescription }
         }
     }
 
     private func togglePlayback() {
-        if isPlaying {
-            audioPlayer?.stop()
-            isPlaying = false
-            return
-        }
-
+        if isPlaying { audioPlayer?.stop(); isPlaying = false; return }
         do {
             let wavData = try diskImage.exportSampleAsWAV(sample: sample)
             audioPlayer = try AVAudioPlayer(data: wavData)
             audioPlayer?.play()
             isPlaying = true
-            audioPlayer?.delegate = nil
-            // Auto-stop tracking via timer
             DispatchQueue.main.asyncAfter(deadline: .now() + (audioPlayer?.duration ?? 1) + 0.1) {
                 isPlaying = false
             }
-        } catch {
-            // silent fail — just don't play
-        }
+        } catch {}
     }
 
     private func saveChanges() {
-        // Build updated sample with new header values
         var updatedHeader = sample.header
         updatedHeader.midiRootNote = UInt8(editedRootNote)
         updatedHeader.fineTune = Int8(editedFineTune)
@@ -254,34 +198,14 @@ struct SampleDetailView: View {
         updatedHeader.loopStart = UInt32(editedLoopStart)
         updatedHeader.loopEnd = UInt32(editedLoopEnd)
         updatedHeader.loudness = UInt8(editedLoudness)
-
-        // Patch raw header bytes
-        var rawHeader = sample.header.rawHeader
-        if rawHeader.count > 0x0D {
-            rawHeader[0x0D] = UInt8(editedRootNote)
-            rawHeader[0x0E] = UInt8(bitPattern: Int8(editedFineTune))
-            rawHeader[0x0F] = UInt8(editedLoudness)
-        }
-        if rawHeader.count > 0x14 {
-            rawHeader[0x10] = UInt8(editedLoopStart) & 0xFF
-            rawHeader[0x11] = UInt8((UInt32(editedLoopStart) >> 8) & 0xFF)
-            rawHeader[0x12] = UInt8(UInt32(editedLoopEnd) & 0xFF)
-            rawHeader[0x13] = UInt8((UInt32(editedLoopEnd) >> 8) & 0xFF)
-            rawHeader[0x14] = editedLoopEnabled ? 1 : 0
-        }
-        updatedHeader.rawHeader = rawHeader
-
         var updatedSample = sample
         updatedSample.header = updatedHeader
-
         do {
             try diskImage.writeSampleToImage(sample: updatedSample)
             isDirty = false
-            saveMessage = "Changes saved to disk image"
+            saveMessage = "Changes saved"
             showingSaveAlert = true
-        } catch {
-            saveMessage = error.localizedDescription
-        }
+        } catch { saveMessage = error.localizedDescription }
     }
 
     private func revert() {
@@ -294,13 +218,10 @@ struct SampleDetailView: View {
         isDirty = false
     }
 
-    // MARK: - Formatting helpers
-
     private func formatDuration() -> String {
         guard sample.header.sampleRate > 0 else { return "—" }
-        let seconds = Double(sample.header.numSamples) / Double(sample.header.sampleRate)
-        if seconds < 1 { return String(format: "%.0f ms", seconds * 1000) }
-        return String(format: "%.2f s", seconds)
+        let s = Double(sample.header.numSamples) / Double(sample.header.sampleRate)
+        return s < 1 ? String(format: "%.0f ms", s * 1000) : String(format: "%.2f s", s)
     }
 
     private func formatSize(_ bytes: Int) -> String {
@@ -311,8 +232,7 @@ struct SampleDetailView: View {
 
     private func midiNoteName(_ note: UInt8) -> String {
         let names = ["C","C#","D","D#","E","F","F#","G","G#","A","A#","B"]
-        let octave = Int(note) / 12 - 1
-        return "\(names[Int(note) % 12])\(octave)"
+        return "\(names[Int(note) % 12])\(Int(note) / 12 - 1)"
     }
 }
 
@@ -324,18 +244,13 @@ struct SampleListView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            // Header bar
             HStack {
-                Text("Samples")
-                    .font(.title2.bold())
+                Text("Samples").font(.title2.bold())
                 Spacer()
-                Text("\(diskImage.samples.count) files")
-                    .foregroundStyle(.secondary)
+                Text("\(diskImage.samples.count) files").foregroundStyle(.secondary)
             }
             .padding()
-
             Divider()
-
             if diskImage.samples.isEmpty {
                 ContentUnavailableView("No Samples", systemImage: "waveform",
                     description: Text("This disk image contains no sample files."))
@@ -345,31 +260,20 @@ struct SampleListView: View {
                         Text(s.header.name.isEmpty ? s.directoryEntry.name : s.header.name)
                             .font(.system(.body, design: .monospaced))
                     }
-                    TableColumn("Root") { s in
-                        Text(midiNoteName(s.header.midiRootNote))
-                    }
-                    .width(50)
-                    TableColumn("Rate") { s in
-                        Text("\(s.header.sampleRate / 1000)kHz")
-                    }
-                    .width(60)
+                    TableColumn("Root") { s in Text(midiNoteName(s.header.midiRootNote)) }.width(50)
+                    TableColumn("Rate") { s in Text("\(s.header.sampleRate / 1000)kHz") }.width(60)
                     TableColumn("Duration") { s in
                         let dur = s.header.sampleRate > 0
-                            ? Double(s.header.numSamples) / Double(s.header.sampleRate)
-                            : 0
+                            ? Double(s.header.numSamples) / Double(s.header.sampleRate) : 0
                         return Text(dur < 1 ? String(format: "%.0fms", dur*1000) : String(format: "%.2fs", dur))
-                    }
-                    .width(70)
+                    }.width(70)
                     TableColumn("Loop") { s in
                         Image(systemName: s.header.loopEnabled ? "repeat" : "minus")
                             .foregroundStyle(s.header.loopEnabled ? .blue : .secondary)
-                    }
-                    .width(40)
+                    }.width(40)
                     TableColumn("Size") { s in
-                        Text(formatSize(Int(s.directoryEntry.size)))
-                            .foregroundStyle(.secondary)
-                    }
-                    .width(70)
+                        Text(formatSize(Int(s.directoryEntry.size))).foregroundStyle(.secondary)
+                    }.width(70)
                 }
             }
         }
@@ -377,8 +281,7 @@ struct SampleListView: View {
 
     private func midiNoteName(_ note: UInt8) -> String {
         let names = ["C","C#","D","D#","E","F","F#","G","G#","A","A#","B"]
-        let octave = Int(note) / 12 - 1
-        return "\(names[Int(note) % 12])\(octave)"
+        return "\(names[Int(note) % 12])\(Int(note) / 12 - 1)"
     }
 
     private func formatSize(_ bytes: Int) -> String {

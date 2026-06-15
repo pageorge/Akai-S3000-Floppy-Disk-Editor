@@ -9,13 +9,13 @@ func drawIcon(size: CGFloat) -> NSImage {
     img.lockFocus()
 
     let s = size
-    let r = s * 0.18  // corner radius
+    let r = s * 0.18
 
     // Background fills entire canvas
     let bgPath = NSBezierPath(roundedRect: NSRect(x: 0, y: 0, width: s, height: s), xRadius: r, yRadius: r)
     dark.setFill(); bgPath.fill()
 
-    // Red border bars — thin, hugging edges
+    // Red border bars
     let bar = s * 0.04
     red.setFill()
     NSBezierPath(roundedRect: NSRect(x: 0, y: s-bar, width: s, height: bar), xRadius: r, yRadius: r).fill()
@@ -23,45 +23,40 @@ func drawIcon(size: CGFloat) -> NSImage {
     NSBezierPath(roundedRect: NSRect(x: 0, y: 0, width: bar, height: s), xRadius: r, yRadius: r).fill()
     NSBezierPath(roundedRect: NSRect(x: s-bar, y: 0, width: bar, height: s), xRadius: r, yRadius: r).fill()
 
-    // Floppy disk — left side, larger
-    let fx = s*0.06, fy = s*0.22, fw = s*0.28, fh = s*0.34
+    // Floppy disk — left side
+    let fx = s*0.06, fy = s*0.24, fw = s*0.26, fh = s*0.32
     red.setFill()
     NSBezierPath(roundedRect: NSRect(x: fx, y: fy, width: fw, height: fh), xRadius: s*0.02, yRadius: s*0.02).fill()
     NSColor(red: 0.1, green: 0.1, blue: 0.1, alpha: 1).setFill()
     NSBezierPath(roundedRect: NSRect(x: fx+fw*0.08, y: fy+fh*0.54, width: fw*0.84, height: fh*0.38), xRadius: s*0.01, yRadius: s*0.01).fill()
-    NSBezierPath(roundedRect: NSRect(x: fx+fw*0.28, y: fy+fh*0.1, width: fw*0.44, height: fh*0.06), xRadius: s*0.005, yRadius: s*0.005).fill()
     NSBezierPath(ovalIn: NSRect(x: fx+fw*0.36, y: fy+fh*0.62, width: fw*0.28, height: fw*0.28)).fill()
     red.setFill()
     NSBezierPath(ovalIn: NSRect(x: fx+fw*0.43, y: fy+fh*0.69, width: fw*0.14, height: fw*0.14)).fill()
 
-    // Waveform in floppy label area
-    let wavePath = NSBezierPath()
-    wavePath.lineWidth = max(1, s * 0.015)
-    wavePath.lineCapStyle = .round
-    wavePath.lineJoinStyle = .round
-    let wpts: [(CGFloat,CGFloat)] = [(0.08,0.36),(0.12,0.28),(0.16,0.40),(0.20,0.24),(0.24,0.36),(0.28,0.20),(0.32,0.32),(0.36,0.26),(0.40,0.36)]
-    wavePath.move(to: NSPoint(x: fx + fw*wpts[0].0, y: fy + fh*wpts[0].1))
-    for p in wpts.dropFirst() { wavePath.line(to: NSPoint(x: fx + fw*p.0, y: fy + fh*p.1)) }
-    NSColor.white.withAlphaComponent(0.6).setStroke()
-    wavePath.stroke()
-
-    // AKAI text — large, bold
-    let akaiSize = s * 0.32
+    // AKAI text — sized to fit right side of icon
+    // Right side available: from x=0.36 to x=0.96 = 0.60 * s wide
+    let akaiSize = s * 0.24  // smaller so it fits
     let akaiAttrs: [NSAttributedString.Key: Any] = [
         .font: NSFont.boldSystemFont(ofSize: akaiSize),
         .foregroundColor: NSColor.white
     ]
-    NSAttributedString(string: "AKAI", attributes: akaiAttrs).draw(at: NSPoint(x: s*0.38, y: s*0.50))
+    let akaiStr = NSAttributedString(string: "AKAI", attributes: akaiAttrs)
+    let akaiW = akaiStr.size().width
+    let akaiX = s*0.36 + (s*0.58 - akaiW) / 2  // centre in right half
+    akaiStr.draw(at: NSPoint(x: akaiX, y: s*0.52))
 
     // S3000 text
-    let s3Size = s * 0.155
+    let s3Size = s * 0.13
     let s3Attrs: [NSAttributedString.Key: Any] = [
         .font: NSFont.boldSystemFont(ofSize: s3Size),
         .foregroundColor: red
     ]
-    NSAttributedString(string: "S3000", attributes: s3Attrs).draw(at: NSPoint(x: s*0.38, y: s*0.34))
+    let s3Str = NSAttributedString(string: "S3000", attributes: s3Attrs)
+    let s3W = s3Str.size().width
+    let s3X = s*0.36 + (s*0.58 - s3W) / 2
+    s3Str.draw(at: NSPoint(x: s3X, y: s*0.37))
 
-    // Bottom waveform decoration
+    // Waveform decoration along bottom
     let waveDecor = NSBezierPath()
     waveDecor.lineWidth = max(1, s * 0.016)
     waveDecor.lineCapStyle = .round

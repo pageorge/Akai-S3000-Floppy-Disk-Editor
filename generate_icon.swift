@@ -9,17 +9,15 @@ func drawIcon(size: CGFloat) -> NSImage {
     img.lockFocus()
 
     let s = size
-    let r = s * 0.18
-    let border = s * 0.035  // thinner border
+    let r = s * 0.22  // macOS-style corner radius
+    let border = s * 0.035
 
     let clip = NSBezierPath(roundedRect: NSRect(x: 0, y: 0, width: s, height: s), xRadius: r, yRadius: r)
     clip.addClip()
 
-    // Red fills entire canvas
     red.setFill()
     NSBezierPath(rect: NSRect(x: 0, y: 0, width: s, height: s)).fill()
 
-    // Dark inset = uniform red border all round
     let inset = border
     dark.setFill()
     NSBezierPath(roundedRect: NSRect(x: inset, y: inset, width: s-inset*2, height: s-inset*2),

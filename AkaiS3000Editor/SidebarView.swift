@@ -15,6 +15,17 @@ struct SidebarView: View {
         return s.header.name.isEmpty ? s.directoryEntry.name : s.header.name
     }
 
+    @ViewBuilder
+    private func sampleContextMenu(sample: AkaiSample) -> some View {
+        let name = sample.header.name.isEmpty ? sample.directoryEntry.name : sample.header.name
+        Button(role: .destructive) {
+            sampleToDelete = sample
+            showDeleteConfirm = true
+        } label: {
+            Label("Delete \"\(name)\"", systemImage: "trash")
+        }
+    }
+
     var body: some View {
         List {
             if diskImage.isLoaded {
@@ -34,18 +45,8 @@ struct SidebarView: View {
                     ForEach(diskImage.samples) { sample in
                         SidebarSampleRow(sample: sample, isSelected: selectedSampleID == sample.id)
                             .contentShape(Rectangle())
-                            .onTapGesture {
-                                selectedTab = .samples
-                                selectedSampleID = sample.id
-                            }
-                            .contextMenu {
-                                Button(role: .destructive) {
-                                    sampleToDelete = sample
-                                    showDeleteConfirm = true
-                                } label: {
-                                    Label("Delete \"" + (sample.header.name.isEmpty ? sample.directoryEntry.name : sample.header.name) + "\"", systemImage: "trash")
-                                }
-                            }
+                            .onTapGesture { selectedTab = .samples; selectedSampleID = sample.id }
+                            .contextMenu { sampleContextMenu(sample: sample) }
                     }
                 } header: {
                     Label("Samples (\(diskImage.samples.count))", systemImage: "waveform")

@@ -17,7 +17,6 @@ struct ProgramDetailView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            // Header
             HStack {
                 VStack(alignment: .leading, spacing: 4) {
                     Text(editedProgram.name.isEmpty ? programFile.directoryEntry.name : editedProgram.name)
@@ -98,20 +97,23 @@ struct ProgramDetailView: View {
 
                 // Right: piano keyboard + keyzone editor
                 VStack(alignment: .leading, spacing: 0) {
-                    PianoKeyboardView(
-                        keyzones: editedProgram.keyzones,
-                        selectedIndex: selectedKeyzoneIndex,
-                        onKeyzoneChanged: { updated in
-                            if let idx = selectedKeyzoneIndex, idx < editedProgram.keyzones.count {
-                                editedProgram.keyzones[idx] = updated
-                                isDirty = true
+                    // Only show piano when there are keyzones
+                    if !editedProgram.keyzones.isEmpty {
+                        PianoKeyboardView(
+                            keyzones: editedProgram.keyzones,
+                            selectedIndex: selectedKeyzoneIndex,
+                            onKeyzoneChanged: { updated in
+                                if let idx = selectedKeyzoneIndex, idx < editedProgram.keyzones.count {
+                                    editedProgram.keyzones[idx] = updated
+                                    isDirty = true
+                                }
                             }
-                        }
-                    )
-                    .frame(height: 140)
-                    .background(Color(nsColor: .controlBackgroundColor))
+                        )
+                        .frame(height: 140)
+                        .background(Color(nsColor: .controlBackgroundColor))
 
-                    Divider()
+                        Divider()
+                    }
 
                     if let idx = selectedKeyzoneIndex, idx < editedProgram.keyzones.count {
                         KeyzoneEditorView(
@@ -123,12 +125,16 @@ struct ProgramDetailView: View {
                         )
                         .padding()
                     } else {
-                        ContentUnavailableView(
-                            "Select a Keyzone",
-                            systemImage: "pianokeys",
-                            description: Text("Select a keyzone from the list to edit its properties")
-                        )
+                        // Compact placeholder — no big empty space
+                        HStack {
+                            Image(systemName: "pianokeys").foregroundStyle(.secondary)
+                            Text(editedProgram.keyzones.isEmpty ? "Add a keyzone to get started" : "Select a keyzone to edit")
+                                .foregroundStyle(.secondary)
+                        }
+                        .padding()
                     }
+
+                    Spacer()
                 }
             }
         }

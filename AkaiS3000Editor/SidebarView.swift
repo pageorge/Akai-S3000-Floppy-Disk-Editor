@@ -10,6 +10,11 @@ struct SidebarView: View {
     @State private var showDeleteConfirm = false
     @State private var deleteKeyMonitor: Any? = nil
 
+    private var sampleToDeleteName: String {
+        guard let s = sampleToDelete else { return "" }
+        return s.header.name.isEmpty ? s.directoryEntry.name : s.header.name
+    }
+
     var body: some View {
         List {
             if diskImage.isLoaded {
@@ -86,7 +91,6 @@ struct SidebarView: View {
         .navigationTitle("S3000 Editor")
         .onAppear {
             deleteKeyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
-                // Delete (51) or Forward Delete (117)
                 if (event.keyCode == 51 || event.keyCode == 117),
                    let id = self.selectedSampleID,
                    let sample = self.diskImage.samples.first(where: { $0.id == id }) {
@@ -101,7 +105,7 @@ struct SidebarView: View {
             if let m = deleteKeyMonitor { NSEvent.removeMonitor(m); deleteKeyMonitor = nil }
         }
         .confirmationDialog(
-            "Delete \"\(sampleToDelete.map { $0.header.name.isEmpty ? $0.directoryEntry.name : $0.header.name } ?? "")\"?",
+            "Delete \"\(sampleToDeleteName)\"?",
             isPresented: $showDeleteConfirm,
             titleVisibility: .visible
         ) {

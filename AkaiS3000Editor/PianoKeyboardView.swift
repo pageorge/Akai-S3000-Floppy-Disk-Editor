@@ -1,18 +1,33 @@
 import SwiftUI
 
-// MARK: - Piano Keyboard View (shows keyzone ranges visually)
+// MARK: - Piano Keyboard View
 
 struct PianoKeyboardView: View {
     let keyzones: [AkaiProgramKeyzone]
     let selectedIndex: Int?
 
-    // We show 5 octaves (C1–C6, notes 24–84), 61 keys
     private let startNote: Int = 24   // C1
-    private let endNote: Int = 108    // C7 — wider view
-    private var totalKeys: Int { endNote - startNote + 1 }
+    private let endNote: Int = 108    // C8
+    private let blackKeyPattern = [1, 3, 6, 8, 10]
 
-    // Which piano notes are black keys
-    private let blackKeyPattern = [1, 3, 6, 8, 10]  // offsets within octave
+    // For the selected keyzone, work out which notes are low, high, range, root
+    private var selectedZone: AkaiProgramKeyzone? {
+        guard let idx = selectedIndex, idx < keyzones.count else { return nil }
+        return keyzones[idx]
+    }
+    private var lowKey:  Int { Int(selectedZone?.lowKey  ?? 0) }
+    private var highKey: Int { Int(selectedZone?.highKey ?? 0) }
+    private var rootKey: Int { Int(selectedZone?.rootNote ?? 0) }
+
+    // Colour for a given note
+    // root = orange, low/high boundaries = red, in-range = green, out = normal
+    private func keyRole(_ note: Int) -> KeyRole {
+        guard selectedZone != nil else { return .normal }
+        if note == rootKey { return .root }
+        if note == lowKey || note == highKey { return .boundary }
+        if note >= lowKey && note <= highKey { return .inRange }
+        return .normal
+    }
 
     var body: some View {
         GeometryReader { geo in
@@ -21,67 +36,31 @@ struct PianoKeyboardView: View {
             let whiteKeyHeight = geo.size.height
             let blackKeyWidth = whiteKeyWidth * 0.6
             let blackKeyHeight = whiteKeyHeight * 0.62
+            let whitePositions = computeWhitePositions(whiteKeyWidth: whiteKeyWidth)
 
             ZStack(alignment: .topLeading) {
-                // Keyzone color bands (behind keys)
-                ForEach(Array(keyzones.enumerated()), id: \.offset) { idx, kz in
-                    let low = max(Int(kz.lowKey), startNote)
-                    let high = min(Int(kz.highKey), endNote)
-                    if low <= high {
-                        let lowX = xPositionForNote(low, whiteKeyWidth: whiteKeyWidth)
-                        let highX = xPositionForNote(high, whiteKeyWidth: whiteKeyWidth) + whiteKeyWidth
-                        let color = keyzoneColor(idx: idx, isSelected: idx == selectedIndex)
-
-                        Rectangle()
-                            .fill(color.opacity(idx == selectedIndex ? 0.35 : 0.18))
-                            .frame(width: max(0, highX - lowX), height: whiteKeyHeight)
-                            .offset(x: lowX)
-                    }
-                }
-
                 // White keys
                 HStack(spacing: 0) {
                     ForEach(startNote...endNote, id: \.self) { note in
                         if isWhiteKey(note) {
-                            WhitePianoKey(
-                                note: note,
-                                isRootOfAnyZone: keyzones.indices.contains(selectedIndex ?? -1) &&
-                                    Int((keyzones[selectedIndex!]).rootNote) == note
-                            )
-                            .frame(width: whiteKeyWidth, height: whiteKeyHeight)
+                            WhitePianoKey(note: note, role: keyRole(note))
+                                .frame(width: whiteKeyWidth, height: whiteKeyHeight)
                         }
                     }
                 }
 
-                // Black keys (positioned absolutely)
-                let whitePositions = computeWhitePositions(whiteKeyWidth: whiteKeyWidth)
+                // Black keys
                 ForEach(startNote...endNote, id: \.self) { note in
                     if !isWhiteKey(note) {
                         let prevWhiteX = whitePositions[note - 1] ?? 0
-                        BlackPianoKey(
-                            note: note,
-                            isRootOfAnyZone: keyzones.indices.contains(selectedIndex ?? -1) &&
-                                Int((keyzones[selectedIndex!]).rootNote) == note
-                        )
-                        .frame(width: blackKeyWidth, height: blackKeyHeight)
-                        .offset(x: prevWhiteX + whiteKeyWidth - blackKeyWidth / 2)
+                        BlackPianoKey(note: note, role: keyRole(note))
+                            .frame(width: blackKeyWidth, height: blackKeyHeight)
+                            .offset(x: prevWhiteX + whiteKeyWidth - blackKeyWidth / 2)
                     }
                 }
 
-                // Root note marker triangle for selected zone
-                if let idx = selectedIndex, idx < keyzones.count {
-                    let root = Int(keyzones[idx].rootNote)
-                    if root >= startNote && root <= endNote {
-                        let x = xPositionForNote(root, whiteKeyWidth: whiteKeyWidth) + whiteKeyWidth/2
-                        Triangle()
-                            .fill(Color.orange)
-                            .frame(width: 8, height: 8)
-                            .offset(x: x - 4, y: whiteKeyHeight - 10)
-                    }
-                }
-
-                // Note labels every octave (C notes)
-                ForEach([24, 36, 48, 60, 72, 84, 96, 108].filter { $0 >= startNote && $0 <= endNote }, id: \.self) { note in
+                // Note labels at C notes
+                ForEach([24,36,48,60,72,84,96,108].filter { $0 >= startNote && $0 <= endNote }, id: \.self) { note in
                     let x = xPositionForNote(note, whiteKeyWidth: whiteKeyWidth)
                     Text("C\(note/12 - 1)")
                         .font(.system(size: 8))
@@ -96,8 +75,7 @@ struct PianoKeyboardView: View {
     }
 
     private func isWhiteKey(_ note: Int) -> Bool {
-        let offset = note % 12
-        return !blackKeyPattern.contains(offset)
+        !blackKeyPattern.contains(note % 12)
     }
 
     private func countWhiteKeys(from: Int, to: Int) -> Int {
@@ -106,11 +84,7 @@ struct PianoKeyboardView: View {
 
     private func xPositionForNote(_ note: Int, whiteKeyWidth: CGFloat) -> CGFloat {
         let whitesBefore = (startNote...note).filter { isWhiteKey($0) }.count
-        if isWhiteKey(note) {
-            return CGFloat(whitesBefore - 1) * whiteKeyWidth
-        } else {
-            return CGFloat(whitesBefore - 1) * whiteKeyWidth
-        }
+        return CGFloat(whitesBefore - 1) * whiteKeyWidth
     }
 
     private func computeWhitePositions(whiteKeyWidth: CGFloat) -> [Int: CGFloat] {
@@ -124,23 +98,44 @@ struct PianoKeyboardView: View {
         }
         return positions
     }
+}
 
-    private func keyzoneColor(idx: Int, isSelected: Bool) -> Color {
-        let colors: [Color] = [.blue, .green, .orange, .purple, .pink, .teal, .yellow, .red]
-        return colors[idx % colors.count]
+// MARK: - Key Role
+
+enum KeyRole {
+    case normal, inRange, boundary, root
+
+    var whiteColor: Color {
+        switch self {
+        case .normal:   return .white
+        case .inRange:  return Color(red: 0.7, green: 1.0, blue: 0.7)   // light green
+        case .boundary: return Color(red: 1.0, green: 0.6, blue: 0.6)   // light red
+        case .root:     return Color(red: 1.0, green: 0.65, blue: 0.0)  // orange
+        }
+    }
+
+    var blackColor: Color {
+        switch self {
+        case .normal:   return Color.black.opacity(0.85)
+        case .inRange:  return Color(red: 0.0, green: 0.55, blue: 0.2)  // dark green
+        case .boundary: return Color(red: 0.7, green: 0.1, blue: 0.1)   // dark red
+        case .root:     return Color(red: 0.8, green: 0.45, blue: 0.0)  // dark orange
+        }
     }
 }
 
+// MARK: - Key Views
+
 struct WhitePianoKey: View {
     let note: Int
-    let isRootOfAnyZone: Bool
+    let role: KeyRole
 
     var body: some View {
         ZStack(alignment: .bottom) {
             Rectangle()
-                .fill(Color.white)
+                .fill(role.whiteColor)
                 .overlay(Rectangle().stroke(Color.gray.opacity(0.4), lineWidth: 0.5))
-            if isRootOfAnyZone {
+            if role == .root {
                 Circle()
                     .fill(Color.orange)
                     .frame(width: 6, height: 6)
@@ -152,14 +147,14 @@ struct WhitePianoKey: View {
 
 struct BlackPianoKey: View {
     let note: Int
-    let isRootOfAnyZone: Bool
+    let role: KeyRole
 
     var body: some View {
         ZStack(alignment: .bottom) {
             Rectangle()
-                .fill(Color.black.opacity(0.85))
+                .fill(role.blackColor)
                 .cornerRadius(2, corners: [.bottomLeft, .bottomRight])
-            if isRootOfAnyZone {
+            if role == .root {
                 Circle()
                     .fill(Color.orange)
                     .frame(width: 5, height: 5)
@@ -188,9 +183,9 @@ extension View {
 
 struct RectCorner: OptionSet {
     let rawValue: Int
-    static let topLeft = RectCorner(rawValue: 1 << 0)
-    static let topRight = RectCorner(rawValue: 1 << 1)
-    static let bottomLeft = RectCorner(rawValue: 1 << 2)
+    static let topLeft     = RectCorner(rawValue: 1 << 0)
+    static let topRight    = RectCorner(rawValue: 1 << 1)
+    static let bottomLeft  = RectCorner(rawValue: 1 << 2)
     static let bottomRight = RectCorner(rawValue: 1 << 3)
     static let all: RectCorner = [.topLeft, .topRight, .bottomLeft, .bottomRight]
 }
@@ -201,9 +196,9 @@ struct RoundedCorner: Shape {
 
     func path(in rect: CGRect) -> Path {
         var path = Path()
-        let tl = corners.contains(.topLeft) ? radius : 0
-        let tr = corners.contains(.topRight) ? radius : 0
-        let bl = corners.contains(.bottomLeft) ? radius : 0
+        let tl = corners.contains(.topLeft)     ? radius : 0
+        let tr = corners.contains(.topRight)    ? radius : 0
+        let bl = corners.contains(.bottomLeft)  ? radius : 0
         let br = corners.contains(.bottomRight) ? radius : 0
 
         path.move(to: CGPoint(x: rect.minX + tl, y: rect.minY))

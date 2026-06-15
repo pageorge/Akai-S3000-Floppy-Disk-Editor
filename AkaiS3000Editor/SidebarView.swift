@@ -43,10 +43,12 @@ struct SidebarView: View {
 
                 Section {
                     ForEach(diskImage.samples) { sample in
-                        SidebarSampleRow(sample: sample, isSelected: selectedSampleID == sample.id)
-                            .contentShape(Rectangle())
-                            .onTapGesture { selectedTab = .samples; selectedSampleID = sample.id }
-                            .contextMenu { sampleContextMenu(sample: sample) }
+                        SidebarSampleRow(
+                            sample: sample,
+                            isSelected: selectedSampleID == sample.id,
+                            onTap: { selectedTab = .samples; selectedSampleID = sample.id },
+                            onDelete: { sampleToDelete = sample; showDeleteConfirm = true }
+                        )
                     }
                 } header: {
                     Label("Samples (\(diskImage.samples.count))", systemImage: "waveform")
@@ -126,6 +128,12 @@ struct SidebarView: View {
 struct SidebarSampleRow: View {
     let sample: AkaiSample
     let isSelected: Bool
+    let onTap: () -> Void
+    let onDelete: () -> Void
+
+    private var displayName: String {
+        sample.header.name.isEmpty ? sample.directoryEntry.name : sample.header.name
+    }
 
     var body: some View {
         HStack(spacing: 8) {
@@ -133,7 +141,7 @@ struct SidebarSampleRow: View {
                 .foregroundStyle(isSelected ? .white : .red)
                 .font(.system(size: 14))
             VStack(alignment: .leading, spacing: 1) {
-                Text(sample.header.name.isEmpty ? sample.directoryEntry.name : sample.header.name)
+                Text(displayName)
                     .font(.system(.body, design: .monospaced))
                     .lineLimit(1)
                     .foregroundStyle(isSelected ? .white : .primary)
@@ -147,6 +155,13 @@ struct SidebarSampleRow: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(RoundedRectangle(cornerRadius: 6).fill(isSelected ? Color.red : Color.clear))
         .listRowInsets(EdgeInsets(top: 2, leading: 4, bottom: 2, trailing: 4))
+        .contentShape(Rectangle())
+        .onTapGesture { onTap() }
+        .contextMenu {
+            Button(role: .destructive, action: onDelete) {
+                Label("Delete \"\(displayName)\"", systemImage: "trash")
+            }
+        }
     }
 
     private func midiNoteName(_ note: UInt8) -> String {

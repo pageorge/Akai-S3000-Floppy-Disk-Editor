@@ -7,15 +7,15 @@ struct SidebarView: View {
     @Binding var selectedProgramID: UUID?
 
     var body: some View {
-        List(selection: $selectedTab) {
+        List {
             if diskImage.isLoaded {
-                // Disk name header
+
                 Section {
                     EmptyView()
                 } header: {
                     HStack {
                         Image(systemName: "internaldrive.fill")
-                            .foregroundStyle(.blue)
+                            .foregroundStyle(.red)
                         Text(diskImage.diskName.isEmpty ? "Akai Disk" : diskImage.diskName)
                             .font(.headline)
                             .lineLimit(1)
@@ -23,15 +23,17 @@ struct SidebarView: View {
                     .padding(.vertical, 4)
                 }
 
-                // Samples section
                 Section {
                     ForEach(diskImage.samples) { sample in
-                        SidebarSampleRow(sample: sample)
-                            .tag(sample.id)
-                            .onTapGesture {
-                                selectedTab = .samples
-                                selectedSampleID = sample.id
-                            }
+                        SidebarSampleRow(
+                            sample: sample,
+                            isSelected: selectedSampleID == sample.id
+                        )
+                        .contentShape(Rectangle())
+                        .onTapGesture {
+                            selectedTab = .samples
+                            selectedSampleID = sample.id
+                        }
                     }
                 } header: {
                     Label("Samples (\(diskImage.samples.count))", systemImage: "waveform")
@@ -43,15 +45,17 @@ struct SidebarView: View {
                         }
                 }
 
-                // Programs section
                 Section {
                     ForEach(diskImage.programs) { prog in
-                        SidebarProgramRow(program: prog)
-                            .tag(prog.id)
-                            .onTapGesture {
-                                selectedTab = .programs
-                                selectedProgramID = prog.id
-                            }
+                        SidebarProgramRow(
+                            program: prog,
+                            isSelected: selectedProgramID == prog.id
+                        )
+                        .contentShape(Rectangle())
+                        .onTapGesture {
+                            selectedTab = .programs
+                            selectedProgramID = prog.id
+                        }
                     }
                 } header: {
                     Label("Programs (\(diskImage.programs.count))", systemImage: "pianokeys")
@@ -63,13 +67,13 @@ struct SidebarView: View {
                         }
                 }
 
-                // Disk info
                 Section {
                     Label("Disk Info", systemImage: "info.circle")
+                        .contentShape(Rectangle())
                         .onTapGesture { selectedTab = .diskInfo }
                 }
+
             } else {
-                // Not loaded state
                 VStack(alignment: .leading, spacing: 8) {
                     Label("No Disk Loaded", systemImage: "externaldrive.badge.questionmark")
                         .foregroundStyle(.secondary)
@@ -87,47 +91,65 @@ struct SidebarView: View {
 
 struct SidebarSampleRow: View {
     let sample: AkaiSample
+    let isSelected: Bool
 
     var body: some View {
         HStack(spacing: 8) {
-            Image(systemName: "waveform.circle")
-                .foregroundStyle(.blue)
+            Image(systemName: "waveform.circle.fill")
+                .foregroundStyle(isSelected ? .white : .red)
                 .font(.system(size: 14))
             VStack(alignment: .leading, spacing: 1) {
                 Text(sample.header.name.isEmpty ? sample.directoryEntry.name : sample.header.name)
                     .font(.system(.body, design: .monospaced))
                     .lineLimit(1)
+                    .foregroundStyle(isSelected ? .white : .primary)
                 Text("\(sample.header.sampleRate / 1000)kHz · \(midiNoteName(sample.header.midiRootNote))")
                     .font(.caption2)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(isSelected ? .white.opacity(0.8) : .secondary)
             }
         }
+        .padding(.vertical, 3)
+        .padding(.horizontal, 8)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: 6)
+                .fill(isSelected ? Color.red : Color.clear)
+        )
+        .listRowInsets(EdgeInsets(top: 2, leading: 4, bottom: 2, trailing: 4))
     }
 
     private func midiNoteName(_ note: UInt8) -> String {
         let names = ["C","C#","D","D#","E","F","F#","G","G#","A","A#","B"]
-        let octave = Int(note) / 12 - 1
-        let name = names[Int(note) % 12]
-        return "\(name)\(octave)"
+        return "\(names[Int(note) % 12])\(Int(note) / 12 - 1)"
     }
 }
 
 struct SidebarProgramRow: View {
     let program: AkaiProgramFile
+    let isSelected: Bool
 
     var body: some View {
         HStack(spacing: 8) {
             Image(systemName: "pianokeys.inverse")
-                .foregroundStyle(.purple)
+                .foregroundStyle(isSelected ? .white : .purple)
                 .font(.system(size: 14))
             VStack(alignment: .leading, spacing: 1) {
                 Text(program.program.name.isEmpty ? program.directoryEntry.name : program.program.name)
                     .font(.system(.body, design: .monospaced))
                     .lineLimit(1)
+                    .foregroundStyle(isSelected ? .white : .primary)
                 Text("\(program.program.keyzones.count) keyzone\(program.program.keyzones.count == 1 ? "" : "s")")
                     .font(.caption2)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(isSelected ? .white.opacity(0.8) : .secondary)
             }
         }
+        .padding(.vertical, 3)
+        .padding(.horizontal, 8)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: 6)
+                .fill(isSelected ? Color.purple : Color.clear)
+        )
+        .listRowInsets(EdgeInsets(top: 2, leading: 4, bottom: 2, trailing: 4))
     }
 }

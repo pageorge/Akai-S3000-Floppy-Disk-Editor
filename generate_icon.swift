@@ -56,14 +56,14 @@ func drawIcon(size: CGFloat) -> NSImage {
     let s3Str = NSAttributedString(string: "S3000", attributes: s3Attrs)
     s3Str.draw(at: NSPoint(x: rightStart + (rightWidth - s3Str.size().width) / 2, y: s*0.40))
 
-    // EDITOR underneath, smaller, letter-spaced
+    // EDITOR underneath, smaller, letter-spaced, moved down a touch more
     let editorAttrs: [NSAttributedString.Key: Any] = [
         .font: NSFont.boldSystemFont(ofSize: s * 0.06),
         .foregroundColor: NSColor.white.withAlphaComponent(0.5),
         .kern: s * 0.012
     ]
     let editorStr = NSAttributedString(string: "EDITOR", attributes: editorAttrs)
-    editorStr.draw(at: NSPoint(x: rightStart + (rightWidth - editorStr.size().width) / 2, y: s*0.345))
+    editorStr.draw(at: NSPoint(x: rightStart + (rightWidth - editorStr.size().width) / 2, y: s*0.30))
 
     // Waveform along bottom
     let wavePath = NSBezierPath()
@@ -71,8 +71,8 @@ func drawIcon(size: CGFloat) -> NSImage {
     wavePath.lineCapStyle = .round
     wavePath.lineJoinStyle = .round
     let pts: [(CGFloat,CGFloat)] = [
-        (0.10,0.18),(0.19,0.10),(0.28,0.20),(0.37,0.06),(0.46,0.16),
-        (0.55,0.03),(0.64,0.13),(0.73,0.08),(0.82,0.15),(0.90,0.10)
+        (0.10,0.16),(0.19,0.09),(0.28,0.17),(0.37,0.05),(0.46,0.14),
+        (0.55,0.03),(0.64,0.12),(0.73,0.07),(0.82,0.13),(0.90,0.09)
     ]
     wavePath.move(to: NSPoint(x: s*pts[0].0, y: s*pts[0].1))
     for p in pts.dropFirst() { wavePath.line(to: NSPoint(x: s*p.0, y: s*p.1)) }

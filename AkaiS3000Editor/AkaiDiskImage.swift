@@ -75,6 +75,9 @@ struct AkaiDirectoryEntry {
     var startBlock: UInt16
     var size: UInt32
     var rawEntry: Data
+    /// Byte offset of this 24-byte entry within the disk image (volume directory region).
+    /// Used so we can blank/delete the correct on-disk slot later.
+    var diskOffset: Int = -1
 
     var isSample:  Bool { fileType == AkaiDiskFormat.ftypeSample }
     var isProgram: Bool { fileType == AkaiDiskFormat.ftypeProgram }
@@ -195,6 +198,13 @@ class AkaiDiskImage: ObservableObject {
         return UInt16(data[offset]) | (UInt16(data[offset + 1]) << 8)
     }
 
+    private func setFatValue(block: Int, value: UInt16, data: inout Data) {
+        let offset = AkaiDiskFormat.fatOffset + block * 2
+        guard offset + 2 <= data.count else { return }
+        data[offset]     = UInt8(value & 0xFF)
+        data[offset + 1] = UInt8((value >> 8) & 0xFF)
+    }
+
     private func fatChain(from startBlock: Int, data: Data) -> [Int] {
         var chain = [startBlock]
         var seen  = Set([startBlock])
@@ -209,6 +219,14 @@ class AkaiDiskImage: ObservableObject {
             block = next
         }
         return chain
+    }
+
+    /// Mark every block in the chain starting at startBlock as free (0x0000) in the FAT.
+    private func freeChain(from startBlock: Int, data: inout Data) {
+        let chain = fatChain(from: startBlock, data: data)
+        for block in chain {
+            setFatValue(block: block, value: AkaiDiskFormat.fatFree, data: &data)
+        }
     }
 
     private func readFromChain(_ chain: [Int], fileOffset: Int, length: Int, data: Data) -> Data {
@@ -247,7 +265,8 @@ class AkaiDiskImage: ObservableObject {
             let size  = UInt32(data[base+17]) | (UInt32(data[base+18]) << 8) | (UInt32(data[base+19]) << 16)
             let start = UInt16(data[base+20]) | (UInt16(data[base+21]) << 8)
             entries.append(AkaiDirectoryEntry(name: name, fileType: ftype, startBlock: start, size: size,
-                                              rawEntry: Data(data[base..<base+entrySize])))
+                                              rawEntry: Data(data[base..<base+entrySize]),
+                                              diskOffset: base))
         }
 
         var parsedSamples:  [AkaiSample]      = []
@@ -432,7 +451,36 @@ class AkaiDiskImage: ObservableObject {
         return (pcmData, sampleRate, numChannels, bitsPerSample)
     }
 
+    // MARK: - Delete
+
+    /// Remove a sample both from the in-memory list AND from the disk image:
+    /// blanks its directory entry/entries (so it no longer shows up on a real Akai)
+    /// and frees every block in its FAT chain(s) so the space can be reused.
+    /// Does not write to disk immediately — call saveImageToDisk() (or the global
+    /// Save button) afterwards to persist this to the .img file.
     func deleteSample(id: UUID) {
+        guard let sample = samples.first(where: { $0.id == id }) else { return }
+        guard var data = imageData else {
+            samples.removeAll { $0.id == id }
+            return
+        }
+
+        let allEntries = [sample.directoryEntry] + sample.additionalEntries
+        for entry in allEntries {
+            // Free the FAT chain for this part
+            freeChain(from: Int(entry.startBlock), data: &data)
+
+            // Blank the directory entry on disk so it's no longer recognised as a file.
+            // Zero the whole 24-byte slot (name + type + size + start + osver).
+            if entry.diskOffset >= 0,
+               entry.diskOffset + AkaiDiskFormat.dirEntrySize <= data.count {
+                let blank = Data(repeating: 0, count: AkaiDiskFormat.dirEntrySize)
+                data.replaceSubrange(entry.diskOffset..<entry.diskOffset + AkaiDiskFormat.dirEntrySize, with: blank)
+            }
+        }
+
+        imageData = data
+        freeBlocks = countFreeBlocks(data: data)
         samples.removeAll { $0.id == id }
     }
 
@@ -440,7 +488,7 @@ class AkaiDiskImage: ObservableObject {
         guard let data = imageData, let url = imageURL else {
             throw AkaiError.noImageLoaded
         }
-        try data.write(to: url)
+        try data.write(to: url, options: .atomic)
     }
 
     // MARK: - Write Back

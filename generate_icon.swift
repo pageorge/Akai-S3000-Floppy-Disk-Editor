@@ -9,22 +9,26 @@ func drawIcon(size: CGFloat) -> NSImage {
     img.lockFocus()
 
     let s = size
-    let r = s * 0.22  // macOS-style corner radius
+    let r = s * 0.22  // outer corner radius, macOS-style
     let border = s * 0.035
 
     let clip = NSBezierPath(roundedRect: NSRect(x: 0, y: 0, width: s, height: s), xRadius: r, yRadius: r)
     clip.addClip()
 
+    // Red fills entire canvas = border colour
     red.setFill()
     NSBezierPath(rect: NSRect(x: 0, y: 0, width: s, height: s)).fill()
 
+    // Dark inset rect with proportionally-reduced corner radius so the border
+    // reads as the same visual thickness all the way round, including the corners
     let inset = border
+    let innerRadius = max(0, r - inset)
     dark.setFill()
-    NSBezierPath(roundedRect: NSRect(x: inset, y: inset, width: s-inset*2, height: s-inset*2),
-                 xRadius: r - inset, yRadius: r - inset).fill()
+    NSBezierPath(roundedRect: NSRect(x: inset, y: inset, width: s - inset*2, height: s - inset*2),
+                 xRadius: innerRadius, yRadius: innerRadius).fill()
 
     // Floppy disk
-    let fx = s*0.10, fy = s*0.28, fw = s*0.26, fh = s*0.34
+    let fx = s*0.10, fy = s*0.26, fw = s*0.26, fh = s*0.34
     red.setFill()
     NSBezierPath(roundedRect: NSRect(x: fx, y: fy, width: fw, height: fh), xRadius: s*0.02, yRadius: s*0.02).fill()
     NSColor(red: 0.12, green: 0.12, blue: 0.12, alpha: 1).setFill()
@@ -36,20 +40,29 @@ func drawIcon(size: CGFloat) -> NSImage {
 
     // AKAI text
     let akaiAttrs: [NSAttributedString.Key: Any] = [
-        .font: NSFont.boldSystemFont(ofSize: s * 0.24),
+        .font: NSFont.boldSystemFont(ofSize: s * 0.22),
         .foregroundColor: NSColor.white
     ]
     let akaiStr = NSAttributedString(string: "AKAI", attributes: akaiAttrs)
     let rightStart = s * 0.40, rightWidth = s * 0.52
-    akaiStr.draw(at: NSPoint(x: rightStart + (rightWidth - akaiStr.size().width) / 2, y: s*0.52))
+    akaiStr.draw(at: NSPoint(x: rightStart + (rightWidth - akaiStr.size().width) / 2, y: s*0.54))
 
-    // S3000 text
+    // S3000 + EDITOR on one line, like the main app logo
     let s3Attrs: [NSAttributedString.Key: Any] = [
-        .font: NSFont.boldSystemFont(ofSize: s * 0.13),
+        .font: NSFont.boldSystemFont(ofSize: s * 0.12),
         .foregroundColor: red
     ]
+    let editorAttrs: [NSAttributedString.Key: Any] = [
+        .font: NSFont.boldSystemFont(ofSize: s * 0.06),
+        .foregroundColor: NSColor.white.withAlphaComponent(0.45)
+    ]
     let s3Str = NSAttributedString(string: "S3000", attributes: s3Attrs)
-    s3Str.draw(at: NSPoint(x: rightStart + (rightWidth - s3Str.size().width) / 2, y: s*0.37))
+    let editorStr = NSAttributedString(string: "  EDITOR", attributes: editorAttrs)
+    let combinedWidth = s3Str.size().width + editorStr.size().width
+    let lineX = rightStart + (rightWidth - combinedWidth) / 2
+    let lineY = s * 0.40
+    s3Str.draw(at: NSPoint(x: lineX, y: lineY))
+    editorStr.draw(at: NSPoint(x: lineX + s3Str.size().width, y: lineY + s*0.012))
 
     // Waveform along bottom
     let wavePath = NSBezierPath()

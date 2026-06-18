@@ -55,7 +55,12 @@ struct WelcomeView: View {
             providers.first?.loadItem(forTypeIdentifier: UTType.fileURL.identifier) { item, _ in
                 guard let data = item as? Data,
                       let url = URL(dataRepresentation: data, relativeTo: nil) else { return }
-                DispatchQueue.main.async { try? diskImage.load(from: url) }
+                // Must start security-scoped access so we can write back to the file later
+                let accessing = url.startAccessingSecurityScopedResource()
+                DispatchQueue.main.async {
+                    try? diskImage.load(from: url)
+                    if !accessing { _ = url.startAccessingSecurityScopedResource() }
+                }
             }
             return true
         }

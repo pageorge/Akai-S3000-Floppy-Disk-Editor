@@ -307,12 +307,26 @@ class AkaiDiskImage: ObservableObject {
             audioData.append(readFromChain(chain, fileOffset: headerSize, length: audioSize, data: data))
         }
 
+        let loopEnabled = headerData[0x13] == 0x00  // pmode 0=loop, 2=noloop
+        let loopStart = UInt32(headerData[0x26]) | (UInt32(headerData[0x27]) << 8) |
+                        (UInt32(headerData[0x28]) << 16) | (UInt32(headerData[0x29]) << 24)
+        let loopLen   = UInt32(headerData[0x2C]) | (UInt32(headerData[0x2D]) << 8) |
+                        (UInt32(headerData[0x2E]) << 16) | (UInt32(headerData[0x2F]) << 24)
+        let loopEnd   = loopLen > 0 ? loopStart + loopLen : (numSamples > 0 ? numSamples - 1 : 0)
+        let midiRootNote = headerData[0x02]
+        let fineTune = Int8(bitPattern: headerData[0x14])
+
         let header = AkaiSampleHeader(
             name: name.isEmpty ? first.name : name,
             sampleRate: sampleRate,
-            loopStart: 0, loopEnd: numSamples > 0 ? numSamples - 1 : 0,
-            numSamples: numSamples, midiRootNote: 60, loopEnabled: false,
-            bitDepth: 16, numChannels: 1, fineTune: 0, loudness: 99,
+            loopStart: loopStart,
+            loopEnd: loopEnd,
+            numSamples: numSamples,
+            midiRootNote: midiRootNote,
+            loopEnabled: loopEnabled,
+            bitDepth: 16, numChannels: 1,
+            fineTune: fineTune,
+            loudness: 99,
             rawHeader: headerData
         )
         return AkaiSample(directoryEntry: first, header: header, audioData: audioData,
@@ -422,12 +436,52 @@ class AkaiDiskImage: ObservableObject {
         samples.removeAll { $0.id == id }
     }
 
+    func saveImageToDisk() throws {
+        guard let data = imageData, let url = imageURL else {
+            throw AkaiError.noImageLoaded
+        }
+        try data.write(to: url)
+    }
+
     // MARK: - Write Back
 
+    /// Patch a raw sample header with correct S1000/S3000 offsets and write to disk.
+    /// Struct: akai_sample1000_s (from akaiutil_file.h)
+    ///   0x02: rkey (root MIDI note)
+    ///   0x13: pmode (0=loop, 2=noloop)
+    ///   0x14: ctune (cents tune, signed)
+    ///   0x15: stune (semitone tune, signed)
+    ///   0x26: loop[0].at (loop start, 32-bit LE)
+    ///   0x2C: loop[0].len (loop length = end - start, 32-bit LE)
     func writeSampleToImage(sample: AkaiSample) throws {
         guard var data = imageData else { throw AkaiError.noImageLoaded }
+        var hdr = sample.header.rawHeader
+        guard hdr.count >= AkaiDiskFormat.sampleHeaderSize else {
+            throw AkaiError.dataError("Header too short to patch")
+        }
+        // Root key
+        hdr[0x02] = sample.header.midiRootNote
+        // Playback mode: 0=loop, 2=noloop
+        hdr[0x13] = sample.header.loopEnabled ? 0x00 : 0x02
+        // Cents tune (signed)
+        hdr[0x14] = UInt8(bitPattern: sample.header.fineTune)
+        // Loop start (loop[0].at) — 32-bit LE at 0x26
+        let ls = sample.header.loopStart
+        hdr[0x26] = UInt8(ls & 0xFF)
+        hdr[0x27] = UInt8((ls >> 8) & 0xFF)
+        hdr[0x28] = UInt8((ls >> 16) & 0xFF)
+        hdr[0x29] = UInt8((ls >> 24) & 0xFF)
+        // Loop length = end - start (loop[0].len) — 32-bit LE at 0x2C
+        let loopLen = sample.header.loopEnd > sample.header.loopStart
+            ? sample.header.loopEnd - sample.header.loopStart : 0
+        hdr[0x2C] = UInt8(loopLen & 0xFF)
+        hdr[0x2D] = UInt8((loopLen >> 8) & 0xFF)
+        hdr[0x2E] = UInt8((loopLen >> 16) & 0xFF)
+        hdr[0x2F] = UInt8((loopLen >> 24) & 0xFF)
+        // Loudness is per-keygroup in S3000, not in sample header — skip for now
+
         let chain = fatChain(from: sample.offset / AkaiDiskFormat.blockSize, data: data)
-        let fileData = sample.header.rawHeader + sample.audioData
+        let fileData = hdr + sample.audioData
         let bs = AkaiDiskFormat.blockSize
         for (i, block) in chain.enumerated() {
             let srcStart = i * bs; guard srcStart < fileData.count else { break }
@@ -437,7 +491,8 @@ class AkaiDiskImage: ObservableObject {
                                  with: fileData[srcStart..<srcEnd] + Data(repeating: 0, count: bs-(srcEnd-srcStart)))
         }
         imageData = data
-        if let url = imageURL { try data.write(to: url) }
+        guard let url = imageURL else { throw AkaiError.noImageLoaded }
+        try data.write(to: url, options: .atomic)
     }
 
     func updateProgramInImage(programFile: AkaiProgramFile) throws {

@@ -13,6 +13,8 @@ struct SampleDetailView: View {
     @State private var editedLoudness: Double
     @State private var isPlaying = false
     @State private var audioPlayer: AVAudioPlayer?
+    @State private var playheadPosition: Double = 0
+    @State private var playheadTimer: Timer?
     @State private var showingSaveAlert = false
     @State private var saveMessage = ""
     @State private var isDirty = false
@@ -43,14 +45,25 @@ struct SampleDetailView: View {
                             .foregroundStyle(.secondary)
                     }
                     Spacer()
+
+                    Button { saveChanges() } label: {
+                        Image(systemName: "square.and.arrow.down")
+                    }
+                    .buttonStyle(.bordered)
+                    .disabled(!isDirty)
+                    .help("Save changes to disk image")
+
                     Button { exportWAV() } label: {
-                        Label("Export WAV", systemImage: "square.and.arrow.up")
-                    }.buttonStyle(.borderedProminent)
+                        Image(systemName: "arrow.up.forward.square")
+                    }
+                    .buttonStyle(.bordered)
+                    .help("Export sample as WAV file")
+
                     Button { togglePlayback() } label: {
                         Image(systemName: isPlaying ? "stop.fill" : "play.fill")
                     }
                     .buttonStyle(.bordered)
-                    .help(isPlaying ? "Stop (Space)" : "Preview (Space)")
+                    .help(isPlaying ? "Stop playback (Space)" : "Play sample (Space)")
                 }
 
                 WaveformView(
@@ -58,7 +71,8 @@ struct SampleDetailView: View {
                     numSamples: Int(sample.header.numSamples),
                     loopEnabled: editedLoopEnabled,
                     loopStart: $editedLoopStart,
-                    loopEnd: $editedLoopEnd
+                    loopEnd: $editedLoopEnd,
+                    playhead: playheadPosition
                 )
                     .frame(height: 120)
                     .clipShape(RoundedRectangle(cornerRadius: 8))
@@ -142,7 +156,6 @@ struct SampleDetailView: View {
                     HStack {
                         Spacer()
                         Button("Revert") { revert() }.buttonStyle(.bordered)
-                        Button("Save to Disk Image") { saveChanges() }.buttonStyle(.borderedProminent)
                     }
                 }
             }
@@ -157,6 +170,8 @@ struct SampleDetailView: View {
         .onDisappear {
             if let m = keyMonitor { NSEvent.removeMonitor(m); keyMonitor = nil }
             audioPlayer?.stop()
+            playheadTimer?.invalidate()
+            playheadTimer = nil
         }
         .alert(showingSaveAlert ? "Saved" : "Error",
                isPresented: .constant(showingSaveAlert || (!saveMessage.isEmpty && saveMessage != "OK"))) {
@@ -184,17 +199,40 @@ struct SampleDetailView: View {
     }
 
     private func togglePlayback() {
-        if isPlaying { audioPlayer?.stop(); isPlaying = false; return }
+        if isPlaying {
+            audioPlayer?.stop()
+            isPlaying = false
+            playheadTimer?.invalidate()
+            playheadTimer = nil
+            playheadPosition = 0
+            return
+        }
         do {
             let wavData = try diskImage.exportSampleAsWAV(sample: sample)
             audioPlayer = try AVAudioPlayer(data: wavData)
-            audioPlayer?.numberOfLoops = editedLoopEnabled ? -1 : 0  // -1 = loop forever
+            audioPlayer?.numberOfLoops = editedLoopEnabled ? -1 : 0
             audioPlayer?.play()
             isPlaying = true
-            // Only auto-stop when not looping
-            if !editedLoopEnabled {
-                DispatchQueue.main.asyncAfter(deadline: .now() + (audioPlayer?.duration ?? 1) + 0.1) {
-                    self.isPlaying = false
+            playheadPosition = 0
+
+            playheadTimer = Timer.scheduledTimer(withTimeInterval: 1.0/30.0, repeats: true) { _ in
+                guard let player = self.audioPlayer else { return }
+                if self.editedLoopEnabled {
+                    let loopS = self.editedLoopStart / Double(self.sample.header.numSamples)
+                    let loopE = self.editedLoopEnd   / Double(self.sample.header.numSamples)
+                    let loopDur = (loopE - loopS) * player.duration
+                    if loopDur > 0 {
+                        let posInLoop = player.currentTime.truncatingRemainder(dividingBy: loopDur)
+                        self.playheadPosition = loopS + (posInLoop / player.duration)
+                    }
+                } else {
+                    self.playheadPosition = player.currentTime / player.duration
+                    if !player.isPlaying {
+                        self.isPlaying = false
+                        self.playheadPosition = 0
+                        self.playheadTimer?.invalidate()
+                        self.playheadTimer = nil
+                    }
                 }
             }
         } catch {}

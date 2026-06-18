@@ -28,7 +28,7 @@ func drawIcon(size: CGFloat) -> NSImage {
                  xRadius: innerRadius, yRadius: innerRadius).fill()
 
     // Floppy disk
-    let fx = s*0.10, fy = s*0.26, fw = s*0.26, fh = s*0.34
+    let fx = s*0.10, fy = s*0.24, fw = s*0.26, fh = s*0.34
     red.setFill()
     NSBezierPath(roundedRect: NSRect(x: fx, y: fy, width: fw, height: fh), xRadius: s*0.02, yRadius: s*0.02).fill()
     NSColor(red: 0.12, green: 0.12, blue: 0.12, alpha: 1).setFill()
@@ -38,31 +38,32 @@ func drawIcon(size: CGFloat) -> NSImage {
     red.setFill()
     NSBezierPath(ovalIn: NSRect(x: fx+fw*0.43, y: fy+fh*0.69, width: fw*0.14, height: fw*0.14)).fill()
 
+    let rightStart = s * 0.40, rightWidth = s * 0.52
+
     // AKAI text
     let akaiAttrs: [NSAttributedString.Key: Any] = [
         .font: NSFont.boldSystemFont(ofSize: s * 0.22),
         .foregroundColor: NSColor.white
     ]
     let akaiStr = NSAttributedString(string: "AKAI", attributes: akaiAttrs)
-    let rightStart = s * 0.40, rightWidth = s * 0.52
-    akaiStr.draw(at: NSPoint(x: rightStart + (rightWidth - akaiStr.size().width) / 2, y: s*0.54))
+    akaiStr.draw(at: NSPoint(x: rightStart + (rightWidth - akaiStr.size().width) / 2, y: s*0.56))
 
-    // S3000 + EDITOR on one line, like the main app logo
+    // S3000 on its own line
     let s3Attrs: [NSAttributedString.Key: Any] = [
-        .font: NSFont.boldSystemFont(ofSize: s * 0.12),
+        .font: NSFont.boldSystemFont(ofSize: s * 0.13),
         .foregroundColor: red
     ]
+    let s3Str = NSAttributedString(string: "S3000", attributes: s3Attrs)
+    s3Str.draw(at: NSPoint(x: rightStart + (rightWidth - s3Str.size().width) / 2, y: s*0.40))
+
+    // EDITOR underneath, smaller, letter-spaced
     let editorAttrs: [NSAttributedString.Key: Any] = [
         .font: NSFont.boldSystemFont(ofSize: s * 0.06),
-        .foregroundColor: NSColor.white.withAlphaComponent(0.45)
+        .foregroundColor: NSColor.white.withAlphaComponent(0.5),
+        .kern: s * 0.012
     ]
-    let s3Str = NSAttributedString(string: "S3000", attributes: s3Attrs)
-    let editorStr = NSAttributedString(string: "  EDITOR", attributes: editorAttrs)
-    let combinedWidth = s3Str.size().width + editorStr.size().width
-    let lineX = rightStart + (rightWidth - combinedWidth) / 2
-    let lineY = s * 0.40
-    s3Str.draw(at: NSPoint(x: lineX, y: lineY))
-    editorStr.draw(at: NSPoint(x: lineX + s3Str.size().width, y: lineY + s*0.012))
+    let editorStr = NSAttributedString(string: "EDITOR", attributes: editorAttrs)
+    editorStr.draw(at: NSPoint(x: rightStart + (rightWidth - editorStr.size().width) / 2, y: s*0.345))
 
     // Waveform along bottom
     let wavePath = NSBezierPath()
@@ -70,8 +71,8 @@ func drawIcon(size: CGFloat) -> NSImage {
     wavePath.lineCapStyle = .round
     wavePath.lineJoinStyle = .round
     let pts: [(CGFloat,CGFloat)] = [
-        (0.10,0.20),(0.19,0.11),(0.28,0.22),(0.37,0.07),(0.46,0.18),
-        (0.55,0.04),(0.64,0.15),(0.73,0.09),(0.82,0.17),(0.90,0.11)
+        (0.10,0.18),(0.19,0.10),(0.28,0.20),(0.37,0.06),(0.46,0.16),
+        (0.55,0.03),(0.64,0.13),(0.73,0.08),(0.82,0.15),(0.90,0.10)
     ]
     wavePath.move(to: NSPoint(x: s*pts[0].0, y: s*pts[0].1))
     for p in pts.dropFirst() { wavePath.line(to: NSPoint(x: s*p.0, y: s*p.1)) }

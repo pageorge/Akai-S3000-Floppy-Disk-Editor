@@ -5,23 +5,38 @@ import SwiftUI
 struct WaveformView: View {
     let audioData: Data
     let numSamples: Int
+    let numChannels: Int
     let loopEnabled: Bool
     let loopStart: Binding<Double>?
     let loopEnd: Binding<Double>?
+    let playhead: Double
     @State private var waveformPoints: [CGFloat] = []
 
-    init(audioData: Data, numSamples: Int = 0, loopEnabled: Bool = false,
-         loopStart: Binding<Double>? = nil, loopEnd: Binding<Double>? = nil) {
+    init(audioData: Data, numSamples: Int = 0, numChannels: Int = 1, loopEnabled: Bool = false,
+         loopStart: Binding<Double>? = nil, loopEnd: Binding<Double>? = nil,
+         playhead: Double = 0) {
         self.audioData = audioData
         self.numSamples = numSamples
+        self.numChannels = max(1, numChannels)
         self.loopEnabled = loopEnabled
         self.loopStart = loopStart
         self.loopEnd = loopEnd
+        self.playhead = playhead
+    }
+
+    /// The true number of audio frames present in `audioData` (per channel).
+    /// This is the ground truth for both the waveform x-axis and loop-region
+    /// scaling — the header's numSamples can disagree, which would otherwise
+    /// make the drawn loop region diverge from what actually plays.
+    private var frameCount: Int {
+        let bytesPerFrame = numChannels * 2
+        let fromAudio = bytesPerFrame > 0 ? audioData.count / bytesPerFrame : 0
+        return fromAudio > 0 ? fromAudio : max(numSamples, 1)
     }
 
     var body: some View {
         GeometryReader { geo in
-            ZStack {
+            ZStack(alignment: .leading) {
                 LinearGradient(
                     colors: [Color(nsColor: .controlBackgroundColor), Color(nsColor: .windowBackgroundColor)],
                     startPoint: .top, endPoint: .bottom
@@ -29,64 +44,78 @@ struct WaveformView: View {
 
                 if waveformPoints.isEmpty {
                     Text("No audio data").font(.caption).foregroundStyle(.tertiary)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
                 } else {
                     Rectangle().fill(Color.secondary.opacity(0.15)).frame(height: 1)
+                        .allowsHitTesting(false)
 
                     WaveformShape(points: waveformPoints)
                         .fill(LinearGradient(
                             colors: [Color.blue.opacity(0.8), Color.blue.opacity(0.4)],
                             startPoint: .top, endPoint: .bottom))
+                        .allowsHitTesting(false)
 
                     WaveformShape(points: waveformPoints)
                         .fill(LinearGradient(
                             colors: [Color.blue.opacity(0.4), Color.blue.opacity(0.1)],
                             startPoint: .top, endPoint: .bottom))
                         .scaleEffect(x: 1, y: -1)
+                        .allowsHitTesting(false)
 
-                    // Loop region overlay
-                    if loopEnabled, numSamples > 0,
+                    if loopEnabled, frameCount > 0,
                        let startBinding = loopStart, let endBinding = loopEnd {
-                        let startFrac = CGFloat(startBinding.wrappedValue) / CGFloat(numSamples)
-                        let endFrac   = CGFloat(endBinding.wrappedValue)   / CGFloat(numSamples)
+                        let startFrac = CGFloat(startBinding.wrappedValue) / CGFloat(frameCount)
+                        let endFrac   = CGFloat(endBinding.wrappedValue)   / CGFloat(frameCount)
                         let startX    = startFrac * geo.size.width
                         let endX      = endFrac   * geo.size.width
+                        let regionW   = max(0, endX - startX)
 
-                        // Shaded loop region
                         Rectangle()
                             .fill(Color.green.opacity(0.15))
-                            .frame(width: max(0, endX - startX))
-                            .offset(x: startX - geo.size.width / 2 + (endX - startX) / 2)
+                            .frame(width: regionW, height: geo.size.height)
+                            .offset(x: startX)
+                            .allowsHitTesting(false)
 
-                        // Loop start handle
-                        LoopHandle(color: .green, label: "S")
-                            .offset(x: startX - geo.size.width / 2)
-                            .gesture(DragGesture(minimumDistance: 0)
+                        // Loop start handle — bar on its leading edge, sat at startX
+                        LoopHandle(color: .green, label: "S", barEdge: .leading)
+                            .frame(width: 14, height: geo.size.height)
+                            .offset(x: startX)
+                            .gesture(DragGesture(minimumDistance: 1)
                                 .onChanged { value in
                                     let frac = max(0, min(1, value.location.x / geo.size.width))
-                                    let newVal = frac * Double(numSamples)
-                                    if newVal < endBinding.wrappedValue {
+                                    let newVal = frac * Double(frameCount)
+                                    if newVal < endBinding.wrappedValue - 100 {
                                         startBinding.wrappedValue = newVal
                                     }
                                 }
                             )
 
-                        // Loop end handle
-                        LoopHandle(color: .red, label: "E")
-                            .offset(x: endX - geo.size.width / 2)
-                            .gesture(DragGesture(minimumDistance: 0)
+                        // Loop end handle — bar on its trailing edge, sat at endX
+                        LoopHandle(color: .red, label: "E", barEdge: .trailing)
+                            .frame(width: 14, height: geo.size.height)
+                            .offset(x: endX - 14)
+                            .gesture(DragGesture(minimumDistance: 1)
                                 .onChanged { value in
                                     let frac = max(0, min(1, value.location.x / geo.size.width))
-                                    let newVal = frac * Double(numSamples)
-                                    if newVal > startBinding.wrappedValue {
+                                    let newVal = frac * Double(frameCount)
+                                    if newVal > startBinding.wrappedValue + 100 {
                                         endBinding.wrappedValue = newVal
                                     }
                                 }
                             )
                     }
+
+                    if playhead > 0 {
+                        Rectangle()
+                            .fill(Color.white.opacity(0.8))
+                            .frame(width: 1.5, height: geo.size.height)
+                            .offset(x: playhead * geo.size.width)
+                            .allowsHitTesting(false)
+                    }
                 }
             }
             .onAppear { computeWaveform(width: geo.size.width) }
-            .onChange(of: geo.size.width) { computeWaveform(width: geo.size.width) }
+            .onChange(of: geo.size.width) { _, newWidth in computeWaveform(width: newWidth) }
         }
     }
 
@@ -126,9 +155,12 @@ struct WaveformView: View {
 struct LoopHandle: View {
     let color: Color
     let label: String
+    /// Which edge the vertical bar sits on, so it lines up exactly with the
+    /// loop-region highlight edge rather than the centre of the handle.
+    var barEdge: HorizontalAlignment = .leading
 
     var body: some View {
-        VStack(spacing: 0) {
+        VStack(alignment: barEdge, spacing: 0) {
             Text(label)
                 .font(.system(size: 8, weight: .bold))
                 .foregroundStyle(.white)
@@ -173,6 +205,72 @@ struct WaveformShape: Shape {
         path.addLine(to: CGPoint(x: width, y: midY))
         path.closeSubpath()
         return path
+    }
+}
+
+// MARK: - Toast
+
+/// A transient, self-dismissing message that slides in at the bottom of the
+/// view and fades out after a delay — no click needed.
+struct ToastData: Equatable {
+    var message: String
+    var isError: Bool = false
+    /// Unique token so re-showing the same text retriggers the animation/timer.
+    var token = UUID()
+}
+
+struct ToastView: View {
+    let data: ToastData
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Image(systemName: data.isError ? "exclamationmark.triangle.fill" : "checkmark.circle.fill")
+                .foregroundStyle(data.isError ? .orange : .green)
+            Text(data.message)
+                .font(.callout)
+                .foregroundStyle(.primary)
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 10)
+        .background(.regularMaterial, in: Capsule())
+        .overlay(Capsule().strokeBorder(Color.secondary.opacity(0.2)))
+        .shadow(color: .black.opacity(0.2), radius: 8, y: 2)
+    }
+}
+
+extension View {
+    /// Presents a toast bound to an optional ToastData. The toast auto-dismisses
+    /// after `duration` seconds by clearing the binding.
+    func toast(_ toast: Binding<ToastData?>, duration: Double = 2.0) -> some View {
+        modifier(ToastModifier(toast: toast, duration: duration))
+    }
+}
+
+private struct ToastModifier: ViewModifier {
+    @Binding var toast: ToastData?
+    let duration: Double
+    @State private var workItem: DispatchWorkItem?
+
+    func body(content: Content) -> some View {
+        content
+            .overlay(alignment: .bottom) {
+                if let toast {
+                    ToastView(data: toast)
+                        .padding(.bottom, 24)
+                        .transition(.move(edge: .bottom).combined(with: .opacity))
+                        .id(toast.token)
+                }
+            }
+            .animation(.spring(response: 0.35, dampingFraction: 0.85), value: toast)
+            .onChange(of: toast?.token) { _, _ in
+                guard toast != nil else { return }
+                workItem?.cancel()
+                let item = DispatchWorkItem {
+                    withAnimation { toast = nil }
+                }
+                workItem = item
+                DispatchQueue.main.asyncAfter(deadline: .now() + duration, execute: item)
+            }
     }
 }
 

@@ -93,6 +93,7 @@ struct SidebarView: View {
         .onAppear {
             deleteKeyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
                 if (event.keyCode == 51 || event.keyCode == 117),
+                   !self.diskImage.isEditingText,
                    let id = self.selectedSampleID,
                    let sample = self.diskImage.samples.first(where: { $0.id == id }) {
                     self.sampleToDelete = sample
@@ -117,6 +118,7 @@ struct SidebarView: View {
                     sampleToDelete = nil
                 }
             }
+            .keyboardShortcut(.defaultAction)
             Button("Cancel", role: .cancel) { sampleToDelete = nil }
         } message: {
             Text("This removes the sample from the list. The disk image file is not modified until you save.")

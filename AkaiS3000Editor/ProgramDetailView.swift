@@ -50,17 +50,17 @@ struct ProgramDetailView: View {
                                     ForEach(1..<17) { ch in Text("\(ch)").tag(UInt8(ch)) }
                                 }
                                 .labelsHidden()
-                                .onChange(of: editedProgram.midiChannel) { isDirty = true }
+                                .onChange(of: editedProgram.midiChannel) { _, _ in isDirty = true }
                             }
                             HStack {
                                 Text("Polyphony").frame(width: 100, alignment: .leading)
                                 Stepper("\(editedProgram.polyphony)", value: $editedProgram.polyphony, in: 1...16)
-                                    .onChange(of: editedProgram.polyphony) { isDirty = true }
+                                    .onChange(of: editedProgram.polyphony) { _, _ in isDirty = true }
                             }
                             HStack {
                                 Text("Bend Range").frame(width: 100, alignment: .leading)
                                 Stepper("\(editedProgram.bendRange) st", value: $editedProgram.bendRange, in: 0...12)
-                                    .onChange(of: editedProgram.bendRange) { isDirty = true }
+                                    .onChange(of: editedProgram.bendRange) { _, _ in isDirty = true }
                             }
                         }
                     }
@@ -143,6 +143,7 @@ struct ProgramDetailView: View {
         } message: {
             Text(alertMsg)
         }
+        .onChange(of: isDirty) { _, _ in diskImage.hasUnsavedChanges = isDirty }
     }
 
     private func addKeyzone() {
@@ -222,7 +223,7 @@ struct KeyzoneEditorView: View {
                         ForEach(sampleNames, id: \.self) { name in Text(name).tag(name) }
                     }
                     .labelsHidden()
-                    .onChange(of: keyzone.sampleName) { onChange() }
+                    .onChange(of: keyzone.sampleName) { _, _ in onChange() }
                 }
 
                 GroupBox("Key Range") {
@@ -255,7 +256,7 @@ struct KeyzoneEditorView: View {
                         HStack {
                             Text("Tune (st)").frame(width: 100, alignment: .leading).font(.subheadline)
                             Stepper("\(keyzone.tuneOffset)", value: $keyzone.tuneOffset, in: -24...24)
-                                .onChange(of: keyzone.tuneOffset) { onChange() }
+                                .onChange(of: keyzone.tuneOffset) { _, _ in onChange() }
                         }
                         HStack {
                             Text("Fine (¢)").frame(width: 100, alignment: .leading).font(.subheadline)
@@ -277,7 +278,7 @@ struct KeyzoneEditorView: View {
                                 .frame(width: 35).font(.system(.caption, design: .monospaced))
                         }
                         Toggle("Loop", isOn: $keyzone.loopEnabled)
-                            .onChange(of: keyzone.loopEnabled) { onChange() }
+                            .onChange(of: keyzone.loopEnabled) { _, _ in onChange() }
                     }
                 }
             }
@@ -300,7 +301,7 @@ struct MidiKeyPicker: View {
                 ForEach(0..<128) { note in Text(noteName(UInt8(note))).tag(UInt8(note)) }
             }
             .labelsHidden()
-            .onChange(of: value) { onChange() }
+            .onChange(of: value) { _, _ in onChange() }
         }
     }
 

@@ -12,11 +12,22 @@ struct SampleDetailView: View {
     @State private var editedLoopEnd: Double
     @State private var editedLoudness: Double
     @State private var isPlaying = false
-    @State private var audioPlayer: AVAudioPlayer?
-    @State private var showingSaveAlert = false
-    @State private var saveMessage = ""
+    @State private var audioEngine: AVAudioEngine?
+    @State private var playerNode: AVAudioPlayerNode?
+    @State private var playStartHostTime: Double = 0
+    @State private var playbackSampleRate: Double = 44100
+    @State private var introFrameCount: Double = 0
+    @State private var loopStartFrame: Double = 0
+    @State private var loopFrameCount: Double = 0
+    @State private var totalPlayFrames: Double = 0
+    @State private var playheadPosition: Double = 0
+    @State private var playheadTimer: Timer?
+    @State private var toast: ToastData?
     @State private var isDirty = false
     @State private var keyMonitor: Any?
+    @State private var isEditingName = false
+    @State private var editedName: String = ""
+    @FocusState private var nameFieldFocused: Bool
 
     init(sample: AkaiSample, diskImage: AkaiDiskImage) {
         self.sample = sample
@@ -24,9 +35,29 @@ struct SampleDetailView: View {
         _editedRootNote = State(initialValue: Int(sample.header.midiRootNote))
         _editedFineTune = State(initialValue: Double(sample.header.fineTune))
         _editedLoopEnabled = State(initialValue: sample.header.loopEnabled)
-        _editedLoopStart = State(initialValue: Double(sample.header.loopStart))
+        // When the sample has no loop set, default the start to 0; otherwise
+        // preserve the stored loop start so existing loop points aren't lost.
+        _editedLoopStart = State(initialValue: sample.header.loopEnabled
+            ? Double(sample.header.loopStart)
+            : 0)
         _editedLoopEnd = State(initialValue: Double(sample.header.loopEnd))
         _editedLoudness = State(initialValue: Double(sample.header.loudness))
+    }
+
+    /// Current display name, preferring the live disk-image copy (so a rename
+    /// elsewhere is reflected) and falling back to the directory entry.
+    private var currentName: String {
+        let live = diskImage.samples.first(where: { $0.id == sample.id })
+        let name = live?.header.name ?? sample.header.name
+        return name.isEmpty ? (live?.directoryEntry.name ?? sample.directoryEntry.name) : name
+    }
+
+    /// Actual number of audio frames in the PCM data — the ground truth shared by
+    /// the waveform, the loop sliders, and playback so they all stay aligned.
+    private var audioFrameCount: Int {
+        let bytesPerFrame = max(1, sample.header.numChannels) * 2
+        let fromAudio = sample.audioData.count / bytesPerFrame
+        return fromAudio > 0 ? fromAudio : max(Int(sample.header.numSamples), 1)
     }
 
     var body: some View {
@@ -35,30 +66,81 @@ struct SampleDetailView: View {
 
                 HStack {
                     VStack(alignment: .leading, spacing: 4) {
-                        Text(sample.header.name.isEmpty ? sample.directoryEntry.name : sample.header.name)
-                            .font(.system(.title, design: .monospaced).bold())
-                            .textSelection(.enabled)
+                        if isEditingName {
+                            HStack(spacing: 8) {
+                                TextField("Sample name", text: $editedName)
+                                    .textFieldStyle(.roundedBorder)
+                                    .font(.system(.title2, design: .monospaced))
+                                    .frame(maxWidth: 280)
+                                    .focused($nameFieldFocused)
+                                    .onChange(of: editedName) { _, newValue in
+                                        // Live-filter to the Akai character set, max 12 chars.
+                                        let clean = AkaiDiskImage.sanitizeName(newValue)
+                                        if clean != newValue { editedName = clean }
+                                    }
+                                    .onSubmit { commitRename() }
+                                Text("\(editedName.count)/12")
+                                    .font(.caption.monospaced())
+                                    .foregroundStyle(.secondary)
+                                Button { commitRename() } label: {
+                                    Image(systemName: "checkmark.circle.fill")
+                                }
+                                .buttonStyle(.borderless)
+                                .help("Save name")
+                                .disabled(editedName.trimmingCharacters(in: .whitespaces).isEmpty)
+                                Button { cancelRename() } label: {
+                                    Image(systemName: "xmark.circle")
+                                }
+                                .buttonStyle(.borderless)
+                                .help("Cancel")
+                            }
+                        } else {
+                            HStack(spacing: 6) {
+                                Text(currentName)
+                                    .font(.system(.title, design: .monospaced).bold())
+                                    .textSelection(.enabled)
+                                Button { beginRename() } label: {
+                                    Image(systemName: "pencil")
+                                        .font(.system(size: 14))
+                                }
+                                .buttonStyle(.borderless)
+                                .help("Rename sample")
+                            }
+                        }
                         Text("Sample · \(formatSize(Int(sample.directoryEntry.size)))")
                             .font(.subheadline)
                             .foregroundStyle(.secondary)
                     }
                     Spacer()
-                    Button { exportWAV() } label: {
-                        Label("Export WAV", systemImage: "square.and.arrow.up")
-                    }.buttonStyle(.borderedProminent)
-                    Button { togglePlayback() } label: {
-                        Image(systemName: isPlaying ? "stop.fill" : "play.fill")
+                    Button { saveChanges() } label: {
+                        Image(systemName: "square.and.arrow.down")
+                            .frame(width: 20, height: 20)
                     }
                     .buttonStyle(.bordered)
-                    .help(isPlaying ? "Stop (Space)" : "Preview (Space)")
+                    .disabled(!isDirty)
+                    .help("Save changes to disk image")
+                    Button { exportWAV() } label: {
+                        Image(systemName: "arrow.up.forward.square")
+                            .frame(width: 20, height: 20)
+                    }
+                    .buttonStyle(.bordered)
+                    .help("Export as WAV")
+                    Button { togglePlayback() } label: {
+                        Image(systemName: isPlaying ? "stop.fill" : "play.fill")
+                            .frame(width: 20, height: 20)
+                    }
+                    .buttonStyle(.bordered)
+                    .help(isPlaying ? "Stop (Space)" : "Play (Space)")
                 }
 
                 WaveformView(
                     audioData: sample.audioData,
                     numSamples: Int(sample.header.numSamples),
+                    numChannels: sample.header.numChannels,
                     loopEnabled: editedLoopEnabled,
                     loopStart: $editedLoopStart,
-                    loopEnd: $editedLoopEnd
+                    loopEnd: $editedLoopEnd,
+                    playhead: playheadPosition
                 )
                     .frame(height: 120)
                     .clipShape(RoundedRectangle(cornerRadius: 8))
@@ -82,7 +164,7 @@ struct SampleDetailView: View {
                                     ForEach(0..<128) { note in Text(midiNoteName(UInt8(note))).tag(note) }
                                 }
                                 .labelsHidden().frame(width: 80)
-                                .onChange(of: editedRootNote) { isDirty = true }
+                                .onChange(of: editedRootNote) { _, _ in commitEditsToImage() }
                             }
                             VStack(alignment: .leading, spacing: 4) {
                                 HStack {
@@ -91,7 +173,7 @@ struct SampleDetailView: View {
                                     Text("\(Int(editedFineTune))¢").font(.system(.body, design: .monospaced))
                                 }
                                 Slider(value: $editedFineTune, in: -50...50, step: 1)
-                                    .onChange(of: editedFineTune) { isDirty = true }
+                                    .onChange(of: editedFineTune) { _, _ in commitEditsToImage() }
                             }
                             HStack {
                                 Text("Loudness").font(.subheadline).foregroundStyle(.secondary)
@@ -99,17 +181,17 @@ struct SampleDetailView: View {
                                 Text("\(Int(editedLoudness))").font(.system(.body, design: .monospaced))
                             }
                             Slider(value: $editedLoudness, in: 0...99, step: 1)
-                                .onChange(of: editedLoudness) { isDirty = true }
+                                .onChange(of: editedLoudness) { _, _ in commitEditsToImage() }
                         }
                     }
                 }
 
                 InfoCard(title: "Loop") {
                     VStack(alignment: .leading, spacing: 12) {
-                        Toggle("Loop", isOn: $editedLoopEnabled)
-                            .onChange(of: editedLoopEnabled) { isDirty = true }
+                        Toggle("Loop Enabled", isOn: $editedLoopEnabled)
+                            .onChange(of: editedLoopEnabled) { _, _ in commitEditsToImage() }
                         if editedLoopEnabled {
-                            let maxSamples = Double(max(sample.header.numSamples, 1))
+                            let maxSamples = Double(max(audioFrameCount, 1))
                             VStack(alignment: .leading, spacing: 4) {
                                 HStack {
                                     Text("Loop Start").font(.subheadline).foregroundStyle(.secondary)
@@ -117,9 +199,9 @@ struct SampleDetailView: View {
                                     Text("\(Int(editedLoopStart))").font(.system(.caption, design: .monospaced))
                                 }
                                 Slider(value: $editedLoopStart, in: 0...max(maxSamples - 1, 1))
-                                    .onChange(of: editedLoopStart) {
+                                    .onChange(of: editedLoopStart) { _, _ in
                                         if editedLoopStart >= editedLoopEnd { editedLoopEnd = editedLoopStart + 1 }
-                                        isDirty = true
+                                        commitEditsToImage()
                                     }
                             }
                             VStack(alignment: .leading, spacing: 4) {
@@ -129,9 +211,9 @@ struct SampleDetailView: View {
                                     Text("\(Int(editedLoopEnd))").font(.system(.caption, design: .monospaced))
                                 }
                                 Slider(value: $editedLoopEnd, in: 0...maxSamples)
-                                    .onChange(of: editedLoopEnd) {
+                                    .onChange(of: editedLoopEnd) { _, _ in
                                         if editedLoopEnd <= editedLoopStart { editedLoopStart = max(0, editedLoopEnd - 1) }
-                                        isDirty = true
+                                        commitEditsToImage()
                                     }
                             }
                         }
@@ -142,7 +224,6 @@ struct SampleDetailView: View {
                     HStack {
                         Spacer()
                         Button("Revert") { revert() }.buttonStyle(.bordered)
-                        Button("Save to Disk Image") { saveChanges() }.buttonStyle(.borderedProminent)
                     }
                 }
             }
@@ -150,20 +231,17 @@ struct SampleDetailView: View {
         }
         .onAppear {
             keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
-                if event.keyCode == 49 { self.togglePlayback(); return nil }
+                if event.keyCode == 49 && !self.isEditingName { self.togglePlayback(); return nil }
                 return event
             }
         }
+        .onChange(of: isDirty) { _, _ in diskImage.hasUnsavedChanges = isDirty }
         .onDisappear {
             if let m = keyMonitor { NSEvent.removeMonitor(m); keyMonitor = nil }
-            audioPlayer?.stop()
+            diskImage.isEditingText = false
+            stopPlayback()
         }
-        .alert(showingSaveAlert ? "Saved" : "Error",
-               isPresented: .constant(showingSaveAlert || (!saveMessage.isEmpty && saveMessage != "OK"))) {
-            Button("OK") { saveMessage = ""; showingSaveAlert = false }
-        } message: {
-            Text(saveMessage)
-        }
+        .toast($toast)
     }
 
     private func exportWAV() {
@@ -177,27 +255,140 @@ struct SampleDetailView: View {
             do {
                 let wavData = try diskImage.exportSampleAsWAV(sample: sample)
                 try wavData.write(to: url)
-                saveMessage = "Exported to \(url.lastPathComponent)"
-                showingSaveAlert = true
-            } catch { saveMessage = error.localizedDescription }
+                toast = ToastData(message: "Exported to \(url.lastPathComponent)")
+            } catch { toast = ToastData(message: error.localizedDescription, isError: true) }
         }
     }
 
     private func togglePlayback() {
-        if isPlaying { audioPlayer?.stop(); isPlaying = false; return }
-        do {
-            let wavData = try diskImage.exportSampleAsWAV(sample: sample)
-            audioPlayer = try AVAudioPlayer(data: wavData)
-            audioPlayer?.numberOfLoops = editedLoopEnabled ? -1 : 0  // -1 = loop forever
-            audioPlayer?.play()
-            isPlaying = true
-            // Only auto-stop when not looping
-            if !editedLoopEnabled {
-                DispatchQueue.main.asyncAfter(deadline: .now() + (audioPlayer?.duration ?? 1) + 0.1) {
-                    self.isPlaying = false
+        if isPlaying {
+            stopPlayback()
+            return
+        }
+        startPlayback()
+    }
+
+    private func stopPlayback() {
+        playerNode?.stop()
+        audioEngine?.stop()
+        playerNode = nil
+        audioEngine = nil
+        isPlaying = false
+        playheadTimer?.invalidate()
+        playheadTimer = nil
+        playheadPosition = 0
+    }
+
+    /// Build a float buffer from the sample's 16-bit PCM and play it through an
+    /// AVAudioEngine. If looping is enabled, the intro (0 → loopStart) plays once,
+    /// then the loop region (loopStart → loopEnd) repeats until stopped. If looping
+    /// is disabled, the whole sample plays once.
+    private func startPlayback() {
+        let pcm = sample.audioData
+        guard !pcm.isEmpty else { return }
+        let channels = UInt32(max(1, sample.header.numChannels))
+        let sr = Double(sample.header.sampleRate > 0 ? sample.header.sampleRate : 44100)
+        playbackSampleRate = sr
+
+        guard let format = AVAudioFormat(commonFormat: .pcmFormatFloat32,
+                                         sampleRate: sr,
+                                         channels: channels,
+                                         interleaved: false) else { return }
+
+        // Convert 16-bit LE PCM to float samples (per channel).
+        let bytesPerFrame = Int(channels) * 2
+        let frameCount = pcm.count / bytesPerFrame
+        guard frameCount > 0 else { return }
+
+        func makeBuffer(fromFrame start: Int, toFrame end: Int) -> AVAudioPCMBuffer? {
+            let count = end - start
+            guard count > 0,
+                  let buf = AVAudioPCMBuffer(pcmFormat: format,
+                                             frameCapacity: AVAudioFrameCount(count)) else { return nil }
+            buf.frameLength = AVAudioFrameCount(count)
+            guard let channelData = buf.floatChannelData else { return nil }
+            pcm.withUnsafeBytes { (raw: UnsafeRawBufferPointer) in
+                let i16 = raw.bindMemory(to: Int16.self)
+                for frame in 0..<count {
+                    for ch in 0..<Int(channels) {
+                        let srcIdx = (start + frame) * Int(channels) + ch
+                        let v = srcIdx < i16.count ? Float(i16[srcIdx]) / 32768.0 : 0
+                        channelData[ch][frame] = v
+                    }
                 }
             }
-        } catch {}
+            return buf
+        }
+
+        let engine = AVAudioEngine()
+        let node = AVAudioPlayerNode()
+        engine.attach(node)
+        engine.connect(node, to: engine.mainMixerNode, format: format)
+
+        let useLoop = editedLoopEnabled
+        let loopStartFr = min(max(0, Int(editedLoopStart)), frameCount)
+        let loopEndFr = min(max(loopStartFr + 1, Int(editedLoopEnd)), frameCount)
+
+        // Bookkeeping for the playhead overlay.
+        introFrameCount = Double(useLoop ? loopStartFr : frameCount)
+        loopStartFrame = Double(loopStartFr)
+        loopFrameCount = Double(useLoop ? (loopEndFr - loopStartFr) : 0)
+        totalPlayFrames = Double(frameCount)
+
+        do {
+            try engine.start()
+        } catch {
+            toast = ToastData(message: "Playback failed: \(error.localizedDescription)", isError: true)
+            return
+        }
+
+        if useLoop {
+            // Intro: 0 → loopEnd, played once (so the loopStart→loopEnd region is
+            // heard in context the first time through), then loopStart→loopEnd repeats.
+            if let intro = makeBuffer(fromFrame: 0, toFrame: loopEndFr) {
+                node.scheduleBuffer(intro, at: nil, options: [])
+            }
+            if let loop = makeBuffer(fromFrame: loopStartFr, toFrame: loopEndFr) {
+                node.scheduleBuffer(loop, at: nil, options: [.loops])
+            }
+        } else {
+            if let whole = makeBuffer(fromFrame: 0, toFrame: frameCount) {
+                node.scheduleBuffer(whole, at: nil, options: []) {
+                    // Auto-stop at end when not looping.
+                    DispatchQueue.main.async { self.stopPlayback() }
+                }
+            }
+        }
+
+        audioEngine = engine
+        playerNode = node
+        node.play()
+        isPlaying = true
+        playheadPosition = 0
+
+        // Drive the playhead from the node's render time.
+        playheadTimer = Timer.scheduledTimer(withTimeInterval: 1.0/30.0, repeats: true) { _ in
+            guard let node = self.playerNode,
+                  let lastRender = node.lastRenderTime,
+                  let playerTime = node.playerTime(forNodeTime: lastRender) else { return }
+            let played = Double(playerTime.sampleTime)
+            let total = self.totalPlayFrames
+            guard total > 0 else { return }
+
+            if self.editedLoopEnabled && self.loopFrameCount > 0 {
+                // First pass plays 0 → loopEnd; afterwards the playhead wraps
+                // within the loopStart → loopEnd region.
+                let firstPassFrames = self.loopStartFrame + self.loopFrameCount  // 0 → loopEnd
+                if played < firstPassFrames {
+                    self.playheadPosition = played / total
+                } else {
+                    let into = (played - firstPassFrames).truncatingRemainder(dividingBy: self.loopFrameCount)
+                    self.playheadPosition = (self.loopStartFrame + into) / total
+                }
+            } else {
+                self.playheadPosition = min(played / total, 1.0)
+            }
+        }
     }
 
     private func saveChanges() {
@@ -213,9 +404,63 @@ struct SampleDetailView: View {
         do {
             try diskImage.writeSampleToImage(sample: updatedSample)
             isDirty = false
-            saveMessage = "Changes saved"
-            showingSaveAlert = true
-        } catch { saveMessage = error.localizedDescription }
+            toast = ToastData(message: "Changes saved")
+        } catch { toast = ToastData(message: error.localizedDescription, isError: true) }
+    }
+
+    /// Build a sample carrying the current edits.
+    private func editedSample() -> AkaiSample {
+        var h = sample.header
+        h.midiRootNote = UInt8(editedRootNote)
+        h.fineTune = Int8(editedFineTune)
+        h.loopEnabled = editedLoopEnabled
+        h.loopStart = UInt32(editedLoopStart)
+        h.loopEnd = UInt32(editedLoopEnd)
+        h.loudness = UInt8(editedLoudness)
+        var s = sample
+        s.header = h
+        return s
+    }
+
+    /// Push current edits into the in-memory image so a global Save All persists
+    /// them even if the per-sample Save button wasn't used. Does not write a file.
+    private func commitEditsToImage() {
+        isDirty = true
+        diskImage.applySampleEdits(editedSample())
+    }
+
+    private func beginRename() {
+        editedName = currentName
+        isEditingName = true
+        diskImage.isEditingText = true
+        DispatchQueue.main.async { nameFieldFocused = true }
+    }
+
+    private func cancelRename() {
+        isEditingName = false
+        nameFieldFocused = false
+        diskImage.isEditingText = false
+    }
+
+    private func commitRename() {
+        let clean = AkaiDiskImage.sanitizeName(editedName)
+        guard !clean.trimmingCharacters(in: .whitespaces).isEmpty else { return }
+        // No-op if unchanged.
+        if clean == currentName {
+            isEditingName = false
+            nameFieldFocused = false
+            diskImage.isEditingText = false
+            return
+        }
+        do {
+            try diskImage.renameSample(id: sample.id, to: clean)
+            isEditingName = false
+            nameFieldFocused = false
+            diskImage.isEditingText = false
+            toast = ToastData(message: "Renamed to \(clean)")
+        } catch {
+            toast = ToastData(message: error.localizedDescription, isError: true)
+        }
     }
 
     private func revert() {
@@ -226,6 +471,9 @@ struct SampleDetailView: View {
         editedLoopEnd = Double(sample.header.loopEnd)
         editedLoudness = Double(sample.header.loudness)
         isDirty = false
+        // Restore the original header bytes in the in-memory image so a later
+        // Save All doesn't persist reverted edits.
+        diskImage.applySampleEdits(sample)
     }
 
     private func formatDuration() -> String {

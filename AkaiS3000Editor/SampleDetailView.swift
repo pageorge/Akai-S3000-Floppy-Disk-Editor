@@ -7,16 +7,13 @@ struct SampleDetailView: View {
 
     @State private var editedRootNote: Int
     @State private var editedFineTune: Double
+    @State private var editedSemitone: Double
     @State private var editedLoopEnabled: Bool
     @State private var editedLoopStart: Double
     @State private var editedLoopEnd: Double
-    @State private var editedLoudness: Double
     @State private var isPlaying = false
     @State private var audioEngine: AVAudioEngine?
     @State private var playerNode: AVAudioPlayerNode?
-    @State private var playStartHostTime: Double = 0
-    @State private var playbackSampleRate: Double = 44100
-    @State private var introFrameCount: Double = 0
     @State private var loopStartFrame: Double = 0
     @State private var loopFrameCount: Double = 0
     @State private var totalPlayFrames: Double = 0
@@ -40,8 +37,11 @@ struct SampleDetailView: View {
         _editedLoopStart = State(initialValue: sample.header.loopEnabled
             ? Double(sample.header.loopStart)
             : 0)
+        // loopEnd comes straight from the header model: the real loop region
+        // [loopStart, loopStart+len), clamped so it never exceeds the buffer
+        // (there's no audio past numSamples).
         _editedLoopEnd = State(initialValue: Double(sample.header.loopEnd))
-        _editedLoudness = State(initialValue: Double(sample.header.loudness))
+        _editedSemitone = State(initialValue: Double(sample.header.semitoneTune))
     }
 
     /// Current display name, preferring the live disk-image copy (so a rename
@@ -52,12 +52,12 @@ struct SampleDetailView: View {
         return name.isEmpty ? (live?.directoryEntry.name ?? sample.directoryEntry.name) : name
     }
 
-    /// Actual number of audio frames in the PCM data — the ground truth shared by
-    /// the waveform, the loop sliders, and playback so they all stay aligned.
+    /// Number of audio frames — the canonical sample count from the header
+    /// (slen @ 0x1A), which the Akai itself reports and which equals the stored
+    /// audio length. Single source of truth for the waveform, loop sliders and
+    /// playback.
     private var audioFrameCount: Int {
-        let bytesPerFrame = max(1, sample.header.numChannels) * 2
-        let fromAudio = sample.audioData.count / bytesPerFrame
-        return fromAudio > 0 ? fromAudio : max(Int(sample.header.numSamples), 1)
+        Int(sample.header.numSamples)
     }
 
     var body: some View {
@@ -136,12 +136,14 @@ struct SampleDetailView: View {
                 WaveformView(
                     audioData: sample.audioData,
                     numSamples: Int(sample.header.numSamples),
-                    numChannels: sample.header.numChannels,
                     loopEnabled: editedLoopEnabled,
                     loopStart: $editedLoopStart,
                     loopEnd: $editedLoopEnd,
                     playhead: playheadPosition
                 )
+                    .id(sample.id)   // force a fresh WaveformView (and @State) per sample,
+                                     // so switching samples can never leave stale waveMin/
+                                     // waveMax from a previous selection.
                     .frame(height: 120)
                     .clipShape(RoundedRectangle(cornerRadius: 8))
 
@@ -151,7 +153,7 @@ struct SampleDetailView: View {
                     InfoCard(title: "Sample Info") {
                         InfoRow(label: "Sample Rate", value: "\(sample.header.sampleRate) Hz")
                         InfoRow(label: "Duration", value: formatDuration())
-                        InfoRow(label: "Channels", value: sample.header.numChannels == 1 ? "Mono" : "Stereo")
+                        InfoRow(label: "Channels", value: "Mono")
                         InfoRow(label: "Bit Depth", value: "\(sample.header.bitDepth)-bit")
                         InfoRow(label: "Samples", value: "\(sample.header.numSamples)")
                     }
@@ -175,13 +177,16 @@ struct SampleDetailView: View {
                                 Slider(value: $editedFineTune, in: -50...50, step: 1)
                                     .onChange(of: editedFineTune) { _, _ in commitEditsToImage() }
                             }
-                            HStack {
-                                Text("Loudness").font(.subheadline).foregroundStyle(.secondary)
-                                Spacer()
-                                Text("\(Int(editedLoudness))").font(.system(.body, design: .monospaced))
+                            VStack(alignment: .leading, spacing: 4) {
+                                HStack {
+                                    Text("Semitone Tune").font(.subheadline).foregroundStyle(.secondary)
+                                    Spacer()
+                                    Text("\(Int(editedSemitone) > 0 ? "+" : "")\(Int(editedSemitone))")
+                                        .font(.system(.body, design: .monospaced))
+                                }
+                                Slider(value: $editedSemitone, in: -36...36, step: 1)
+                                    .onChange(of: editedSemitone) { _, _ in commitEditsToImage() }
                             }
-                            Slider(value: $editedLoudness, in: 0...99, step: 1)
-                                .onChange(of: editedLoudness) { _, _ in commitEditsToImage() }
                         }
                     }
                 }
@@ -223,7 +228,7 @@ struct SampleDetailView: View {
                 if isDirty {
                     HStack {
                         Spacer()
-                        Button("Revert") { revert() }.buttonStyle(.bordered)
+                        Button("Reset") { resetSampleEdits() }.buttonStyle(.bordered)
                     }
                 }
             }
@@ -279,29 +284,41 @@ struct SampleDetailView: View {
         playheadPosition = 0
     }
 
-    /// Build a float buffer from the sample's 16-bit PCM and play it through an
-    /// AVAudioEngine. If looping is enabled, the intro (0 → loopStart) plays once,
-    /// then the loop region (loopStart → loopEnd) repeats until stopped. If looping
-    /// is disabled, the whole sample plays once.
+    /// Build a float buffer from the sample's 16-bit mono PCM and play it through
+    /// an AVAudioEngine. All S3000 samples are mono (stereo is stored as a -L/-R
+    /// pair of mono samples). If looping is enabled, the intro (0 → loopEnd) plays
+    /// once, then the loop region (loopStart → loopEnd) repeats until stopped.
     private func startPlayback() {
         let pcm = sample.audioData
         guard !pcm.isEmpty else { return }
-        let channels = UInt32(max(1, sample.header.numChannels))
-        let sr = Double(sample.header.sampleRate > 0 ? sample.header.sampleRate : 44100)
-        playbackSampleRate = sr
+        // Sample rate comes straight from the header (srate @ 0x8A). No fallback:
+        // a valid S3000 sample always carries its rate.
+        let baseRate = Double(sample.header.sampleRate)
+        guard baseRate > 0 else { return }
+
+        // Apply semitone + fine (cents) tune as a playback-rate multiplier so the
+        // preview is pitched the way the Akai would play it. 12 semitones = 2x.
+        // Root note is intentionally NOT applied: it's only meaningful relative to
+        // a pressed MIDI key, which doesn't exist when auditioning the raw sample.
+        let semis = editedSemitone + editedFineTune / 100.0
+        let pitchRatio = pow(2.0, semis / 12.0)
+        let sr = baseRate * pitchRatio
 
         guard let format = AVAudioFormat(commonFormat: .pcmFormatFloat32,
                                          sampleRate: sr,
-                                         channels: channels,
+                                         channels: 1,
                                          interleaved: false) else { return }
 
-        // Convert 16-bit LE PCM to float samples (per channel).
-        let bytesPerFrame = Int(channels) * 2
-        let frameCount = pcm.count / bytesPerFrame
+        // 16-bit LE PCM → float, single channel.
+        let frameCount = pcm.count / 2
         guard frameCount > 0 else { return }
 
         func makeBuffer(fromFrame start: Int, toFrame end: Int) -> AVAudioPCMBuffer? {
-            let count = end - start
+            // Clamp defensively: a loop end can legitimately exceed the stored
+            // audio length on hardware samples, and start must never exceed end.
+            let s = max(0, min(start, frameCount))
+            let e = max(s + 1, min(end, frameCount))
+            let count = e - s
             guard count > 0,
                   let buf = AVAudioPCMBuffer(pcmFormat: format,
                                              frameCapacity: AVAudioFrameCount(count)) else { return nil }
@@ -310,11 +327,44 @@ struct SampleDetailView: View {
             pcm.withUnsafeBytes { (raw: UnsafeRawBufferPointer) in
                 let i16 = raw.bindMemory(to: Int16.self)
                 for frame in 0..<count {
-                    for ch in 0..<Int(channels) {
-                        let srcIdx = (start + frame) * Int(channels) + ch
-                        let v = srcIdx < i16.count ? Float(i16[srcIdx]) / 32768.0 : 0
-                        channelData[ch][frame] = v
-                    }
+                    let srcIdx = s + frame
+                    channelData[0][frame] = srcIdx < i16.count ? Float(i16[srcIdx]) / 32768.0 : 0
+                }
+            }
+            return buf
+        }
+
+        // Build the loop preview as a simple bounded loop: the run-in
+        // (0 → loopStart) once, then loopStart → loopEnd repeated. loopEnd is the
+        // real header-derived end (at+len, clamped to the buffer) — NOT always
+        // the buffer end. Verified against hardware: at=48,len=48 loops just
+        // samples 48→96, not 48→end-of-buffer.
+        func makeBoundedLoop(introStart: Int, loopStart: Int, loopEnd: Int,
+                             targetSeconds: Double) -> AVAudioPCMBuffer? {
+            guard loopEnd > 0 else { return nil }
+            let i0 = max(0, min(introStart, loopEnd))
+            let ls = max(0, min(loopStart, loopEnd - 1))
+            let le = max(ls + 1, min(loopEnd, frameCount))
+            let loopLen = le - ls
+            guard loopLen > 0 else { return nil }
+            let introLen = max(0, ls - i0)
+            let passes = max(1, Int((sr * targetSeconds) / Double(loopLen)))
+            let total = introLen + loopLen * passes
+            guard total > 0,
+                  let buf = AVAudioPCMBuffer(pcmFormat: format,
+                                             frameCapacity: AVAudioFrameCount(total)) else { return nil }
+            buf.frameLength = AVAudioFrameCount(total)
+            guard let out = buf.floatChannelData else { return nil }
+
+            pcm.withUnsafeBytes { (raw: UnsafeRawBufferPointer) in
+                let i16 = raw.bindMemory(to: Int16.self)
+                func sampleAt(_ idx: Int) -> Float {
+                    idx >= 0 && idx < i16.count ? Float(i16[idx]) / 32768.0 : 0
+                }
+                var w = 0
+                for f in 0..<introLen { out[0][w] = sampleAt(i0 + f); w += 1 }
+                for _ in 0..<passes {
+                    for f in 0..<loopLen { out[0][w] = sampleAt(ls + f); w += 1 }
                 }
             }
             return buf
@@ -326,13 +376,16 @@ struct SampleDetailView: View {
         engine.connect(node, to: engine.mainMixerNode, format: format)
 
         let useLoop = editedLoopEnabled
-        let loopStartFr = min(max(0, Int(editedLoopStart)), frameCount)
-        let loopEndFr = min(max(loopStartFr + 1, Int(editedLoopEnd)), frameCount)
+        // loopStart/loopEnd come straight from the sliders, which mirror the real
+        // header fields (at, and at+len clamped to the buffer) — the loop region
+        // is genuinely [loopStart, loopEnd), not always the whole buffer.
+        let bufferLen = frameCount
+        let loopAtFr = max(0, min(Int(editedLoopStart), bufferLen - 1))
+        let loopEndFr = max(loopAtFr + 1, min(Int(editedLoopEnd), bufferLen))
 
         // Bookkeeping for the playhead overlay.
-        introFrameCount = Double(useLoop ? loopStartFr : frameCount)
-        loopStartFrame = Double(loopStartFr)
-        loopFrameCount = Double(useLoop ? (loopEndFr - loopStartFr) : 0)
+        loopStartFrame = Double(loopAtFr)
+        loopFrameCount = Double(useLoop ? loopEndFr - loopAtFr : 0)
         totalPlayFrames = Double(frameCount)
 
         do {
@@ -343,13 +396,12 @@ struct SampleDetailView: View {
         }
 
         if useLoop {
-            // Intro: 0 → loopEnd, played once (so the loopStart→loopEnd region is
-            // heard in context the first time through), then loopStart→loopEnd repeats.
-            if let intro = makeBuffer(fromFrame: 0, toFrame: loopEndFr) {
-                node.scheduleBuffer(intro, at: nil, options: [])
-            }
-            if let loop = makeBuffer(fromFrame: loopStartFr, toFrame: loopEndFr) {
-                node.scheduleBuffer(loop, at: nil, options: [.loops])
+            // Bounded loop: run-in once, then loopStart → loopEnd repeated.
+            if let preview = makeBoundedLoop(introStart: 0,
+                                             loopStart: loopAtFr,
+                                             loopEnd: loopEndFr,
+                                             targetSeconds: 3.0) {
+                node.scheduleBuffer(preview, at: nil, options: [.loops])
             }
         } else {
             if let whole = makeBuffer(fromFrame: 0, toFrame: frameCount) {
@@ -398,7 +450,6 @@ struct SampleDetailView: View {
         updatedHeader.loopEnabled = editedLoopEnabled
         updatedHeader.loopStart = UInt32(editedLoopStart)
         updatedHeader.loopEnd = UInt32(editedLoopEnd)
-        updatedHeader.loudness = UInt8(editedLoudness)
         var updatedSample = sample
         updatedSample.header = updatedHeader
         do {
@@ -416,7 +467,6 @@ struct SampleDetailView: View {
         h.loopEnabled = editedLoopEnabled
         h.loopStart = UInt32(editedLoopStart)
         h.loopEnd = UInt32(editedLoopEnd)
-        h.loudness = UInt8(editedLoudness)
         var s = sample
         s.header = h
         return s
@@ -463,17 +513,16 @@ struct SampleDetailView: View {
         }
     }
 
-    private func revert() {
-        editedRootNote = Int(sample.header.midiRootNote)
-        editedFineTune = Double(sample.header.fineTune)
-        editedLoopEnabled = sample.header.loopEnabled
-        editedLoopStart = Double(sample.header.loopStart)
-        editedLoopEnd = Double(sample.header.loopEnd)
-        editedLoudness = Double(sample.header.loudness)
-        isDirty = false
-        // Restore the original header bytes in the in-memory image so a later
-        // Save All doesn't persist reverted edits.
-        diskImage.applySampleEdits(sample)
+    /// Reset tuning (fine + semitone) and the loop to defaults: tune to 0, loop
+    /// disabled, loop start at 0 and loop end at the end of the sample. Root note
+    /// is left as-is.
+    private func resetSampleEdits() {
+        editedFineTune = 0
+        editedSemitone = 0
+        editedLoopEnabled = false
+        editedLoopStart = 0
+        editedLoopEnd = Double(max(audioFrameCount - 1, 0))
+        commitEditsToImage()
     }
 
     private func formatDuration() -> String {

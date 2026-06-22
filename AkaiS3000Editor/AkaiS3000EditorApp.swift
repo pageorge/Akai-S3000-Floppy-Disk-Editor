@@ -5,16 +5,21 @@ import AppKit
 struct AkaiS3000EditorApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
     @StateObject private var diskImage = AppDiskImageHolder.shared
+    @StateObject private var greaseweazle = GreaseweazleRunner()
 
     var body: some Scene {
         WindowGroup {
-            ContentView(diskImage: diskImage.image)
+            ContentView(diskImage: diskImage.image, greaseweazle: greaseweazle)
                 .frame(minWidth: 1100, minHeight: 700)
         }
         .windowStyle(.titleBar)
         .windowToolbarStyle(.unified)
         .commands {
             CommandGroup(replacing: .newItem) {
+                Button("New Disk Image…") {
+                    NotificationCenter.default.post(name: .createDiskImage, object: nil)
+                }
+                .keyboardShortcut("n", modifiers: .command)
                 Button("Open Disk Image…") {
                     NotificationCenter.default.post(name: .openDiskImage, object: nil)
                 }
@@ -26,6 +31,7 @@ struct AkaiS3000EditorApp: App {
 
 extension Notification.Name {
     static let openDiskImage = Notification.Name("openDiskImage")
+    static let createDiskImage = Notification.Name("createDiskImage")
 }
 
 // MARK: - Shared disk image holder

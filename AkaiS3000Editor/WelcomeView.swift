@@ -20,7 +20,7 @@ struct WelcomeView: View {
                 ZStack {
                     RoundedRectangle(cornerRadius: 16)
                         .fill(isDragging ? Color.red.opacity(0.08) : Color.secondary.opacity(0.06))
-                        .frame(width: 320, height: 80)
+                        .frame(width: 380, height: 150)
                         .overlay(
                             RoundedRectangle(cornerRadius: 16)
                                 .strokeBorder(
@@ -39,6 +39,14 @@ struct WelcomeView: View {
                         .tint(.red)
                         Text("or drag a .img file here")
                             .font(.caption).foregroundStyle(.tertiary)
+                        Button {
+                            NotificationCenter.default.post(name: .createDiskImage, object: nil)
+                        } label: {
+                            Label("New Disk Image", systemImage: "plus.rectangle.on.folder")
+                                .frame(width: 180)
+                        }
+                        .buttonStyle(.bordered)
+                        .padding(.top, 4)
                     }
                 }
                 .animation(.easeInOut(duration: 0.15), value: isDragging)
@@ -96,7 +104,7 @@ struct AkaiLogoView: View {
                             .font(.system(size: 28, weight: .black))
                             .foregroundColor(akaiRed)
                         Text("EDITOR")
-                            .font(.system(size: 11, weight: .bold))
+                            .font(.system(size: 14, weight: .bold))
                             .kerning(4)
                             .foregroundColor(.white.opacity(0.4))
                     }

@@ -3,6 +3,7 @@ import UniformTypeIdentifiers
 
 struct ContentView: View {
     @ObservedObject var diskImage: AkaiDiskImage
+    @ObservedObject var greaseweazle: GreaseweazleRunner
     @State private var selectedTab: SidebarTab = .samples
     @State private var selectedSampleID: UUID? = nil
     @State private var selectedProgramID: UUID? = nil
@@ -32,32 +33,80 @@ struct ContentView: View {
             // Sidebar
             SidebarView(
                 diskImage: diskImage,
+                greaseweazle: greaseweazle,
                 selectedTab: $selectedTab,
                 selectedSampleID: $selectedSampleID,
                 selectedProgramID: $selectedProgramID
             )
             .navigationSplitViewColumnWidth(min: 220, ideal: 250)
         } detail: {
-            if !diskImage.isLoaded {
-                WelcomeView(diskImage: diskImage)
-            } else {
-                switch selectedTab {
-                case .samples:
-                    if let id = selectedSampleID,
-                       let sample = diskImage.samples.first(where: { $0.id == id }) {
-                        SampleDetailView(sample: sample, diskImage: diskImage)
+            VStack(spacing: 0) {
+                if diskImage.isLoaded, let url = diskImage.imageURL {
+                    DiskPathBar(url: url)
+                    Divider()
+                }
+                Group {
+                    if greaseweazle.isBusy || !greaseweazle.logLines.isEmpty {
+                        GreaseweazleLogView(runner: greaseweazle)
+                    } else if !diskImage.isLoaded {
+                        WelcomeView(diskImage: diskImage)
                     } else {
-                        SampleListView(diskImage: diskImage, selectedSampleID: $selectedSampleID)
+                        switch selectedTab {
+                        case .samples:
+                            if let id = selectedSampleID,
+                               let sample = diskImage.samples.first(where: { $0.id == id }) {
+                                SampleDetailView(sample: sample, diskImage: diskImage)
+                                    .id(id)
+                            } else {
+                                SampleListView(diskImage: diskImage, selectedSampleID: $selectedSampleID)
+                            }
+                        case .programs:
+                            if let id = selectedProgramID,
+                               let prog = diskImage.programs.first(where: { $0.id == id }) {
+                                ProgramDetailView(programFile: prog, diskImage: diskImage)
+                                    .id(id)
+                            } else {
+                                ProgramListView(diskImage: diskImage, selectedProgramID: $selectedProgramID)
+                            }
+                        case .diskInfo:
+                            DiskInfoView(diskImage: diskImage)
+                        }
                     }
-                case .programs:
-                    if let id = selectedProgramID,
-                       let prog = diskImage.programs.first(where: { $0.id == id }) {
-                        ProgramDetailView(programFile: prog, diskImage: diskImage)
-                    } else {
-                        ProgramListView(diskImage: diskImage, selectedProgramID: $selectedProgramID)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
+            .toolbar {
+                ToolbarItemGroup(placement: .primaryAction) {
+                    Button {
+                        openDiskImage()
+                    } label: {
+                        Label("Open", systemImage: "folder")
                     }
-                case .diskInfo:
-                    DiskInfoView(diskImage: diskImage)
+                    .help("Open a disk image (.img) file")
+
+                    Button {
+                        createDiskImage()
+                    } label: {
+                        Label("New Disk", systemImage: "plus.rectangle.on.folder")
+                    }
+                    .help("Create a new blank Akai S3000 disk image")
+
+                    if diskImage.isLoaded {
+                        Button {
+                            importWAV()
+                        } label: {
+                            Label("Import WAV", systemImage: "square.and.arrow.down")
+                        }
+                        .help("Import a WAV file as a new sample")
+
+                        Button {
+                            saveAll()
+                        } label: {
+                            Label("Save", systemImage: "square.and.arrow.down.fill")
+                        }
+                        .help("Save all changes to disk image")
+                        .keyboardShortcut("s", modifiers: .command)
+                    }
                 }
             }
         }
@@ -66,6 +115,23 @@ struct ContentView: View {
         }
         .onReceive(NotificationCenter.default.publisher(for: .openDiskImage)) { _ in
             openDiskImage()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .createDiskImage)) { _ in
+            createDiskImage()
+        }
+        .onAppear {
+            // When a Greaseweazle read finishes, auto-load the freshly read .img.
+            greaseweazle.onReadComplete = { url in
+                do {
+                    try diskImage.load(from: url)
+                    selectedSampleID = nil
+                    selectedProgramID = nil
+                    greaseweazle.clearLog()   // dismiss log so the loaded disk shows
+                    toast = ToastData(message: "Loaded \(url.lastPathComponent)")
+                } catch {
+                    toast = ToastData(message: "Read OK but couldn't load: \(error.localizedDescription)", isError: true)
+                }
+            }
         }
         .alert("Error", isPresented: $showingAlert) {
             Button("OK", role: .cancel) {}
@@ -97,33 +163,6 @@ struct ContentView: View {
         } message: {
             Text("If you continue without saving, your changes to the disk image will be lost.")
         }
-        .toolbar {
-            ToolbarItemGroup(placement: .primaryAction) {
-                if diskImage.isLoaded {
-                    Button {
-                        openDiskImage()
-                    } label: {
-                        Label("Open", systemImage: "folder")
-                    }
-                    .help("Open a disk image (.img) file")
-
-                    Button {
-                        importWAV()
-                    } label: {
-                        Label("Import WAV", systemImage: "square.and.arrow.down")
-                    }
-                    .help("Import a WAV file as a new sample")
-
-                    Button {
-                        saveAll()
-                    } label: {
-                        Label("Save", systemImage: "square.and.arrow.down.fill")
-                    }
-                    .help("Save all changes to disk image")
-                    .keyboardShortcut("s", modifiers: .command)
-                }
-            }
-        }
     }
 
     private func saveAll() {
@@ -142,6 +181,36 @@ struct ContentView: View {
             return
         }
         performOpenDiskImage()
+    }
+
+    private func createDiskImage() {
+        if diskImage.hasUnsavedChanges {
+            pendingOpenAction = { performCreateDiskImage() }
+            showingUnsavedChangesConfirm = true
+            return
+        }
+        performCreateDiskImage()
+    }
+
+    private func performCreateDiskImage() {
+        let panel = NSSavePanel()
+        panel.allowedContentTypes = [.init(filenameExtension: "img")!]
+        panel.title = "Create New Akai S3000 Disk Image"
+        panel.nameFieldStringValue = "new_disk.img"
+        panel.prompt = "Create"
+        if panel.runModal() == .OK, let url = panel.url {
+            do {
+                // Use the file's base name (uppercased, Akai-clamped) as the volume label.
+                let vol = url.deletingPathExtension().lastPathComponent
+                try diskImage.createBlankImage(at: url, volumeName: vol)
+                selectedSampleID = nil
+                selectedProgramID = nil
+                toast = ToastData(message: "Created \(url.lastPathComponent)")
+            } catch {
+                alertMessage = error.localizedDescription
+                showingAlert = true
+            }
+        }
     }
 
     private func performOpenDiskImage() {

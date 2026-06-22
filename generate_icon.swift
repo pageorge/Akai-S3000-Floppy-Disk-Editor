@@ -56,9 +56,9 @@ func drawIcon(size: CGFloat) -> NSImage {
     let s3Str = NSAttributedString(string: "S3000", attributes: s3Attrs)
     s3Str.draw(at: NSPoint(x: rightStart + (rightWidth - s3Str.size().width) / 2, y: s*0.40))
 
-    // EDITOR underneath, smaller, letter-spaced, moved down a touch more
+    // EDITOR underneath, letter-spaced, moved down a touch more
     let editorAttrs: [NSAttributedString.Key: Any] = [
-        .font: NSFont.boldSystemFont(ofSize: s * 0.06),
+        .font: NSFont.boldSystemFont(ofSize: s * 0.075),
         .foregroundColor: NSColor.white.withAlphaComponent(0.5),
         .kern: s * 0.012
     ]

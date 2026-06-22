@@ -5,33 +5,33 @@ import SwiftUI
 struct WaveformView: View {
     let audioData: Data
     let numSamples: Int
-    let numChannels: Int
     let loopEnabled: Bool
     let loopStart: Binding<Double>?
     let loopEnd: Binding<Double>?
     let playhead: Double
     @State private var waveformPoints: [CGFloat] = []
+    /// Per-bucket signed min/max of the actual samples (normalised −1..1), so the
+    /// drawn shape is the real waveform (sine looks like a sine, square like a
+    /// square) rather than an absolute-value envelope.
+    @State private var waveMin: [CGFloat] = []
+    @State private var waveMax: [CGFloat] = []
 
-    init(audioData: Data, numSamples: Int = 0, numChannels: Int = 1, loopEnabled: Bool = false,
+    init(audioData: Data, numSamples: Int = 0, loopEnabled: Bool = false,
          loopStart: Binding<Double>? = nil, loopEnd: Binding<Double>? = nil,
          playhead: Double = 0) {
         self.audioData = audioData
         self.numSamples = numSamples
-        self.numChannels = max(1, numChannels)
         self.loopEnabled = loopEnabled
         self.loopStart = loopStart
         self.loopEnd = loopEnd
         self.playhead = playhead
     }
 
-    /// The true number of audio frames present in `audioData` (per channel).
-    /// This is the ground truth for both the waveform x-axis and loop-region
-    /// scaling — the header's numSamples can disagree, which would otherwise
-    /// make the drawn loop region diverge from what actually plays.
+    /// The canonical sample count (slen) passed in from the header — the same
+    /// value the Akai reports and the single source of truth for the waveform
+    /// x-axis and loop-region scaling, so the drawn loop region matches playback.
     private var frameCount: Int {
-        let bytesPerFrame = numChannels * 2
-        let fromAudio = bytesPerFrame > 0 ? audioData.count / bytesPerFrame : 0
-        return fromAudio > 0 ? fromAudio : max(numSamples, 1)
+        numSamples
     }
 
     var body: some View {
@@ -49,26 +49,47 @@ struct WaveformView: View {
                     Rectangle().fill(Color.secondary.opacity(0.15)).frame(height: 1)
                         .allowsHitTesting(false)
 
-                    WaveformShape(points: waveformPoints)
-                        .fill(LinearGradient(
-                            colors: [Color.blue.opacity(0.8), Color.blue.opacity(0.4)],
-                            startPoint: .top, endPoint: .bottom))
-                        .allowsHitTesting(false)
+                    // The real waveform: one filled rectangle per bucket, from
+                    // that bucket's min to its max. Drawing independent rects
+                    // (rather than one closed min/max polygon) avoids any risk of
+                    // self-intersecting contours cancelling out under the fill's
+                    // winding rule — each bar fills unconditionally.
+                    Canvas { context, size in
+                        let n = min(waveMin.count, waveMax.count)
+                        guard n > 0 else { return }
+                        let midY = size.height / 2
+                        let step = size.width / CGFloat(n)
+                        func y(_ v: CGFloat) -> CGFloat { midY - v * midY }
 
-                    WaveformShape(points: waveformPoints)
-                        .fill(LinearGradient(
-                            colors: [Color.blue.opacity(0.4), Color.blue.opacity(0.1)],
-                            startPoint: .top, endPoint: .bottom))
-                        .scaleEffect(x: 1, y: -1)
-                        .allowsHitTesting(false)
+                        var bars = Path()
+                        for i in 0..<n {
+                            let x = CGFloat(i) * step
+                            let top = y(waveMax[i])
+                            let bottom = y(waveMin[i])
+                            let h = max(bottom - top, 1)   // at least 1px so silent/flat spans still show a hairline
+                            bars.addRect(CGRect(x: x, y: top, width: max(step, 1), height: h))
+                        }
+
+                        context.fill(bars, with: .linearGradient(
+                            Gradient(colors: [Color.blue.opacity(0.85), Color.blue.opacity(0.5)]),
+                            startPoint: CGPoint(x: 0, y: 0),
+                            endPoint: CGPoint(x: 0, y: size.height)))
+                    }
+                    .allowsHitTesting(false)
 
                     if loopEnabled, frameCount > 0,
                        let startBinding = loopStart, let endBinding = loopEnd {
-                        let startFrac = CGFloat(startBinding.wrappedValue) / CGFloat(frameCount)
-                        let endFrac   = CGFloat(endBinding.wrappedValue)   / CGFloat(frameCount)
-                        let startX    = startFrac * geo.size.width
-                        let endX      = endFrac   * geo.size.width
-                        let regionW   = max(0, endX - startX)
+                        let w = geo.size.width
+                        let ls = min(startBinding.wrappedValue, Double(frameCount))
+                        // Real playback is a simple bounded loop: S -> end of the
+                        // buffer, then jump back to S. So for display we ALWAYS
+                        // clamp the end to the buffer length, guaranteeing S sits
+                        // left of E and the highlighted region never wraps off the
+                        // right edge — matching what's actually heard.
+                        let le = min(endBinding.wrappedValue, Double(frameCount))
+                        let startX = CGFloat(ls / Double(frameCount)) * w
+                        let endX   = CGFloat(le / Double(frameCount)) * w
+                        let regionW = max(0, endX - startX)
 
                         Rectangle()
                             .fill(Color.green.opacity(0.15))
@@ -76,29 +97,30 @@ struct WaveformView: View {
                             .offset(x: startX)
                             .allowsHitTesting(false)
 
-                        // Loop start handle — bar on its leading edge, sat at startX
+                        // Loop start handle — bar on its leading edge, at loopStart.
                         LoopHandle(color: .green, label: "S", barEdge: .leading)
                             .frame(width: 14, height: geo.size.height)
                             .offset(x: startX)
                             .gesture(DragGesture(minimumDistance: 1)
                                 .onChanged { value in
-                                    let frac = max(0, min(1, value.location.x / geo.size.width))
+                                    let frac = max(0, min(1, value.location.x / w))
                                     let newVal = frac * Double(frameCount)
-                                    if newVal < endBinding.wrappedValue - 100 {
+                                    if newVal < endBinding.wrappedValue - 1 {
                                         startBinding.wrappedValue = newVal
                                     }
                                 }
                             )
 
-                        // Loop end handle — bar on its trailing edge, sat at endX
+                        // Loop end handle — bar on its trailing edge, at loopEnd
+                        // (clamped to the buffer length).
                         LoopHandle(color: .red, label: "E", barEdge: .trailing)
                             .frame(width: 14, height: geo.size.height)
                             .offset(x: endX - 14)
                             .gesture(DragGesture(minimumDistance: 1)
                                 .onChanged { value in
-                                    let frac = max(0, min(1, value.location.x / geo.size.width))
+                                    let frac = max(0, min(1, value.location.x / w))
                                     let newVal = frac * Double(frameCount)
-                                    if newVal > startBinding.wrappedValue + 100 {
+                                    if newVal > startBinding.wrappedValue + 1 {
                                         endBinding.wrappedValue = newVal
                                     }
                                 }
@@ -116,36 +138,62 @@ struct WaveformView: View {
             }
             .onAppear { computeWaveform(width: geo.size.width) }
             .onChange(of: geo.size.width) { _, newWidth in computeWaveform(width: newWidth) }
+            .onChange(of: audioData) { _, _ in computeWaveform(width: geo.size.width) }
         }
     }
 
     private func computeWaveform(width: CGFloat) {
         guard !audioData.isEmpty else { return }
-        let buckets = Int(width * 2)
-        guard buckets > 0 else { return }
+        let requestedBuckets = Int(width * 2)
+        guard requestedBuckets > 0 else { return }
         let localData = audioData
 
         DispatchQueue.global(qos: .userInitiated).async {
-            let samplesPerBucket = max(1, (localData.count / 2) / buckets)
-            var points: [CGFloat] = []
-
+            let totalFrames = localData.count / 2
+            guard totalFrames > 0 else {
+                DispatchQueue.main.async {
+                    self.waveformPoints = []; self.waveMin = []; self.waveMax = []
+                }
+                return
+            }
+            // Never use more buckets than there are samples, otherwise most
+            // buckets map to an empty fractional span (startSample==endSample)
+            // and render as a flat line. For short samples (e.g. 256), one bucket
+            // per sample gives the truest shape; the Shape interpolates to width.
+            let buckets = min(requestedBuckets, totalFrames)
+            // Spread the WHOLE sample across ALL buckets (same total-frame
+            // denominator as the loop region, so they line up). For each bucket
+            // capture the signed MIN and MAX sample value, so the drawn band is
+            // the actual waveform shape (sine, square, saw) rather than an
+            // absolute-value envelope.
+            var mins: [CGFloat] = []; mins.reserveCapacity(buckets)
+            var maxs: [CGFloat] = []; maxs.reserveCapacity(buckets)
             for b in 0..<buckets {
-                var maxAmp: Int32 = 0
-                let startSample = b * samplesPerBucket
-                let endSample = min(startSample + samplesPerBucket, localData.count / 2)
+                let startSample = (b * totalFrames) / buckets
+                var endSample = ((b + 1) * totalFrames) / buckets
+                if endSample <= startSample { endSample = startSample + 1 }
+                endSample = min(endSample, totalFrames)
+                var lo: Int32 = Int32.max
+                var hi: Int32 = Int32.min
                 for s in startSample..<endSample {
                     let byteIdx = s * 2
                     if byteIdx + 1 < localData.count {
-                        let sample = Int32(Int16(bitPattern:
-                            UInt16(localData[byteIdx]) | (UInt16(localData[byteIdx + 1]) << 8)
-                        ))
-                        if abs(sample) > maxAmp { maxAmp = abs(sample) }
+                        let v = Int32(Int16(bitPattern:
+                            UInt16(localData[byteIdx]) | (UInt16(localData[byteIdx + 1]) << 8)))
+                        if v < lo { lo = v }
+                        if v > hi { hi = v }
                     }
                 }
-                points.append(CGFloat(maxAmp) / 32768.0)
+                if lo == Int32.max { lo = 0; hi = 0 }
+                mins.append(CGFloat(lo) / 32768.0)
+                maxs.append(CGFloat(hi) / 32768.0)
             }
 
-            DispatchQueue.main.async { self.waveformPoints = points }
+            DispatchQueue.main.async {
+                self.waveMin = mins
+                self.waveMax = maxs
+                self.waveformPoints = maxs   // non-empty marker for the "has audio" check
+            }
         }
     }
 }
@@ -182,29 +230,6 @@ extension View {
         self.onHover { inside in
             if inside { cursor.push() } else { NSCursor.pop() }
         }
-    }
-}
-
-struct WaveformShape: Shape {
-    let points: [CGFloat]
-
-    func path(in rect: CGRect) -> Path {
-        guard !points.isEmpty else { return Path() }
-        var path = Path()
-        let width  = rect.width
-        let height = rect.height
-        let midY   = height / 2
-        let step   = width / CGFloat(points.count)
-
-        path.move(to: CGPoint(x: 0, y: midY))
-        for (i, point) in points.enumerated() {
-            let x = CGFloat(i) * step
-            let y = midY - (point * midY)
-            path.addLine(to: CGPoint(x: x, y: y))
-        }
-        path.addLine(to: CGPoint(x: width, y: midY))
-        path.closeSubpath()
-        return path
     }
 }
 
@@ -271,6 +296,156 @@ private struct ToastModifier: ViewModifier {
                 workItem = item
                 DispatchQueue.main.asyncAfter(deadline: .now() + duration, execute: item)
             }
+    }
+}
+
+// MARK: - Disk Path Bar
+
+/// A thin strip shown at the top of the app when a disk image is loaded. Shows
+/// the full file path; click it to reveal the file in Finder, or use the copy
+/// button to put the path on the clipboard.
+struct DiskPathBar: View {
+    let url: URL
+    @State private var copied = false
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "internaldrive")
+                .foregroundStyle(.secondary)
+
+            // Click the path to reveal in Finder.
+            Button {
+                NSWorkspace.shared.activateFileViewerSelecting([url])
+            } label: {
+                Text(url.path)
+                    .font(.system(.caption, design: .monospaced))
+                    .foregroundStyle(.primary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .help("Reveal in Finder")
+
+            // Copy path to clipboard.
+            Button {
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString(url.path, forType: .string)
+                copied = true
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) { copied = false }
+            } label: {
+                Image(systemName: copied ? "checkmark" : "doc.on.doc")
+                    .foregroundStyle(copied ? .green : .secondary)
+            }
+            .buttonStyle(.plain)
+            .help("Copy path")
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 6)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(.bar)
+    }
+}
+
+// MARK: - Greaseweazle Log View
+
+/// Main-window view shown while Greaseweazle is reading/writing, or after it has
+/// finished (until dismissed). Shows a progress bar and a live, scrolling log.
+struct GreaseweazleLogView: View {
+    @ObservedObject var runner: GreaseweazleRunner
+
+    private var title: String {
+        switch runner.activity {
+        case .reading: return "Reading floppy…"
+        case .writing: return "Writing floppy…"
+        case .idle:    return "Greaseweazle"
+        }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            HStack {
+                Image(systemName: "opticaldiscdrive.fill")
+                    .font(.largeTitle).foregroundStyle(.indigo)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(title).font(.title2.bold())
+                    Text("Drive \(runner.drive.rawValue)")
+                        .font(.subheadline).foregroundStyle(.secondary)
+                }
+                Spacer()
+                if runner.isBusy {
+                    Button(role: .destructive) { runner.cancel() } label: {
+                        Label("Cancel", systemImage: "stop.fill")
+                    }
+                    .buttonStyle(.bordered)
+                } else {
+                    Button { runner.clearLog() } label: {
+                        Label("Dismiss", systemImage: "xmark")
+                    }
+                    .buttonStyle(.bordered)
+                }
+            }
+
+            // Full path of the file being read/written.
+            if let url = runner.currentFileURL {
+                HStack(spacing: 6) {
+                    Image(systemName: "doc").foregroundStyle(.secondary)
+                    Text(url.path)
+                        .font(.system(.caption, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                        .textSelection(.enabled)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
+                .padding(.horizontal, 10)
+                .padding(.vertical, 6)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(Color.secondary.opacity(0.08))
+                .clipShape(RoundedRectangle(cornerRadius: 6))
+            }
+
+            // Progress bar: determinate if we parsed a percentage, else indeterminate.
+            if let p = runner.progress {
+                ProgressView(value: p) {
+                    Text("\(Int(p * 100))%").font(.caption.monospaced())
+                }
+                .progressViewStyle(.linear)
+            } else if runner.isBusy {
+                ProgressView().progressViewStyle(.linear)
+            }
+
+            // Live log.
+            ScrollViewReader { proxy in
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 2) {
+                        ForEach(Array(runner.logLines.enumerated()), id: \.offset) { idx, line in
+                            Text(line)
+                                .font(.system(.caption, design: .monospaced))
+                                .foregroundStyle(logColor(line))
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .textSelection(.enabled)
+                                .id(idx)
+                        }
+                    }
+                    .padding(12)
+                }
+                .background(Color(nsColor: .textBackgroundColor))
+                .clipShape(RoundedRectangle(cornerRadius: 8))
+                .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(Color.secondary.opacity(0.2)))
+                .onChange(of: runner.logLines.count) { _, count in
+                    if count > 0 { withAnimation { proxy.scrollTo(count - 1, anchor: .bottom) } }
+                }
+            }
+        }
+        .padding(24)
+    }
+
+    private func logColor(_ line: String) -> Color {
+        if line.hasPrefix("ERROR") || line.hasPrefix("✗") { return .red }
+        if line.hasPrefix("✓") { return .green }
+        if line.hasPrefix("$") { return .secondary }
+        return .primary
     }
 }
 

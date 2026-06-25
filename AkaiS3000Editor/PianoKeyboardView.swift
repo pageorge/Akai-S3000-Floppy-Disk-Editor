@@ -53,119 +53,123 @@ struct PianoKeyboardView: View {
             let whitePositions = computeWhitePositions(whiteKeyWidth: whiteKeyWidth)
 
             ZStack(alignment: .topLeading) {
-                // White keys
-                HStack(spacing: 0) {
-                    ForEach(startNote...endNote, id: \.self) { note in
-                        if isWhiteKey(note) {
-                            WhitePianoKey(
-                                note: note,
-                                role: keyRole(note),
-                                isHovered: hoveredNote == note && selectedZone != nil
-                            )
-                            .frame(width: whiteKeyWidth, height: whiteKeyHeight)
-                        }
-                    }
-                }
-
-                // Black keys
-                ForEach(startNote...endNote, id: \.self) { note in
-                    if !isWhiteKey(note) {
-                        let prevWhiteX = whitePositions[note - 1] ?? 0
-                        BlackPianoKey(
-                            note: note,
-                            role: keyRole(note),
-                            isHovered: hoveredNote == note && selectedZone != nil
-                        )
-                        .frame(width: blackKeyWidth, height: blackKeyHeight)
-                        .offset(x: prevWhiteX + whiteKeyWidth - blackKeyWidth / 2)
-                    }
-                }
-
-                // Note labels
-                ForEach([24,36,48,60,72,84,96,108].filter { $0 >= startNote && $0 <= endNote }, id: \.self) { note in
-                    let x = xPositionForNote(note, whiteKeyWidth: whiteKeyWidth)
-                    Text("C\(note/12 - 1)")
-                        .font(.system(size: 8))
-                        .foregroundStyle(.secondary)
-                        .offset(x: x + 1, y: whiteKeyHeight - 14)
-                }
-
-                // Legend
-                if selectedZone != nil {
-                    HStack(spacing: 10) {
-                        LegendDot(color: .green,  label: "Range")
-                        LegendDot(color: Color(red: 1.0, green: 0.6, blue: 0.6), label: "Low")
-                        LegendDot(color: Color(red: 0.6, green: 0.75, blue: 1.0), label: "High")
-                        LegendDot(color: .orange, label: "Root")
-                    }
-                    .padding(4)
-                    .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 6))
-                    .offset(x: geo.size.width - 210, y: 4)
-                }
-
-                // Drag/hover tooltip
-                if let note = hoveredNote, selectedZone != nil {
-                    let x = min(xPositionForNote(note, whiteKeyWidth: whiteKeyWidth), geo.size.width - 80)
-                    Text(midiNoteName(UInt8(note)))
-                        .font(.system(size: 9, weight: .bold))
-                        .padding(.horizontal, 4).padding(.vertical, 2)
-                        .background(Color.black.opacity(0.75), in: RoundedRectangle(cornerRadius: 4))
-                        .foregroundStyle(.white)
-                        .offset(x: x, y: 2)
-                }
-
-                // Transparent drag/hover capture overlay
-                if selectedZone != nil {
-                    Color.clear
-                        .contentShape(Rectangle())
-                        .gesture(
-                            DragGesture(minimumDistance: 0)
-                                .onChanged { value in
-                                    let note = noteForX(value.location.x, whiteKeyWidth: whiteKeyWidth,
-                                                        totalWidth: geo.size.width,
-                                                        whitePositions: whitePositions,
-                                                        blackKeyWidth: blackKeyWidth,
-                                                        blackKeyHeight: blackKeyHeight,
-                                                        y: value.location.y,
-                                                        whiteKeyHeight: whiteKeyHeight)
-                                    hoveredNote = note
-                                    guard var zone = selectedZone else { return }
-
-                                    // Determine drag mode on first touch
-                                    if dragMode == .none {
-                                        let distToLow  = abs(note - lowKey)
-                                        let distToHigh = abs(note - highKey)
-                                        let distToRoot = abs(note - rootKey)
-                                        let minDist = min(distToLow, distToHigh, distToRoot)
-                                        if minDist == distToRoot && distToRoot <= 3 { dragMode = .rootKey }
-                                        else if distToLow <= distToHigh              { dragMode = .lowKey  }
-                                        else                                          { dragMode = .highKey }
-                                    }
-
-                                    switch dragMode {
-                                    case .lowKey:
-                                        zone.lowKey = UInt8(min(note, Int(zone.highKey)))
-                                    case .highKey:
-                                        zone.highKey = UInt8(max(note, Int(zone.lowKey)))
-                                    case .rootKey:
-                                        zone.rootNote = UInt8(max(0, min(note, 127)))
-                                    case .none: break
-                                    }
-                                    onKeyzoneChanged?(zone)
-                                }
-                                .onEnded { _ in
-                                    dragMode = .none
-                                    hoveredNote = nil
-                                }
-                        )
-                        .onHover { inside in
-                            if !inside { hoveredNote = nil }
-                        }
-                }
+                whiteKeysLayer(whiteKeyWidth: whiteKeyWidth, whiteKeyHeight: whiteKeyHeight)
+                blackKeysLayer(whiteKeyWidth: whiteKeyWidth, blackKeyWidth: blackKeyWidth,
+                               blackKeyHeight: blackKeyHeight, whitePositions: whitePositions)
+                labelsLayer(whiteKeyWidth: whiteKeyWidth, whiteKeyHeight: whiteKeyHeight)
+                overlayLayer(geo: geo, whiteKeyWidth: whiteKeyWidth, whiteKeyHeight: whiteKeyHeight,
+                             blackKeyWidth: blackKeyWidth, blackKeyHeight: blackKeyHeight,
+                             whitePositions: whitePositions)
             }
             .background(Color(nsColor: .windowBackgroundColor))
             .clipShape(RoundedRectangle(cornerRadius: 4))
             .overlay(RoundedRectangle(cornerRadius: 4).stroke(Color.secondary.opacity(0.2)))
+        }
+    }
+
+    @ViewBuilder
+    private func whiteKeysLayer(whiteKeyWidth: CGFloat, whiteKeyHeight: CGFloat) -> some View {
+        HStack(spacing: 0) {
+            ForEach(startNote...endNote, id: \.self) { note in
+                if isWhiteKey(note) {
+                    WhitePianoKey(
+                        note: note,
+                        role: keyRole(note),
+                        isHovered: hoveredNote == note && selectedZone != nil
+                    )
+                    .frame(width: whiteKeyWidth, height: whiteKeyHeight)
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func blackKeysLayer(whiteKeyWidth: CGFloat, blackKeyWidth: CGFloat,
+                                blackKeyHeight: CGFloat, whitePositions: [Int: CGFloat]) -> some View {
+        ForEach(startNote...endNote, id: \.self) { note in
+            if !isWhiteKey(note) {
+                let prevWhiteX = whitePositions[note - 1] ?? 0
+                BlackPianoKey(
+                    note: note,
+                    role: keyRole(note),
+                    isHovered: hoveredNote == note && selectedZone != nil
+                )
+                .frame(width: blackKeyWidth, height: blackKeyHeight)
+                .offset(x: prevWhiteX + whiteKeyWidth - blackKeyWidth / 2)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func labelsLayer(whiteKeyWidth: CGFloat, whiteKeyHeight: CGFloat) -> some View {
+        ForEach([24,36,48,60,72,84,96,108].filter { $0 >= startNote && $0 <= endNote }, id: \.self) { note in
+            let x = xPositionForNote(note, whiteKeyWidth: whiteKeyWidth)
+            Text("C\(note/12 - 1)")
+                .font(.system(size: 8))
+                .foregroundStyle(.secondary)
+                .offset(x: x + 1, y: whiteKeyHeight - 14)
+        }
+    }
+
+    @ViewBuilder
+    private func overlayLayer(geo: GeometryProxy, whiteKeyWidth: CGFloat, whiteKeyHeight: CGFloat,
+                              blackKeyWidth: CGFloat, blackKeyHeight: CGFloat,
+                              whitePositions: [Int: CGFloat]) -> some View {
+        if selectedZone != nil {
+            HStack(spacing: 10) {
+                LegendDot(color: .green,  label: "Range")
+                LegendDot(color: Color(red: 1.0, green: 0.6, blue: 0.6), label: "Low")
+                LegendDot(color: Color(red: 0.6, green: 0.75, blue: 1.0), label: "High")
+                LegendDot(color: .orange, label: "Root")
+            }
+            .padding(4)
+            .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 6))
+            .offset(x: geo.size.width - 210, y: 4)
+        }
+        if let note = hoveredNote, selectedZone != nil {
+            let x = min(xPositionForNote(note, whiteKeyWidth: whiteKeyWidth), geo.size.width - 80)
+            Text(midiNoteName(UInt8(note)))
+                .font(.system(size: 9, weight: .bold))
+                .padding(.horizontal, 4).padding(.vertical, 2)
+                .background(Color.black.opacity(0.75), in: RoundedRectangle(cornerRadius: 4))
+                .foregroundStyle(.white)
+                .offset(x: x, y: 2)
+        }
+        if selectedZone != nil {
+            Color.clear
+                .contentShape(Rectangle())
+                .gesture(
+                    DragGesture(minimumDistance: 0)
+                        .onChanged { value in
+                            let note = noteForX(value.location.x, whiteKeyWidth: whiteKeyWidth,
+                                                totalWidth: geo.size.width,
+                                                whitePositions: whitePositions,
+                                                blackKeyWidth: blackKeyWidth,
+                                                blackKeyHeight: blackKeyHeight,
+                                                y: value.location.y,
+                                                whiteKeyHeight: whiteKeyHeight)
+                            hoveredNote = note
+                            guard var zone = selectedZone else { return }
+                            if dragMode == .none {
+                                let distToLow  = abs(note - lowKey)
+                                let distToHigh = abs(note - highKey)
+                                let distToRoot = abs(note - rootKey)
+                                let minDist = min(distToLow, distToHigh, distToRoot)
+                                if minDist == distToRoot && distToRoot <= 3 { dragMode = .rootKey }
+                                else if distToLow <= distToHigh              { dragMode = .lowKey  }
+                                else                                          { dragMode = .highKey }
+                            }
+                            switch dragMode {
+                            case .lowKey:  zone.lowKey   = UInt8(min(note, Int(zone.highKey)))
+                            case .highKey: zone.highKey  = UInt8(max(note, Int(zone.lowKey)))
+                            case .rootKey: zone.rootNote = UInt8(max(0, min(note, 127)))
+                            case .none: break
+                            }
+                            onKeyzoneChanged?(zone)
+                        }
+                        .onEnded { _ in dragMode = .none; hoveredNote = nil }
+                )
+                .onHover { inside in if !inside { hoveredNote = nil } }
         }
     }
 

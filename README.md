@@ -4,6 +4,8 @@
 
 A personal macOS project for reading and editing **Akai S3000 floppy disk images** (.img) created with [GreaseWeazle](https://github.com/keirf/greaseweazle). Built with SwiftUI — no dependencies, just plug in your floppy drive and go.
 
+**[View on GitHub](https://github.com/pageorge/Akai-S3000-Floppy-Disk-Editor)**
+
 ---
 
 ## Download

@@ -11,8 +11,6 @@ struct ProgramDetailView: View {
     @State private var toast: ToastData?
     @State private var keyzoneKeyMonitor: Any? = nil
     @FocusState private var nameFieldFocused: Bool
-    @FocusState private var keyzoneListFocused: Bool
-
     init(programFile: AkaiProgramFile, diskImage: AkaiDiskImage) {
         self.programFile = programFile
         self.diskImage = diskImage
@@ -77,13 +75,6 @@ struct ProgramDetailView: View {
                         .foregroundStyle(.secondary)
                 }
                 Spacer()
-                if isDirty {
-                    Button("Revert") {
-                        editedProgram = programFile.program
-                        isDirty = false
-                        diskImage.applyProgramEdits(programFile)
-                    }.buttonStyle(.bordered)
-                }
             }
             .padding()
 
@@ -92,30 +83,34 @@ struct ProgramDetailView: View {
             HSplitView {
                 // Left: program settings + keyzone list
                 VStack(alignment: .leading, spacing: 0) {
-                    GroupBox("Program Settings") {
-                        VStack(alignment: .leading, spacing: 10) {
-                            HStack {
-                                Text("MIDI Channel").frame(width: 100, alignment: .leading)
-                                Picker("", selection: $editedProgram.midiChannel) {
-                                    Text("Omni").tag(UInt8(0))
-                                    ForEach(1..<17) { ch in Text("\(ch)").tag(UInt8(ch)) }
-                                }
-                                .labelsHidden()
-                                .onChange(of: editedProgram.midiChannel) { _, _ in commitProgramEdits() }
+                    HStack {
+                        Text("Program Settings").font(.headline)
+                        Spacer()
+                    }
+                    .padding(.horizontal).padding(.top, 8)
+
+                    VStack(alignment: .leading, spacing: 10) {
+                        HStack {
+                            Text("MIDI Channel").frame(width: 100, alignment: .leading)
+                            Picker("", selection: $editedProgram.midiChannel) {
+                                Text("Omni").tag(UInt8(0))
+                                ForEach(1..<17) { ch in Text("\(ch)").tag(UInt8(ch)) }
                             }
-                            HStack {
-                                Text("Polyphony").frame(width: 100, alignment: .leading)
-                                Stepper("\(editedProgram.polyphony)", value: $editedProgram.polyphony, in: 1...16)
-                                    .onChange(of: editedProgram.polyphony) { _, _ in commitProgramEdits() }
-                            }
-                            HStack {
-                                Text("Bend Range").frame(width: 100, alignment: .leading)
-                                Stepper("\(editedProgram.bendRange) st", value: $editedProgram.bendRange, in: 0...12)
-                                    .onChange(of: editedProgram.bendRange) { _, _ in commitProgramEdits() }
-                            }
+                            .labelsHidden()
+                            .onChange(of: editedProgram.midiChannel) { _, _ in commitProgramEdits() }
+                        }
+                        HStack {
+                            Text("Polyphony").frame(width: 100, alignment: .leading)
+                            Stepper("\(editedProgram.polyphony)", value: $editedProgram.polyphony, in: 1...16)
+                                .onChange(of: editedProgram.polyphony) { _, _ in commitProgramEdits() }
+                        }
+                        HStack {
+                            Text("Bend Range").frame(width: 100, alignment: .leading)
+                            Stepper("\(editedProgram.bendRange) st", value: $editedProgram.bendRange, in: 0...12)
+                                .onChange(of: editedProgram.bendRange) { _, _ in commitProgramEdits() }
                         }
                     }
-                    .padding()
+                    .padding(.horizontal).padding(.vertical, 8)
 
                     Divider()
 
@@ -131,11 +126,14 @@ struct ProgramDetailView: View {
                     }
                     .padding(.horizontal).padding(.top, 8)
 
-                    List(selection: $selectedKeyzoneIndex) {
+                    List {
                         ForEach(Array(editedProgram.keyzones.enumerated()), id: \.offset) { idx, kz in
                             KeyzoneRow(keyzone: kz, sampleNames: diskImage.samples.map { $0.header.name })
-                                .tag(idx)
-                                .onTapGesture { selectedKeyzoneIndex = idx }
+                                .listRowBackground(selectedKeyzoneIndex == idx ? Color.accentColor.opacity(0.15) : Color.clear)
+                                .contentShape(Rectangle())
+                                .onTapGesture {
+                                    selectedKeyzoneIndex = (selectedKeyzoneIndex == idx) ? nil : idx
+                                }
                                 .contextMenu {
                                     Button { addKeyzone() } label: {
                                         Label("New Keyzone", systemImage: "plus.square.on.square")
@@ -151,13 +149,18 @@ struct ProgramDetailView: View {
                         }
                     }
                     .listStyle(.inset)
-                    .focused($keyzoneListFocused)
                     .onAppear {
                         keyzoneKeyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
                             // Only act when this list actually has keyboard focus,
                             // so we never double-handle the same keypress alongside
                             // SidebarView's identical (always-active) key monitor.
-                            guard keyzoneListFocused, !diskImage.isEditingText else { return event }
+                            guard !diskImage.isEditingText else { return event }
+                            if event.keyCode == 53 { // esc
+                                if self.selectedKeyzoneIndex != nil {
+                                    self.selectedKeyzoneIndex = nil
+                                    return nil
+                                }
+                            }
                             if event.keyCode == 126 {        // up arrow
                                 moveKeyzoneSelection(by: -1)
                                 return nil
@@ -183,21 +186,19 @@ struct ProgramDetailView: View {
 
                 // Right: sample picker + piano keyboard + keyzone editor
                 VStack(alignment: .leading, spacing: 0) {
-                    // Sample picker — pills above the keys, one tap assigns/removes
-                    // the sample from whichever keyzone is currently selected.
-                    GroupBox("Sample") {
-                        if diskImage.samples.isEmpty {
-                            Text("No samples on this disk")
-                                .font(.caption).foregroundStyle(.secondary)
-                        } else {
+                    // Sample pills — only shown when a keyzone is selected
+                    if selectedKeyzoneIndex != nil && !diskImage.samples.isEmpty {
+                        GroupBox {
                             FlowLayout(spacing: 6) {
                                 ForEach(diskImage.samples) { sample in
                                     samplePill(for: sample)
                                 }
                             }
                         }
+                        .padding(.horizontal)
+                        .padding(.top, 8)
+                        .padding(.bottom, 4)
                     }
-                    .padding(.horizontal).padding(.top, 8).padding(.bottom, 4)
 
                     // Only show piano when there are keyzones
                     if !editedProgram.keyzones.isEmpty {
@@ -242,13 +243,28 @@ struct ProgramDetailView: View {
                         )
                         .padding()
                     } else {
-                        // Compact placeholder — no big empty space
-                        HStack {
-                            Image(systemName: "pianokeys").foregroundStyle(.secondary)
-                            Text(editedProgram.keyzones.isEmpty ? "Add a keyzone to get started" : "Select a keyzone to edit")
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("Create Preset")
+                                .font(.headline)
+                            Text(editedProgram.keyzones.isEmpty
+                                ? "Add a keyzone to map existing samples (normal preset)"
+                                : "Select a keyzone to edit")
+                                .font(.subheadline)
                                 .foregroundStyle(.secondary)
                         }
                         .padding()
+
+                        DrumPresetDropZone(
+                            diskImage: diskImage,
+                            existingKeyzones: editedProgram.keyzones,
+                            onSamplesImported: { newKeyzones in
+                                editedProgram.keyzones.append(contentsOf: newKeyzones)
+                                selectedKeyzoneIndex = editedProgram.keyzones.count - 1
+                                commitProgramEdits()
+                            }
+                        )
+                        .padding(.horizontal)
+                        .padding(.bottom, 12)
                     }
 
                     Spacer()
@@ -297,7 +313,7 @@ struct ProgramDetailView: View {
     private func addKeyzone() {
         let newKZ = AkaiProgramKeyzone(
             sampleName: diskImage.samples.first?.header.name ?? "NO NAME",
-            lowKey: 0, highKey: UInt8(PianoKeyboardView.visibleEndNote), rootNote: 60,
+            lowKey: 24, highKey: 95, rootNote: 60,
             tuneOffset: 0, fineTune: 0, volume: 99, pan: 0,
             loopEnabled: false, velocityLow: 0, velocityHigh: 127
         )
@@ -392,6 +408,202 @@ struct ProgramDetailView: View {
     }
 }
 
+// MARK: - Drum Preset Drop Zone
+
+struct DrumPresetDropZone: View {
+    @ObservedObject var diskImage: AkaiDiskImage
+    let existingKeyzones: [AkaiProgramKeyzone]
+    let onSamplesImported: ([AkaiProgramKeyzone]) -> Void
+
+    @State private var isDragging = false
+    @State private var isImporting = false
+    @State private var errorMessage: String? = nil
+    private let akaiRed = Color(red: 0.91, green: 0, blue: 0.11)
+    private let audioExts: Set<String> = ["wav", "wave", "aif", "aiff", "aifc"]
+
+    /// Next available MIDI note, starting at C1 (24), offset by existing keyzone count.
+    private var nextMidiNote: Int {
+        24 + diskImage.programs.flatMap { $0.program.keyzones }.count
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Create Drum Preset")
+                .font(.headline)
+
+            ZStack {
+                RoundedRectangle(cornerRadius: 12)
+                    .fill(isDragging ? Color.orange.opacity(0.08) : Color.secondary.opacity(0.06))
+                RoundedRectangle(cornerRadius: 12)
+                    .strokeBorder(
+                        isDragging ? Color.orange.opacity(0.6) : Color.secondary.opacity(0.2),
+                        style: StrokeStyle(lineWidth: isDragging ? 2 : 1, dash: [6])
+                    )
+                VStack(spacing: 6) {
+                    if isImporting {
+                        ProgressView("Importing samples...")
+                            .padding()
+                    } else {
+                        Button {
+                            openSamples()
+                        } label: {
+                            Label("Browse for samples...", systemImage: "square.and.arrow.down.on.square")
+                                .frame(width: 200)
+                                .padding(.vertical, 10)
+                                .foregroundStyle(.white)
+                                .background(akaiRed)
+                                .clipShape(RoundedRectangle(cornerRadius: 6))
+                        }
+                        .buttonStyle(.plain)
+                        Text("or drag .wav files here")
+                            .font(.caption).foregroundStyle(.tertiary)
+                    }
+                }
+                .padding(16)
+            }
+            .animation(.easeInOut(duration: 0.15), value: isDragging)
+            .onDrop(of: [.fileURL], isTargeted: $isDragging) { providers in
+                handleDrop(providers: providers)
+                return true
+            }
+
+            // Info note
+            VStack(alignment: .leading, spacing: 3) {
+                Label("Samples will be mapped to individual keys from C1 upwards.", systemImage: "info.circle")
+                    .font(.caption).foregroundStyle(.secondary)
+                Label("For stereo samples, only the left channel will be imported.", systemImage: "info.circle")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+
+            if let err = errorMessage {
+                Text(err).font(.caption).foregroundStyle(.red)
+            }
+        }
+    }
+
+    private func openSamples() {
+        let panel = NSOpenPanel()
+        panel.allowsMultipleSelection = true
+        panel.canChooseDirectories = false
+        panel.allowedContentTypes = [.audio]
+        panel.title = "Choose samples for drum preset"
+        guard panel.runModal() == .OK else { return }
+        importURLs(panel.urls)
+    }
+
+    private func handleDrop(providers: [NSItemProvider]) {
+        var urls: [URL] = []
+        let group = DispatchGroup()
+        for provider in providers {
+            group.enter()
+            provider.loadItem(forTypeIdentifier: "public.file-url") { item, _ in
+                defer { group.leave() }
+                guard let data = item as? Data,
+                      let url = URL(dataRepresentation: data, relativeTo: nil),
+                      audioExts.contains(url.pathExtension.lowercased()) else { return }
+                urls.append(url)
+            }
+        }
+        group.notify(queue: .main) {
+            importURLs(urls.sorted { $0.lastPathComponent < $1.lastPathComponent })
+        }
+    }
+
+    private func importURLs(_ urls: [URL]) {
+        guard !urls.isEmpty else { return }
+        isImporting = true
+        errorMessage = nil
+        var newKeyzones: [AkaiProgramKeyzone] = []
+        var nextNote: Int
+        if let lastNote = existingKeyzones.last.map({ Int($0.rootNote) }) {
+            nextNote = lastNote + 1
+        } else {
+            nextNote = 24
+        }
+        var errors: [String] = []
+
+        DispatchQueue.global(qos: .userInitiated).async {
+            for url in urls {
+                let accessing = url.startAccessingSecurityScopedResource()
+                defer { if accessing { url.stopAccessingSecurityScopedResource() } }
+
+                do {
+                    let wavData = try Data(contentsOf: url)
+                    // Parse the WAV to check channel count.
+                    let (pcmData, sampleRate, numChannels, _) = try parseWAV(wavData)
+                    let baseName = AkaiDiskImage.sanitizeName(
+                        url.deletingPathExtension().lastPathComponent)
+
+                    // Left channel only for stereo; mono passes straight through.
+                    let monoData: Data
+                    let monoName: String
+                    if numChannels >= 2 {
+                        let (left, _) = AkaiDiskImage.deinterleaveStereo(pcmData, channels: numChannels)
+                        monoData = left
+                        monoName = String(baseName.prefix(10)) + "-L"
+                    } else {
+                        monoData = pcmData
+                        monoName = baseName
+                    }
+
+                    let sample = try diskImage.addImportedSample(
+                        name: monoName,
+                        sampleRate: UInt32(sampleRate),
+                        numChannels: 1,
+                        pcmData: monoData)
+
+                    // Map to a single key: low = high = root = nextNote.
+                    let note = UInt8(min(nextNote, 127))
+                    newKeyzones.append(AkaiProgramKeyzone(
+                        sampleName: sample.header.name,
+                        lowKey: note, highKey: note, rootNote: note,
+                        tuneOffset: 0, fineTune: 0, volume: 99, pan: 0,
+                        loopEnabled: false, velocityLow: 0, velocityHigh: 127))
+                    nextNote += 1
+                } catch {
+                    errors.append(url.lastPathComponent + ": " + error.localizedDescription)
+                }
+            }
+
+            DispatchQueue.main.async {
+                isImporting = false
+                if !newKeyzones.isEmpty { onSamplesImported(newKeyzones) }
+                if !errors.isEmpty { errorMessage = errors.joined(separator: "\n") }
+            }
+        }
+    }
+
+    /// Minimal WAV parser — mirrors AkaiDiskImage.parseWAV which is private.
+    private func parseWAV(_ data: Data) throws -> (Data, Int, Int, Int) {
+        guard data.count > 44,
+              data[0..<4] == Data("RIFF".utf8),
+              data[8..<12] == Data("WAVE".utf8) else {
+            throw NSError(domain: "WAV", code: 0,
+                          userInfo: [NSLocalizedDescriptionKey: "Not a valid WAV file"])
+        }
+        var offset = 12, sampleRate = 44100, numChannels = 1, bitsPerSample = 16
+        var pcmData = Data()
+        while offset + 8 <= data.count {
+            let id = String(bytes: data[offset..<offset+4], encoding: .ascii) ?? ""
+            let size = Int(data.readLE32(at: offset + 4))
+            offset += 8
+            if id == "fmt " {
+                numChannels   = Int(data.readLE16(at: offset + 2))
+                sampleRate    = Int(data.readLE32(at: offset + 4))
+                bitsPerSample = Int(data.readLE16(at: offset + 14))
+            } else if id == "data" {
+                pcmData = data.subdata(in: offset..<min(offset + size, data.count))
+            }
+            offset += size + (size % 2)
+        }
+        guard !pcmData.isEmpty else {
+            throw NSError(domain: "WAV", code: 1,
+                          userInfo: [NSLocalizedDescriptionKey: "No audio data in WAV"])
+        }
+        return (pcmData, sampleRate, numChannels, bitsPerSample)
+    }
+}
+
 // MARK: - Keyzone Row
 
 struct KeyzoneRow: View {
@@ -415,7 +627,9 @@ struct KeyzoneRow: View {
                         .font(.caption).foregroundStyle(.secondary)
                 }
             }
+            Spacer()
         }
+        .frame(maxWidth: .infinity)
         .padding(.vertical, 2)
     }
 
@@ -435,14 +649,6 @@ struct KeyzoneEditorView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
                 Text("Keyzone Settings").font(.headline)
-
-                HStack(spacing: 6) {
-                    Text("Sample:").font(.subheadline).foregroundStyle(.secondary)
-                    Text(keyzone.sampleName.trimmingCharacters(in: .whitespaces).isEmpty
-                        ? "(none assigned — tap a pill above)" : keyzone.sampleName)
-                        .font(.system(.subheadline, design: .monospaced))
-                        .foregroundStyle(keyzone.sampleName.trimmingCharacters(in: .whitespaces).isEmpty ? Color.secondary : Color.red)
-                }
 
                 GroupBox("Velocity") {
                     VStack(alignment: .leading, spacing: 10) {
@@ -487,8 +693,7 @@ struct KeyzoneEditorView: View {
                             Text(keyzone.pan == 0 ? "C" : keyzone.pan > 0 ? "R\(keyzone.pan)" : "L\(abs(keyzone.pan))")
                                 .frame(width: 35).font(.system(.caption, design: .monospaced))
                         }
-                        Toggle("Loop", isOn: $keyzone.loopEnabled)
-                            .onChange(of: keyzone.loopEnabled) { _, _ in onChange() }
+
                     }
                 }
             }

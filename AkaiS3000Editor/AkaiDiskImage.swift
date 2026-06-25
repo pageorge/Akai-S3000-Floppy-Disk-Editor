@@ -194,6 +194,22 @@ class AkaiDiskImage: ObservableObject {
         try parseImage(data: data)
     }
 
+    /// Close the current disk image and return to the unloaded (welcome) state.
+    /// Clears all in-memory data and the unsaved-changes flag. Does NOT write to
+    /// disk — callers should resolve unsaved changes (save/discard) first.
+    func closeImage() {
+        imageData = nil
+        imageURL = nil
+        samples = []
+        programs = []
+        diskName = ""
+        freeBlocks = 0
+        totalBlocks = AkaiDiskFormat.totalBlocks
+        hasUnsavedChanges = false
+        isEditingText = false
+        isLoaded = false
+    }
+
     private func parseImage(data: Data) throws {
         // Volume label (akai_flvol_label_s.name) lives at ABSOLUTE offset 0xD80
         // within the header (blocks 0-4), per akai_flhhead_s — NOT 4*blockSize
@@ -318,8 +334,7 @@ class AkaiDiskImage: ObservableObject {
             }
         }
 
-        return (parsedSamples,
-                parsedPrograms.sorted { $0.program.name < $1.program.name })
+        return (parsedSamples, parsedPrograms)
     }
 
     // MARK: - Sample Parsing
@@ -478,8 +493,8 @@ class AkaiDiskImage: ObservableObject {
         guard var data = imageData else { throw AkaiError.noImageLoaded }
         let name = uniqueProgramName(basedOn: rawName)
 
-        // Build the 0x180-byte file: 0xC0 program header + one 0xC0 keygroup.
-        let progSize = 0x180
+        // Build the 0xC0-byte file: program header only, no keygroups yet.
+        let progSize = 0xC0
         var file = Data(repeating: 0, count: progSize)
 
         // --- Program header (akai_program1000_s + S3000 pad) ---
@@ -493,25 +508,9 @@ class AkaiDiskImage: ObservableObject {
         file[0x15] = 0                          // oct
         file[0x16] = 0xFF                        // auxch1 = OFF
         file[0x29] = 0                          // kgxf
-        file[0x2A] = 1                          // kgnum = 1
+        file[0x2A] = 0                          // kgnum = 0
 
-        // --- Keygroup (akai_program3000kg_s) at 0xC0 ---
-        let kg = 0xC0
-        file[kg + 0x00] = 0x02                  // blockid
-        // kgnexta (0x01..0x02) = 0 (none).
-        file[kg + 0x03] = 24                    // keylo (matches hardware default)
-        file[kg + 0x04] = 127                   // keyhi
-        // 4 velocity zones, each 0x18, starting at kg+0x22. Empty sample name
-        // (Akai spaces), full velocity range, pmode = NOLOOP, shdra = none.
-        let emptyName = akaiBytes(from: "", length: 12)
-        for z in 0..<4 {
-            let vz = kg + 0x22 + z * 0x18
-            for (i, b) in emptyName.enumerated() { file[vz + i] = b }
-            file[vz + 0x0C] = 0                 // vello
-            file[vz + 0x0D] = 127               // velhi
-            file[vz + 0x13] = 0x03              // pmode = NOLOOP
-            file[vz + 0x16] = 0xFF; file[vz + 0x17] = 0xFF   // shdra = none
-        }
+        // No keygroups — the user will add them manually or via the drum preset tool.
 
         // Allocate one block (384 bytes < 1024) and a directory slot.
         let bs = AkaiDiskFormat.blockSize
@@ -560,15 +559,11 @@ class AkaiDiskImage: ObservableObject {
             name: name, fileType: AkaiDiskFormat.ftypeProgram,
             startBlock: UInt16(startBlock), size: totalSize,
             rawEntry: entryBytes, diskOffset: dirSlot)
-        let program = AkaiProgram(name: name, keyzones: [
-            AkaiProgramKeyzone(sampleName: "", lowKey: 0, highKey: 127, rootNote: 60,
-                               tuneOffset: 0, fineTune: 0, volume: 0, pan: 0,
-                               loopEnabled: false, velocityLow: 0, velocityHigh: 127)],
-            midiChannel: 0xFF, polyphony: 16, bendRange: 0, rawData: file)
+        let program = AkaiProgram(name: name, keyzones: [],
+            midiChannel: 0, polyphony: 16, bendRange: 0, rawData: file)
         let progFile = AkaiProgramFile(directoryEntry: dirEntry, program: program,
                                        offset: startBlock * bs)
         programs.append(progFile)
-        programs.sort { $0.program.name < $1.program.name }
         hasUnsavedChanges = true
         return progFile
     }
@@ -1324,7 +1319,7 @@ class AkaiDiskImage: ObservableObject {
     /// rebuilds the whole file rather than patching bytes in place.
     private func buildProgramFileData(name: String, midiChannel: UInt8, bendRange: UInt8,
                                       keyzones: [AkaiProgramKeyzone]) -> Data {
-        let kgCount = max(1, keyzones.count)
+        let kgCount = keyzones.count
         let progSize = 0xC0 + kgCount * 0xC0
         var file = Data(repeating: 0, count: progSize)
 
@@ -1573,7 +1568,6 @@ class AkaiDiskImage: ObservableObject {
         // 4. Commit.
         imageData = data
         programs[index] = progFile
-        programs.sort { $0.program.name < $1.program.name }
         if let url = imageURL { try data.write(to: url, options: .atomic) }
         hasUnsavedChanges = false
         return progFile
@@ -1650,7 +1644,6 @@ class AkaiDiskImage: ObservableObject {
         let progFile = AkaiProgramFile(directoryEntry: dirEntry, program: clonedProgram,
                                        offset: startBlock * bs)
         programs.append(progFile)
-        programs.sort { $0.program.name < $1.program.name }
         hasUnsavedChanges = true
         return progFile
     }

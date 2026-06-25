@@ -5,6 +5,16 @@ struct WelcomeView: View {
     @ObservedObject var diskImage: AkaiDiskImage
     @State private var isDragging = false
 
+    /// The vivid Akai brand red, shared with the logo and the Greaseweazle Write
+    /// button so the prominent action buttons match exactly. Using a flat fill +
+    /// .buttonStyle(.plain) (rather than .borderedProminent) avoids the system's
+    /// glossy material treatment, which made this button look subtly different
+    /// from the flat-filled Write button in the sidebar.
+    private let akaiRed = Color(red: 0.91, green: 0, blue: 0.11)
+
+    /// Shared width for the two stacked action buttons so they match.
+    private let actionButtonWidth: CGFloat = 180
+
     var body: some View {
         ZStack {
             Rectangle().fill(.background)
@@ -33,19 +43,29 @@ struct WelcomeView: View {
                             NotificationCenter.default.post(name: .openDiskImage, object: nil)
                         } label: {
                             Label("Open Disk Image...", systemImage: "folder")
-                                .frame(width: 180)
+                                .frame(width: actionButtonWidth)
+                                .padding(.vertical, 10)
+                                .foregroundStyle(.white)
+                                .background(akaiRed)
+                                .clipShape(RoundedRectangle(cornerRadius: 6))
                         }
-                        .buttonStyle(.borderedProminent)
-                        .tint(.red)
+                        .buttonStyle(.plain)
                         Text("or drag a .img file here")
                             .font(.caption).foregroundStyle(.tertiary)
                         Button {
                             NotificationCenter.default.post(name: .createDiskImage, object: nil)
                         } label: {
                             Label("New Disk Image", systemImage: "plus.rectangle.on.folder")
-                                .frame(width: 180)
+                                .frame(width: actionButtonWidth)
+                                .padding(.vertical, 10)
+                                .background(Color.secondary.opacity(0.15))
+                                .clipShape(RoundedRectangle(cornerRadius: 6))
+                                .overlay(
+                                    RoundedRectangle(cornerRadius: 6)
+                                        .strokeBorder(Color.secondary.opacity(0.3), lineWidth: 1)
+                                )
                         }
-                        .buttonStyle(.bordered)
+                        .buttonStyle(.plain)
                         .padding(.top, 4)
                     }
                 }

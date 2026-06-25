@@ -309,8 +309,9 @@ struct DiskPathBar: View {
     @State private var copied = false
 
     var body: some View {
-        HStack(spacing: 8) {
+        HStack(spacing: 10) {
             Image(systemName: "internaldrive")
+                .font(.system(size: 14))
                 .foregroundStyle(.secondary)
 
             // Click the path to reveal in Finder.
@@ -318,7 +319,7 @@ struct DiskPathBar: View {
                 NSWorkspace.shared.activateFileViewerSelecting([url])
             } label: {
                 Text(url.path)
-                    .font(.system(.caption, design: .monospaced))
+                    .font(.system(size: 11, design: .monospaced))
                     .foregroundStyle(.primary)
                     .lineLimit(1)
                     .truncationMode(.middle)
@@ -336,13 +337,14 @@ struct DiskPathBar: View {
                 DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) { copied = false }
             } label: {
                 Image(systemName: copied ? "checkmark" : "doc.on.doc")
+                    .font(.system(size: 14))
                     .foregroundStyle(copied ? .green : .secondary)
             }
             .buttonStyle(.plain)
             .help("Copy path")
         }
         .padding(.horizontal, 12)
-        .padding(.vertical, 6)
+        .padding(.vertical, 8)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(.bar)
     }
@@ -669,7 +671,7 @@ struct DiskMapView: View {
             }
             .frame(maxWidth: .infinity)
             .frame(height: rowHeight * CGFloat(rows))
-            .clipShape(RoundedRectangle(cornerRadius: 10))
+            .clipShape(RoundedRectangle(cornerRadius: 4))
 
             // Hover readout (reserves its line so the layout doesn't jump).
             Text(hoverText ?? " ")
@@ -719,7 +721,7 @@ struct DiskMapView: View {
         let canFitLabel = width > 30
 
         ZStack {
-            RoundedRectangle(cornerRadius: min(height, width) * 0.35)
+            RoundedRectangle(cornerRadius: min(height, width) * 0.15)
                 .fill(color(for: seg.kind))
             if canFitLabel {
                 Text(label)

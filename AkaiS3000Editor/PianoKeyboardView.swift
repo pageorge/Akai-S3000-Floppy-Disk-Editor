@@ -17,7 +17,7 @@ struct PianoKeyboardView: View {
     /// keyzone's default high key) so "the max key you can see" always matches
     /// what's actually rendered here, with no separate constant to drift out of sync.
     static let visibleStartNote = 24
-    static let visibleEndNote   = 108
+    static let visibleEndNote   = 95
 
     private let startNote: Int = PianoKeyboardView.visibleStartNote
     private let endNote: Int   = PianoKeyboardView.visibleEndNote
@@ -37,7 +37,8 @@ struct PianoKeyboardView: View {
     private func keyRole(_ note: Int) -> KeyRole {
         guard selectedZone != nil else { return .normal }
         if note == rootKey { return .root }
-        if note == lowKey || note == highKey { return .boundary }
+        if note == lowKey  { return .low }
+        if note == highKey { return .high }
         if note >= lowKey && note <= highKey { return .inRange }
         return .normal
     }
@@ -48,7 +49,7 @@ struct PianoKeyboardView: View {
             let whiteKeyWidth  = geo.size.width / CGFloat(whiteKeyCount)
             let whiteKeyHeight = geo.size.height
             let blackKeyWidth  = whiteKeyWidth * 0.6
-            let blackKeyHeight = whiteKeyHeight * 0.62
+            let blackKeyHeight = whiteKeyHeight * 0.70
             let whitePositions = computeWhitePositions(whiteKeyWidth: whiteKeyWidth)
 
             ZStack(alignment: .topLeading) {
@@ -93,12 +94,13 @@ struct PianoKeyboardView: View {
                 if selectedZone != nil {
                     HStack(spacing: 10) {
                         LegendDot(color: .green,  label: "Range")
-                        LegendDot(color: .red,    label: "Low/High")
+                        LegendDot(color: Color(red: 1.0, green: 0.6, blue: 0.6), label: "Low")
+                        LegendDot(color: Color(red: 0.6, green: 0.75, blue: 1.0), label: "High")
                         LegendDot(color: .orange, label: "Root")
                     }
                     .padding(4)
                     .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 6))
-                    .offset(x: geo.size.width - 170, y: 4)
+                    .offset(x: geo.size.width - 210, y: 4)
                 }
 
                 // Drag/hover tooltip
@@ -173,7 +175,7 @@ struct PianoKeyboardView: View {
                           whitePositions: [Int: CGFloat], blackKeyWidth: CGFloat,
                           blackKeyHeight: CGFloat, y: CGFloat, whiteKeyHeight: CGFloat) -> Int {
         // Check black keys first (they're on top)
-        if y < whiteKeyHeight * 0.62 {
+        if y < whiteKeyHeight * 0.70 {
             for note in startNote...endNote where !isWhiteKey(note) {
                 let prevWhiteX = whitePositions[note - 1] ?? 0
                 let keyX = prevWhiteX + whiteKeyWidth - blackKeyWidth / 2
@@ -236,13 +238,14 @@ struct LegendDot: View {
 // MARK: - Key Role
 
 enum KeyRole {
-    case normal, inRange, boundary, root
+    case normal, inRange, low, high, root
 
     var whiteColor: Color {
         switch self {
         case .normal:   return .white
         case .inRange:  return Color(red: 0.7, green: 1.0, blue: 0.7)
-        case .boundary: return Color(red: 1.0, green: 0.6, blue: 0.6)
+        case .low:      return Color(red: 1.0, green: 0.6, blue: 0.6)
+        case .high:     return Color(red: 0.6, green: 0.75, blue: 1.0)
         case .root:     return Color(red: 1.0, green: 0.65, blue: 0.0)
         }
     }
@@ -251,7 +254,8 @@ enum KeyRole {
         switch self {
         case .normal:   return Color.black.opacity(0.85)
         case .inRange:  return Color(red: 0.0, green: 0.55, blue: 0.2)
-        case .boundary: return Color(red: 0.7, green: 0.1, blue: 0.1)
+        case .low:      return Color(red: 0.7, green: 0.1, blue: 0.1)
+        case .high:     return Color(red: 0.1, green: 0.3, blue: 0.75)
         case .root:     return Color(red: 0.8, green: 0.45, blue: 0.0)
         }
     }
@@ -277,6 +281,10 @@ struct WhitePianoKey: View {
             }
             if role == .root {
                 Circle().fill(Color.orange).frame(width: 6, height: 6).padding(.bottom, 4)
+            } else if role == .low {
+                Circle().fill(Color(red: 1.0, green: 0.3, blue: 0.3)).frame(width: 6, height: 6).padding(.bottom, 4)
+            } else if role == .high {
+                Circle().fill(Color(red: 0.4, green: 0.6, blue: 1.0)).frame(width: 6, height: 6).padding(.bottom, 4)
             }
         }
     }
@@ -294,6 +302,10 @@ struct BlackPianoKey: View {
                 .cornerRadius(2, corners: [.bottomLeft, .bottomRight])
             if role == .root {
                 Circle().fill(Color.orange).frame(width: 5, height: 5).padding(.bottom, 3)
+            } else if role == .low {
+                Circle().fill(Color(red: 1.0, green: 0.3, blue: 0.3)).frame(width: 5, height: 5).padding(.bottom, 3)
+            } else if role == .high {
+                Circle().fill(Color(red: 0.4, green: 0.6, blue: 1.0)).frame(width: 5, height: 5).padding(.bottom, 3)
             }
         }
     }

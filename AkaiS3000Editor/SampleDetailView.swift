@@ -537,7 +537,7 @@ struct SampleListView: View {
             Divider()
             if diskImage.samples.isEmpty {
                 ContentUnavailableView("No Samples", systemImage: "waveform",
-                    description: Text("This disk image contains no sample files."))
+                    description: Text("Drag a sample on here to get started."))
             } else {
                 Table(diskImage.samples, selection: $selectedSampleID) {
                     TableColumn("Name") { s in

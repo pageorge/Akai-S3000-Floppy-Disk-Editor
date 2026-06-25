@@ -29,6 +29,8 @@ struct SidebarView: View {
     /// it doesn't double-handle arrow/delete keys when focus has moved to
     /// another focusable list elsewhere in the app (e.g. a program's keyzone
     /// list), which has its own identical, focus-gated monitor.
+    @State private var samplesExpanded: Bool = true
+    @State private var programsExpanded: Bool = true
     @FocusState private var sidebarFocused: Bool
     @State private var isEditingVolumeName = false
     @State private var editedVolumeName = ""
@@ -273,7 +275,7 @@ struct SidebarView: View {
                 Section {
                     EmptyView()
                 } header: {
-                    HStack {
+                    HStack(spacing: 6) {
                         Image(systemName: "internaldrive.fill")
                             .foregroundStyle(.red)
                             .font(.title2)
@@ -288,72 +290,121 @@ struct SidebarView: View {
                                 }
                                 .onSubmit { commitVolumeRename() }
                                 .onExitCommand { cancelVolumeRename() }
+                            // Tick (commit)
+                            Button { commitVolumeRename() } label: {
+                                Image(systemName: "checkmark")
+                                    .font(.system(size: 14, weight: .semibold))
+                                    .foregroundStyle(.green)
+                            }
+                            .buttonStyle(.plain)
+                            .help("Rename")
+                            // X (cancel)
+                            Button { cancelVolumeRename() } label: {
+                                Image(systemName: "xmark")
+                                    .font(.system(size: 14, weight: .semibold))
+                                    .foregroundStyle(.secondary)
+                            }
+                            .buttonStyle(.plain)
+                            .help("Cancel")
                         } else {
                             Text(diskImage.diskName.isEmpty ? "Akai Disk" : diskImage.diskName)
                                 .font(.title3.weight(.semibold))
                                 .lineLimit(1)
-                                .contentShape(Rectangle())
-                                .onTapGesture { beginVolumeRename() }
-                                .help("Click to rename volume")
+                            Spacer()
+                            // Pen (begin edit)
+                            Button { beginVolumeRename() } label: {
+                                Image(systemName: "pencil")
+                                    .font(.system(size: 14))
+                                    .foregroundStyle(.secondary)
+                            }
+                            .buttonStyle(.plain)
+                            .help("Rename volume")
                         }
                     }
                     .padding(.vertical, 6)
+                    .padding(.trailing, 12)   // align RHS pencil with the sample/program pill content edge (row inset 4 + internal h-padding 8)
                 }
 
                 Section {
-                    ForEach(diskImage.samples) { sample in
-                        SidebarSampleRow(
-                            sample: sample,
-                            isSelected: selectedSampleIDs.contains(sample.id)
-                                || (selectedSampleIDs.isEmpty && selectedSampleID == sample.id),
-                            selectedCount: selectedSampleIDs.count,
-                            onTap: { handleSampleTap(sample) },
-                            onDelete: {
-                                if selectedSampleIDs.count > 1 && selectedSampleIDs.contains(sample.id) {
-                                    showBatchDeleteConfirm = true
-                                } else {
-                                    sampleToDelete = sample; showDeleteConfirm = true
-                                }
-                            },
-                            onClone: { cloneSample(sample) }
-                        )
-                    }
-                } header: {
-                    Label("Samples (\(diskImage.samples.count))", systemImage: "waveform")
-                        .font(.subheadline.weight(.semibold))
-                        .foregroundStyle(.secondary)
-                        .onTapGesture { selectedTab = .samples; selectedSampleID = nil; selectedSampleIDs.removeAll() }
-                }
-
-                Section {
-                    ForEach(diskImage.programs) { prog in
-                        SidebarProgramRow(
-                            program: prog,
-                            isSelected: selectedProgramIDs.contains(prog.id)
-                                || (selectedProgramIDs.isEmpty && selectedProgramID == prog.id),
-                            selectedCount: selectedProgramIDs.count,
-                            onTap: { handleProgramTap(prog) },
-                            onDelete: {
-                                if selectedProgramIDs.count > 1 && selectedProgramIDs.contains(prog.id) {
-                                    showBatchDeleteProgramConfirm = true
-                                } else {
-                                    programToDelete = prog; showDeleteProgramConfirm = true
-                                }
-                            },
-                            onCreate: { createProgram() },
-                            onClone: { cloneProgram(prog) }
-                        )
-                    }
-                } header: {
-                    Label("Programs (\(diskImage.programs.count))", systemImage: "pianokeys")
-                        .font(.subheadline.weight(.semibold))
-                        .foregroundStyle(.secondary)
-                        .onTapGesture { selectedTab = .programs; selectedProgramID = nil; selectedProgramIDs.removeAll() }
-                        .contextMenu {
-                            Button { createProgram() } label: {
-                                Label("Create New Program", systemImage: "plus.square.on.square")
-                            }
+                    if samplesExpanded {
+                        ForEach(diskImage.samples) { sample in
+                            SidebarSampleRow(
+                                sample: sample,
+                                isSelected: selectedSampleIDs.contains(sample.id)
+                                    || (selectedSampleIDs.isEmpty && selectedSampleID == sample.id),
+                                selectedCount: selectedSampleIDs.count,
+                                onTap: { handleSampleTap(sample) },
+                                onDelete: {
+                                    if selectedSampleIDs.count > 1 && selectedSampleIDs.contains(sample.id) {
+                                        showBatchDeleteConfirm = true
+                                    } else {
+                                        sampleToDelete = sample; showDeleteConfirm = true
+                                    }
+                                },
+                                onClone: { cloneSample(sample) }
+                            )
                         }
+                    }
+                } header: {
+                    HStack {
+                        Label("Samples (\(diskImage.samples.count))", systemImage: "waveform")
+                            .font(.subheadline.weight(.semibold))
+                            .foregroundStyle(.secondary)
+                        Spacer()
+                        Image(systemName: samplesExpanded ? "chevron.down" : "chevron.right")
+                            .font(.system(size: 10, weight: .semibold))
+                            .foregroundStyle(.secondary)
+                    }
+                    .contentShape(Rectangle())
+                    .onTapGesture {
+                        withAnimation(.easeInOut(duration: 0.2)) { samplesExpanded.toggle() }
+                        if samplesExpanded { selectedTab = .samples; selectedSampleID = nil; selectedSampleIDs.removeAll() }
+                    }
+                    .padding(.trailing, 12)
+                }
+
+                Section {
+                    if programsExpanded {
+                        ForEach(diskImage.programs) { prog in
+                            SidebarProgramRow(
+                                program: prog,
+                                isSelected: selectedProgramIDs.contains(prog.id)
+                                    || (selectedProgramIDs.isEmpty && selectedProgramID == prog.id),
+                                selectedCount: selectedProgramIDs.count,
+                                onTap: { handleProgramTap(prog) },
+                                onDelete: {
+                                    if selectedProgramIDs.count > 1 && selectedProgramIDs.contains(prog.id) {
+                                        showBatchDeleteProgramConfirm = true
+                                    } else {
+                                        programToDelete = prog; showDeleteProgramConfirm = true
+                                    }
+                                },
+                                onCreate: { createProgram() },
+                                onClone: { cloneProgram(prog) }
+                            )
+                        }
+                    }
+                } header: {
+                    HStack {
+                        Label("Programs (\(diskImage.programs.count))", systemImage: "pianokeys")
+                            .font(.subheadline.weight(.semibold))
+                            .foregroundStyle(.secondary)
+                        Spacer()
+                        Image(systemName: programsExpanded ? "chevron.down" : "chevron.right")
+                            .font(.system(size: 10, weight: .semibold))
+                            .foregroundStyle(.secondary)
+                    }
+                    .contentShape(Rectangle())
+                    .onTapGesture {
+                        withAnimation(.easeInOut(duration: 0.2)) { programsExpanded.toggle() }
+                        if programsExpanded { selectedTab = .programs; selectedProgramID = nil; selectedProgramIDs.removeAll() }
+                    }
+                    .padding(.trailing, 12)
+                    .contextMenu {
+                        Button { createProgram() } label: {
+                            Label("Create New Program", systemImage: "plus.square.on.square")
+                        }
+                    }
                 }
 
                 Section {
@@ -481,7 +532,7 @@ struct SidebarView: View {
         } message: {
             Text("This removes the selected programs from the list. The disk image file is not modified until you save.")
         }
-        .alert("Couldn’t complete", isPresented: $cloneSpaceAlert) {
+        .alert("Couldn't complete", isPresented: $cloneSpaceAlert) {
             Button("OK", role: .cancel) {}
         } message: {
             Text(cloneSpaceMessage)
@@ -611,6 +662,11 @@ struct GreaseweazleSection: View {
     @State private var saveErrorAlert = false
     @State private var saveErrorMessage = ""
 
+    /// The vivid Akai red used across the app's branding (logo, welcome screen).
+    /// Using this exact RGB for the Write button fill guarantees it matches the
+    /// "Open Disk Image" button rather than SwiftUI's flatter `Color.red`.
+    private let akaiRed = Color(red: 0.91, green: 0, blue: 0.11)
+
     var body: some View {
         Section {
             VStack(alignment: .leading, spacing: 10) {
@@ -635,17 +691,28 @@ struct GreaseweazleSection: View {
                     .disabled(runner.isBusy)
                 }
 
-                // Read / Write buttons
+                // Read / Write buttons.
+                //
+                // Both use an explicit Color fill + .buttonStyle(.plain) rather than
+                // .borderedProminent. Inside a List, macOS only paints ONE bordered-
+                // prominent button per container at full saturation (the key/default
+                // button) and mutes the rest — which made "Write" render as a washed-
+                // out pink next to the vivid blue "Read". Explicit fills sidestep that
+                // heuristic. Write uses the exact Akai brand red (0.91, 0, 0.11) so it
+                // matches the Open Disk Image button on the welcome screen.
                 HStack(spacing: 8) {
                     Button {
                         readDisk()
                     } label: {
                         Label("Read", systemImage: "square.and.arrow.down.on.square")
                             .frame(maxWidth: .infinity)
+                            .padding(.vertical, 6)
                             .foregroundStyle(.white)
+                            .background(Color.accentColor)
+                            .clipShape(RoundedRectangle(cornerRadius: 6))
+                            .opacity(runner.isBusy ? 0.5 : 1)
                     }
-                    .buttonStyle(.borderedProminent)
-                    .tint(.accentColor)   // match Drive B (system accent blue)
+                    .buttonStyle(.plain)
                     .disabled(runner.isBusy)
 
                     Button {
@@ -655,7 +722,7 @@ struct GreaseweazleSection: View {
                             .frame(maxWidth: .infinity)
                             .padding(.vertical, 6)
                             .foregroundStyle(.white)
-                            .background(Color.red)   // explicit fill so List context can't pale it, matching Open Disk Image
+                            .background(akaiRed)
                             .clipShape(RoundedRectangle(cornerRadius: 6))
                             .opacity(runner.isBusy ? 0.5 : 1)
                     }
@@ -682,7 +749,7 @@ struct GreaseweazleSection: View {
             }
             .padding(.vertical, 4)
         }
-        .alert("Couldn’t save before writing", isPresented: $saveErrorAlert) {
+        .alert("Couldn't save before writing", isPresented: $saveErrorAlert) {
             Button("OK", role: .cancel) {}
         } message: {
             Text(saveErrorMessage)

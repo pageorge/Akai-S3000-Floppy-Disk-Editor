@@ -77,35 +77,22 @@ struct ContentView: View {
             }
             .toolbar {
                 ToolbarItemGroup(placement: .primaryAction) {
-                    Button {
-                        openDiskImage()
-                    } label: {
-                        Label("Open", systemImage: "folder")
-                    }
-                    .help("Open a disk image (.img) file")
-
-                    Button {
-                        createDiskImage()
-                    } label: {
-                        Label("New Disk", systemImage: "plus.rectangle.on.folder")
-                    }
-                    .help("Create a new blank Akai S3000 disk image")
-
                     if diskImage.isLoaded {
-                        Button {
-                            importWAV()
-                        } label: {
-                            Label("Import WAV", systemImage: "square.and.arrow.down")
-                        }
-                        .help("Import a WAV file as a new sample")
-
                         Button {
                             saveAll()
                         } label: {
-                            Label("Save", systemImage: "square.and.arrow.down.fill")
+                            Text("Save")
                         }
                         .help("Save all changes to disk image")
                         .keyboardShortcut("s", modifiers: .command)
+
+                        Button {
+                            closeDiskImage()
+                        } label: {
+                            Text("×").font(.system(size: 22))
+                        }
+                        .help("Close this disk image and return to the start screen")
+                        .keyboardShortcut("w", modifiers: .command)
                     }
                 }
             }
@@ -163,6 +150,24 @@ struct ContentView: View {
         } message: {
             Text("If you continue without saving, your changes to the disk image will be lost.")
         }
+    }
+
+    /// Close the current disk image and return to the welcome screen. Respects
+    /// unsaved changes by routing through the same confirmation dialog as Open/New.
+    private func closeDiskImage() {
+        let doClose = {
+            diskImage.closeImage()
+            selectedSampleID = nil
+            selectedProgramID = nil
+            selectedTab = .samples
+            greaseweazle.clearLog()
+        }
+        if diskImage.hasUnsavedChanges {
+            pendingOpenAction = doClose
+            showingUnsavedChangesConfirm = true
+            return
+        }
+        doClose()
     }
 
     private func saveAll() {

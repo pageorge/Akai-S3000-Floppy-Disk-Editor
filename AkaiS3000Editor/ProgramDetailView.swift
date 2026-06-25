@@ -6,8 +6,12 @@ struct ProgramDetailView: View {
     @State private var editedProgram: AkaiProgram
     @State private var selectedKeyzoneIndex: Int? = nil
     @State private var isDirty = false
-    @State private var showAlert = false
-    @State private var alertMsg = ""
+    @State private var isEditingName = false
+    @State private var editedName: String = ""
+    @State private var toast: ToastData?
+    @State private var keyzoneKeyMonitor: Any? = nil
+    @FocusState private var nameFieldFocused: Bool
+    @FocusState private var keyzoneListFocused: Bool
 
     init(programFile: AkaiProgramFile, diskImage: AkaiDiskImage) {
         self.programFile = programFile
@@ -15,12 +19,59 @@ struct ProgramDetailView: View {
         _editedProgram = State(initialValue: programFile.program)
     }
 
+    /// Current display name, preferring the live disk-image copy (so a rename
+    /// elsewhere is reflected) and falling back to the directory entry.
+    private var currentName: String {
+        let live = diskImage.programs.first(where: { $0.id == programFile.id })
+        let name = live?.program.name ?? editedProgram.name
+        return name.isEmpty ? (live?.directoryEntry.name ?? programFile.directoryEntry.name) : name
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             HStack {
                 VStack(alignment: .leading, spacing: 4) {
-                    Text(editedProgram.name.isEmpty ? programFile.directoryEntry.name : editedProgram.name)
-                        .font(.system(.title, design: .monospaced).bold())
+                    if isEditingName {
+                        HStack(spacing: 8) {
+                            TextField("Program name", text: $editedName)
+                                .textFieldStyle(.roundedBorder)
+                                .font(.system(.title2, design: .monospaced))
+                                .frame(maxWidth: 280)
+                                .focused($nameFieldFocused)
+                                .onChange(of: editedName) { _, newValue in
+                                    // Live-filter to the Akai character set, max 12 chars.
+                                    let clean = AkaiDiskImage.sanitizeName(newValue)
+                                    if clean != newValue { editedName = clean }
+                                }
+                                .onSubmit { commitRename() }
+                            Text("\(editedName.count)/12")
+                                .font(.caption.monospaced())
+                                .foregroundStyle(.secondary)
+                            Button { commitRename() } label: {
+                                Image(systemName: "checkmark.circle.fill")
+                            }
+                            .buttonStyle(.borderless)
+                            .help("Save name")
+                            .disabled(editedName.trimmingCharacters(in: .whitespaces).isEmpty)
+                            Button { cancelRename() } label: {
+                                Image(systemName: "xmark.circle")
+                            }
+                            .buttonStyle(.borderless)
+                            .help("Cancel")
+                        }
+                    } else {
+                        HStack(spacing: 6) {
+                            Text(currentName)
+                                .font(.system(.title, design: .monospaced).bold())
+                                .textSelection(.enabled)
+                            Button { beginRename() } label: {
+                                Image(systemName: "pencil")
+                                    .font(.system(size: 14))
+                            }
+                            .buttonStyle(.borderless)
+                            .help("Rename program")
+                        }
+                    }
                     Text("Program · \(editedProgram.keyzones.count) keyzones")
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
@@ -30,8 +81,8 @@ struct ProgramDetailView: View {
                     Button("Revert") {
                         editedProgram = programFile.program
                         isDirty = false
+                        diskImage.applyProgramEdits(programFile)
                     }.buttonStyle(.bordered)
-                    Button("Save Changes") { saveChanges() }.buttonStyle(.borderedProminent)
                 }
             }
             .padding()
@@ -50,17 +101,17 @@ struct ProgramDetailView: View {
                                     ForEach(1..<17) { ch in Text("\(ch)").tag(UInt8(ch)) }
                                 }
                                 .labelsHidden()
-                                .onChange(of: editedProgram.midiChannel) { _, _ in isDirty = true }
+                                .onChange(of: editedProgram.midiChannel) { _, _ in commitProgramEdits() }
                             }
                             HStack {
                                 Text("Polyphony").frame(width: 100, alignment: .leading)
                                 Stepper("\(editedProgram.polyphony)", value: $editedProgram.polyphony, in: 1...16)
-                                    .onChange(of: editedProgram.polyphony) { _, _ in isDirty = true }
+                                    .onChange(of: editedProgram.polyphony) { _, _ in commitProgramEdits() }
                             }
                             HStack {
                                 Text("Bend Range").frame(width: 100, alignment: .leading)
                                 Stepper("\(editedProgram.bendRange) st", value: $editedProgram.bendRange, in: 0...12)
-                                    .onChange(of: editedProgram.bendRange) { _, _ in isDirty = true }
+                                    .onChange(of: editedProgram.bendRange) { _, _ in commitProgramEdits() }
                             }
                         }
                     }
@@ -73,11 +124,7 @@ struct ProgramDetailView: View {
                         Spacer()
                         Button { addKeyzone() } label: { Image(systemName: "plus") }.buttonStyle(.borderless)
                         Button {
-                            if let idx = selectedKeyzoneIndex {
-                                editedProgram.keyzones.remove(at: idx)
-                                selectedKeyzoneIndex = nil
-                                isDirty = true
-                            }
+                            if let idx = selectedKeyzoneIndex { deleteKeyzone(at: idx) }
                         } label: { Image(systemName: "minus") }
                         .buttonStyle(.borderless)
                         .disabled(selectedKeyzoneIndex == nil)
@@ -89,14 +136,69 @@ struct ProgramDetailView: View {
                             KeyzoneRow(keyzone: kz, sampleNames: diskImage.samples.map { $0.header.name })
                                 .tag(idx)
                                 .onTapGesture { selectedKeyzoneIndex = idx }
+                                .contextMenu {
+                                    Button { addKeyzone() } label: {
+                                        Label("New Keyzone", systemImage: "plus.square.on.square")
+                                    }
+                                    Button { cloneKeyzone(at: idx) } label: {
+                                        Label("Clone", systemImage: "plus.square.on.square")
+                                    }
+                                    Divider()
+                                    Button(role: .destructive) { deleteKeyzone(at: idx) } label: {
+                                        Label("Delete", systemImage: "trash")
+                                    }
+                                }
                         }
                     }
                     .listStyle(.inset)
+                    .focused($keyzoneListFocused)
+                    .onAppear {
+                        keyzoneKeyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
+                            // Only act when this list actually has keyboard focus,
+                            // so we never double-handle the same keypress alongside
+                            // SidebarView's identical (always-active) key monitor.
+                            guard keyzoneListFocused, !diskImage.isEditingText else { return event }
+                            if event.keyCode == 126 {        // up arrow
+                                moveKeyzoneSelection(by: -1)
+                                return nil
+                            }
+                            if event.keyCode == 125 {        // down arrow
+                                moveKeyzoneSelection(by: 1)
+                                return nil
+                            }
+                            if event.keyCode == 51 || event.keyCode == 117 {  // delete / forward-delete
+                                if let idx = selectedKeyzoneIndex {
+                                    deleteKeyzone(at: idx)
+                                    return nil
+                                }
+                            }
+                            return event
+                        }
+                    }
+                    .onDisappear {
+                        if let m = keyzoneKeyMonitor { NSEvent.removeMonitor(m); keyzoneKeyMonitor = nil }
+                    }
                 }
                 .frame(minWidth: 280, maxWidth: 360)
 
-                // Right: piano keyboard + keyzone editor
+                // Right: sample picker + piano keyboard + keyzone editor
                 VStack(alignment: .leading, spacing: 0) {
+                    // Sample picker — pills above the keys, one tap assigns/removes
+                    // the sample from whichever keyzone is currently selected.
+                    GroupBox("Sample") {
+                        if diskImage.samples.isEmpty {
+                            Text("No samples on this disk")
+                                .font(.caption).foregroundStyle(.secondary)
+                        } else {
+                            FlowLayout(spacing: 6) {
+                                ForEach(diskImage.samples) { sample in
+                                    samplePill(for: sample)
+                                }
+                            }
+                        }
+                    }
+                    .padding(.horizontal).padding(.top, 8).padding(.bottom, 4)
+
                     // Only show piano when there are keyzones
                     if !editedProgram.keyzones.isEmpty {
                         PianoKeyboardView(
@@ -105,12 +207,30 @@ struct ProgramDetailView: View {
                             onKeyzoneChanged: { updated in
                                 if let idx = selectedKeyzoneIndex, idx < editedProgram.keyzones.count {
                                     editedProgram.keyzones[idx] = updated
-                                    isDirty = true
+                                    commitProgramEdits()
                                 }
                             }
                         )
                         .frame(height: 140)
                         .background(Color(nsColor: .controlBackgroundColor))
+
+                        // Low / Root / High pickers positioned directly under the
+                        // keyboard, matching their on-keyboard position: low at the
+                        // bottom-left, root centred, high at the bottom-right.
+                        if let idx = selectedKeyzoneIndex, idx < editedProgram.keyzones.count {
+                            HStack {
+                                MidiKeyPicker(label: "Low", value: $editedProgram.keyzones[idx].lowKey,
+                                             onChange: { commitProgramEdits() })
+                                Spacer()
+                                MidiKeyPicker(label: "Root", value: $editedProgram.keyzones[idx].rootNote,
+                                             onChange: { commitProgramEdits() })
+                                Spacer()
+                                MidiKeyPicker(label: "High", value: $editedProgram.keyzones[idx].highKey,
+                                             onChange: { commitProgramEdits() })
+                            }
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 8)
+                        }
 
                         Divider()
                     }
@@ -118,10 +238,7 @@ struct ProgramDetailView: View {
                     if let idx = selectedKeyzoneIndex, idx < editedProgram.keyzones.count {
                         KeyzoneEditorView(
                             keyzone: $editedProgram.keyzones[idx],
-                            sampleNames: diskImage.samples.map {
-                                $0.header.name.isEmpty ? $0.directoryEntry.name : $0.header.name
-                            },
-                            onChange: { isDirty = true }
+                            onChange: { commitProgramEdits() }
                         )
                         .padding()
                     } else {
@@ -138,38 +255,140 @@ struct ProgramDetailView: View {
                 }
             }
         }
-        .alert("Result", isPresented: $showAlert) {
-            Button("OK") {}
-        } message: {
-            Text(alertMsg)
-        }
         .onChange(of: isDirty) { _, _ in diskImage.hasUnsavedChanges = isDirty }
+        .toast($toast)
+    }
+
+    private func beginRename() {
+        editedName = currentName
+        isEditingName = true
+        diskImage.isEditingText = true
+        DispatchQueue.main.async { nameFieldFocused = true }
+    }
+
+    private func cancelRename() {
+        isEditingName = false
+        nameFieldFocused = false
+        diskImage.isEditingText = false
+    }
+
+    private func commitRename() {
+        let clean = AkaiDiskImage.sanitizeName(editedName)
+        guard !clean.trimmingCharacters(in: .whitespaces).isEmpty else { return }
+        // No-op if unchanged.
+        if clean == currentName {
+            isEditingName = false
+            nameFieldFocused = false
+            diskImage.isEditingText = false
+            return
+        }
+        do {
+            try diskImage.renameProgram(id: programFile.id, to: clean)
+            editedProgram.name = clean
+            isEditingName = false
+            nameFieldFocused = false
+            diskImage.isEditingText = false
+            toast = ToastData(message: "Renamed to \(clean)")
+        } catch {
+            toast = ToastData(message: error.localizedDescription, isError: true)
+        }
     }
 
     private func addKeyzone() {
         let newKZ = AkaiProgramKeyzone(
             sampleName: diskImage.samples.first?.header.name ?? "NO NAME",
-            lowKey: 0, highKey: 127, rootNote: 60,
+            lowKey: 0, highKey: UInt8(PianoKeyboardView.visibleEndNote), rootNote: 60,
             tuneOffset: 0, fineTune: 0, volume: 99, pan: 0,
             loopEnabled: false, velocityLow: 0, velocityHigh: 127
         )
         editedProgram.keyzones.append(newKZ)
         selectedKeyzoneIndex = editedProgram.keyzones.count - 1
-        isDirty = true
+        commitProgramEdits()
     }
 
-    private func saveChanges() {
-        var updatedFile = programFile
-        updatedFile.program = editedProgram
-        do {
-            try diskImage.updateProgramInImage(programFile: updatedFile)
-            isDirty = false
-            alertMsg = "Program saved successfully."
-            showAlert = true
-        } catch {
-            alertMsg = error.localizedDescription
-            showAlert = true
+    /// Duplicate the keyzone at `index` (all its settings) and insert the copy
+    /// right after it, then select the new one — mirrors cloneSample/cloneProgram.
+    private func cloneKeyzone(at index: Int) {
+        guard editedProgram.keyzones.indices.contains(index) else { return }
+        let copy = editedProgram.keyzones[index]
+        let insertAt = index + 1
+        editedProgram.keyzones.insert(copy, at: insertAt)
+        selectedKeyzoneIndex = insertAt
+        commitProgramEdits()
+    }
+
+    /// Remove the keyzone at `index` and select a sensible neighbour afterwards.
+    private func deleteKeyzone(at index: Int) {
+        guard editedProgram.keyzones.indices.contains(index) else { return }
+        editedProgram.keyzones.remove(at: index)
+        if editedProgram.keyzones.isEmpty {
+            selectedKeyzoneIndex = nil
+        } else {
+            selectedKeyzoneIndex = min(index, editedProgram.keyzones.count - 1)
         }
+        commitProgramEdits()
+    }
+
+    /// Move the keyzone selection up/down by `delta`, mirroring SidebarView's
+    /// moveSelection — if nothing is selected yet, arrow keys select an end.
+    private func moveKeyzoneSelection(by delta: Int) {
+        let count = editedProgram.keyzones.count
+        guard count > 0 else { return }
+        if let idx = selectedKeyzoneIndex {
+            selectedKeyzoneIndex = max(0, min(count - 1, idx + delta))
+        } else {
+            selectedKeyzoneIndex = delta > 0 ? 0 : count - 1
+        }
+    }
+
+    /// Push the current `editedProgram` into the in-memory disk image so the
+    /// global Save (or quit-confirmation) picks it up — mirrors
+    /// SampleDetailView's commitEditsToImage. Does not write a file.
+    private func commitProgramEdits() {
+        isDirty = true
+        var updated = programFile
+        updated.program = editedProgram
+        diskImage.applyProgramEdits(updated)
+    }
+
+    /// Toggle whether `name` is assigned to the currently selected keyzone.
+    /// Tapping the already-assigned sample's pill clears the assignment;
+    /// tapping any other pill assigns it (replacing whatever was there) —
+    /// this is the whole "sample picker", replacing the old dropdown.
+    private func toggleSample(_ name: String) {
+        guard let idx = selectedKeyzoneIndex, editedProgram.keyzones.indices.contains(idx) else { return }
+        if editedProgram.keyzones[idx].sampleName == name {
+            editedProgram.keyzones[idx].sampleName = ""
+        } else {
+            editedProgram.keyzones[idx].sampleName = name
+        }
+        commitProgramEdits()
+    }
+
+    /// One sample pill: filled red when it's the selected keyzone's assigned
+    /// sample, outlined otherwise. Dimmed (and inert) when no keyzone is selected,
+    /// since there's nothing yet to assign it to.
+    @ViewBuilder
+    private func samplePill(for sample: AkaiSample) -> some View {
+        let name = sample.header.name.isEmpty ? sample.directoryEntry.name : sample.header.name
+        let hasSelection = selectedKeyzoneIndex != nil
+        let isAssigned = selectedKeyzoneIndex.flatMap { idx in
+            editedProgram.keyzones.indices.contains(idx) ? editedProgram.keyzones[idx].sampleName == name : nil
+        } ?? false
+
+        Text(name)
+            .font(.system(size: 11, weight: .semibold, design: .monospaced))
+            .foregroundStyle(isAssigned ? .white : .primary)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 5)
+            .background(isAssigned ? Color.red : Color.secondary.opacity(0.12))
+            .clipShape(Capsule())
+            .overlay(Capsule().strokeBorder(isAssigned ? Color.clear : Color.secondary.opacity(0.35)))
+            .opacity(hasSelection ? 1 : 0.45)
+            .contentShape(Capsule())
+            .onTapGesture { if hasSelection { toggleSample(name) } }
+            .help(hasSelection ? (isAssigned ? "Remove from this keyzone" : "Assign to this keyzone")
+                                : "Select a keyzone first")
     }
 }
 
@@ -210,7 +429,6 @@ struct KeyzoneRow: View {
 
 struct KeyzoneEditorView: View {
     @Binding var keyzone: AkaiProgramKeyzone
-    let sampleNames: [String]
     let onChange: () -> Void
 
     var body: some View {
@@ -218,20 +436,12 @@ struct KeyzoneEditorView: View {
             VStack(alignment: .leading, spacing: 16) {
                 Text("Keyzone Settings").font(.headline)
 
-                GroupBox("Sample") {
-                    Picker("Sample", selection: $keyzone.sampleName) {
-                        ForEach(sampleNames, id: \.self) { name in Text(name).tag(name) }
-                    }
-                    .labelsHidden()
-                    .onChange(of: keyzone.sampleName) { _, _ in onChange() }
-                }
-
-                GroupBox("Key Range") {
-                    VStack(alignment: .leading, spacing: 10) {
-                        MidiKeyPicker(label: "Low Key",   value: $keyzone.lowKey,   onChange: onChange)
-                        MidiKeyPicker(label: "High Key",  value: $keyzone.highKey,  onChange: onChange)
-                        MidiKeyPicker(label: "Root Note", value: $keyzone.rootNote, onChange: onChange)
-                    }
+                HStack(spacing: 6) {
+                    Text("Sample:").font(.subheadline).foregroundStyle(.secondary)
+                    Text(keyzone.sampleName.trimmingCharacters(in: .whitespaces).isEmpty
+                        ? "(none assigned — tap a pill above)" : keyzone.sampleName)
+                        .font(.system(.subheadline, design: .monospaced))
+                        .foregroundStyle(keyzone.sampleName.trimmingCharacters(in: .whitespaces).isEmpty ? Color.secondary : Color.red)
                 }
 
                 GroupBox("Velocity") {

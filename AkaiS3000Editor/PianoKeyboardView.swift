@@ -13,8 +13,14 @@ struct PianoKeyboardView: View {
     let selectedIndex: Int?
     var onKeyzoneChanged: ((AkaiProgramKeyzone) -> Void)? = nil
 
-    private let startNote: Int = 24
-    private let endNote: Int   = 108
+    /// The full visible key range of this keyboard. Used elsewhere (e.g. a new
+    /// keyzone's default high key) so "the max key you can see" always matches
+    /// what's actually rendered here, with no separate constant to drift out of sync.
+    static let visibleStartNote = 24
+    static let visibleEndNote   = 108
+
+    private let startNote: Int = PianoKeyboardView.visibleStartNote
+    private let endNote: Int   = PianoKeyboardView.visibleEndNote
     private let blackKeyPattern = [1, 3, 6, 8, 10]
 
     @State private var dragMode: PianoDragMode = .none

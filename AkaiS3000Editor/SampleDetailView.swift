@@ -112,13 +112,6 @@ struct SampleDetailView: View {
                             .foregroundStyle(.secondary)
                     }
                     Spacer()
-                    Button { saveChanges() } label: {
-                        Image(systemName: "square.and.arrow.down")
-                            .frame(width: 20, height: 20)
-                    }
-                    .buttonStyle(.bordered)
-                    .disabled(!isDirty)
-                    .help("Save changes to disk image")
                     Button { exportWAV() } label: {
                         Image(systemName: "arrow.up.forward.square")
                             .frame(width: 20, height: 20)
@@ -441,22 +434,6 @@ struct SampleDetailView: View {
                 self.playheadPosition = min(played / total, 1.0)
             }
         }
-    }
-
-    private func saveChanges() {
-        var updatedHeader = sample.header
-        updatedHeader.midiRootNote = UInt8(editedRootNote)
-        updatedHeader.fineTune = Int8(editedFineTune)
-        updatedHeader.loopEnabled = editedLoopEnabled
-        updatedHeader.loopStart = UInt32(editedLoopStart)
-        updatedHeader.loopEnd = UInt32(editedLoopEnd)
-        var updatedSample = sample
-        updatedSample.header = updatedHeader
-        do {
-            try diskImage.writeSampleToImage(sample: updatedSample)
-            isDirty = false
-            toast = ToastData(message: "Changes saved")
-        } catch { toast = ToastData(message: error.localizedDescription, isError: true) }
     }
 
     /// Build a sample carrying the current edits.

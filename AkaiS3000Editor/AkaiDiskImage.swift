@@ -195,7 +195,11 @@ class AkaiDiskImage: ObservableObject {
     }
 
     private func parseImage(data: Data) throws {
-        let labelOffset = 4 * AkaiDiskFormat.blockSize
+        // Volume label (akai_flvol_label_s.name) lives at ABSOLUTE offset 0xD80
+        // within the header (blocks 0-4), per akai_flhhead_s — NOT 4*blockSize
+        // (0x1000), which was the previous, wrong offset and meant the disk name
+        // was always read from the wrong bytes (typically blank/garbage).
+        let labelOffset = 0xD80
         diskName = labelOffset + 12 <= data.count
             ? akaiString(from: data, offset: labelOffset, length: 12)
             : ""
@@ -411,7 +415,11 @@ class AkaiDiskImage: ObservableObject {
 
         let name = fileData.count >= 0x0F
             ? akaiString(from: fileData, offset: 0x03, length: 12) : entry.name
-        let midiChannel = fileData.count > 0x10 ? fileData[0x10] : 0xff
+        // midich1 @ 0x10: on-disk 0xFF = Omni, 0...15 = MIDI channel (0-indexed).
+        // The UI uses 0 = Omni, 1...16 = channel (1-indexed display), so translate
+        // here rather than storing the raw on-disk byte directly into the model.
+        let rawMidi = fileData.count > 0x10 ? fileData[0x10] : 0xff
+        let midiChannel: UInt8 = rawMidi == 0xff ? 0 : rawMidi &+ 1
         let keygroupCount = fileData.count > 0x2A ? fileData[0x2A] : 0
         let octave = fileData.count > 0x15 ? fileData[0x15] : 0
 
@@ -816,6 +824,45 @@ class AkaiDiskImage: ObservableObject {
         return countFreeBlocks(data: data)
     }
 
+    // MARK: - Block Map (Disk Info visualization)
+
+    enum DiskBlockKind: Equatable {
+        case system
+        case free
+        case sample(name: String)
+        case program(name: String)
+    }
+
+    /// Build a complete map of what owns every block on the disk, for the Disk
+    /// Info "map" visualization. Walks the REAL FAT chain for every sample and
+    /// program (not just startBlock + size), so fragmentation shows accurately —
+    /// a sample's blocks may not be contiguous if space was reused after a delete.
+    func blockMap() -> [DiskBlockKind] {
+        guard let data = imageData else { return [] }
+        var map = [DiskBlockKind](repeating: .free, count: AkaiDiskFormat.totalBlocks)
+
+        // System region: 5 header blocks + 12 volume-directory blocks = 17.
+        let systemBlocks = AkaiDiskFormat.volDirStartBlock
+            + (AkaiDiskFormat.volDirEntryCount * AkaiDiskFormat.dirEntrySize + AkaiDiskFormat.blockSize - 1)
+            / AkaiDiskFormat.blockSize
+        for b in 0..<min(systemBlocks, map.count) { map[b] = .system }
+
+        for sample in samples {
+            let name = sample.header.name.isEmpty ? sample.directoryEntry.name : sample.header.name
+            let allEntries = [sample.directoryEntry] + sample.additionalEntries
+            for entry in allEntries {
+                let chain = fatChain(from: Int(entry.startBlock), data: data)
+                for b in chain where b >= 0 && b < map.count { map[b] = .sample(name: name) }
+            }
+        }
+        for prog in programs {
+            let name = prog.program.name.isEmpty ? prog.directoryEntry.name : prog.program.name
+            let chain = fatChain(from: Int(prog.directoryEntry.startBlock), data: data)
+            for b in chain where b >= 0 && b < map.count { map[b] = .program(name: name) }
+        }
+        return map
+    }
+
     /// How many blocks a sample occupies (header + audio), i.e. how many a clone
     /// of it would need.
     func blocksNeeded(for sample: AkaiSample) -> Int {
@@ -952,6 +999,51 @@ class AkaiDiskImage: ObservableObject {
         hasUnsavedChanges = true
     }
 
+    /// Remove a program both from the in-memory list AND from the disk image:
+    /// blanks its directory entry and frees every block in its FAT chain so the
+    /// space can be reused. Does not write to disk immediately — call
+    /// saveImageToDisk() (or the global Save button) afterwards to persist.
+    func deleteProgram(id: UUID) {
+        guard let program = programs.first(where: { $0.id == id }) else { return }
+        guard var data = imageData else {
+            programs.removeAll { $0.id == id }
+            return
+        }
+        freeChain(from: Int(program.directoryEntry.startBlock), data: &data)
+        let entry = program.directoryEntry
+        if entry.diskOffset >= 0, entry.diskOffset + AkaiDiskFormat.dirEntrySize <= data.count {
+            let blank = Data(repeating: 0, count: AkaiDiskFormat.dirEntrySize)
+            data.replaceSubrange(entry.diskOffset..<entry.diskOffset + AkaiDiskFormat.dirEntrySize, with: blank)
+        }
+        imageData = data
+        freeBlocks = countFreeBlocks(data: data)
+        programs.removeAll { $0.id == id }
+        hasUnsavedChanges = true
+    }
+
+    /// Delete several programs at once, mirroring deleteSamples. Does not write
+    /// to disk — call saveImageToDisk() afterwards to persist.
+    func deletePrograms(ids: Set<UUID>) {
+        guard !ids.isEmpty else { return }
+        guard var data = imageData else {
+            programs.removeAll { ids.contains($0.id) }
+            return
+        }
+        let targets = programs.filter { ids.contains($0.id) }
+        for program in targets {
+            freeChain(from: Int(program.directoryEntry.startBlock), data: &data)
+            let entry = program.directoryEntry
+            if entry.diskOffset >= 0, entry.diskOffset + AkaiDiskFormat.dirEntrySize <= data.count {
+                let blank = Data(repeating: 0, count: AkaiDiskFormat.dirEntrySize)
+                data.replaceSubrange(entry.diskOffset..<entry.diskOffset + AkaiDiskFormat.dirEntrySize, with: blank)
+            }
+        }
+        imageData = data
+        freeBlocks = countFreeBlocks(data: data)
+        programs.removeAll { ids.contains($0.id) }
+        hasUnsavedChanges = true
+    }
+
     /// Build a blank but VALID Akai S3000 HD floppy image (1600 blocks) and load
     /// it. Structure verified byte-for-byte against a real Greaseweazle-formatted
     /// disk: floppy-header file[64] with the 0xFF volume flag in slot 0, FAT with
@@ -1005,6 +1097,25 @@ class AkaiDiskImage: ObservableObject {
         }
         try data.write(to: url, options: .atomic)
         hasUnsavedChanges = false
+    }
+
+    /// Rename the disk's volume label (akai_flvol_label_s.name @ absolute 0xD80).
+    /// Patches the in-memory image only — persist via Save, matching every other
+    /// edit in the app. Used by the sidebar's click-to-edit volume name.
+    @discardableResult
+    func renameVolume(to newName: String) throws -> String {
+        guard var data = imageData else { throw AkaiError.noImageLoaded }
+        let clean = Self.sanitizeName(newName)
+        let labelOffset = 0xD80
+        guard labelOffset + 12 <= data.count else {
+            throw AkaiError.dataError("Disk image too small for a volume label")
+        }
+        let labelBytes = akaiBytes(from: clean, length: 12)
+        data.replaceSubrange(labelOffset..<labelOffset + 12, with: labelBytes)
+        imageData = data
+        diskName = clean
+        hasUnsavedChanges = true
+        return clean
     }
 
     // MARK: - Write Back
@@ -1203,6 +1314,147 @@ class AkaiDiskImage: ObservableObject {
         return String(filtered.prefix(12))
     }
 
+    // MARK: - Program Edits
+
+    /// Build a complete S3000 program file from scratch: the 0xC0 header
+    /// followed by exactly max(1, keyzones.count) 0xC0 keygroups, with kgnum
+    /// (0x2A) always set to match the real keygroup count. A real S3000 reports
+    /// "bad disk program" if kgnum disagrees with what's actually stored, or if
+    /// fields are written outside their real struct offsets — so this always
+    /// rebuilds the whole file rather than patching bytes in place.
+    private func buildProgramFileData(name: String, midiChannel: UInt8, bendRange: UInt8,
+                                      keyzones: [AkaiProgramKeyzone]) -> Data {
+        let kgCount = max(1, keyzones.count)
+        let progSize = 0xC0 + kgCount * 0xC0
+        var file = Data(repeating: 0, count: progSize)
+
+        file[0x00] = 0x01                         // blockid
+        let nameBytes = akaiBytes(from: name, length: 12)
+        for (i, b) in nameBytes.enumerated() { file[0x03 + i] = b }
+        // midich1 @ 0x10: on-disk 0xFF = Omni, 0...15 = channel (0-indexed).
+        // UI is 0 = Omni, 1...16 = channel (1-indexed) — translate, don't store raw.
+        file[0x10] = midiChannel == 0 ? 0xFF : midiChannel - 1
+        file[0x13] = 0                            // program-level keylo
+        file[0x14] = 127                          // program-level keyhi
+        file[0x15] = bendRange                    // oct
+        file[0x16] = 0xFF                          // auxch1 = OFF
+        file[0x29] = 0                            // kgxf
+        file[0x2A] = UInt8(min(255, kgCount))     // kgnum — MUST match real keygroup count
+
+        let kgBase = 0xC0
+        let emptyName = akaiBytes(from: "", length: 12)
+        for kgi in 0..<kgCount {
+            let kg = kgBase + kgi * 0xC0
+            file[kg + 0x00] = 0x02                // blockid
+            let kz: AkaiProgramKeyzone? = kgi < keyzones.count ? keyzones[kgi] : nil
+            file[kg + 0x03] = kz?.lowKey ?? 0
+            file[kg + 0x04] = kz?.highKey ?? 127
+
+            for z in 0..<4 {
+                let vz = kg + 0x22 + z * 0x18
+                if z == 0, let kz = kz {
+                    // Velocity zone 1 carries the real keyzone's sample + settings.
+                    let snameBytes = akaiBytes(from: kz.sampleName, length: 12)
+                    for (i, b) in snameBytes.enumerated() { file[vz + i] = b }
+                    file[vz + 0x0C] = kz.velocityLow
+                    file[vz + 0x0D] = kz.velocityHigh
+                    file[vz + 0x0E] = UInt8(bitPattern: kz.fineTune)    // ctune
+                    file[vz + 0x0F] = UInt8(bitPattern: kz.tuneOffset) // stune
+                    file[vz + 0x10] = kz.volume                         // loud
+                    file[vz + 0x12] = UInt8(bitPattern: kz.pan)
+                    file[vz + 0x13] = kz.loopEnabled ? 0x00 : 0x03      // pmode
+                    file[vz + 0x16] = 0xFF; file[vz + 0x17] = 0xFF       // shdra = none
+                } else {
+                    for (i, b) in emptyName.enumerated() { file[vz + i] = b }
+                    file[vz + 0x0C] = 0
+                    file[vz + 0x0D] = 127
+                    file[vz + 0x13] = 0x03
+                    file[vz + 0x16] = 0xFF; file[vz + 0x17] = 0xFF
+                }
+            }
+        }
+        return file
+    }
+
+    /// Rebuild a program's entire file (header + every keygroup) into the
+    /// in-memory image WITHOUT writing the file, reallocating FAT blocks (and
+    /// updating the directory entry's start/size) if the keygroup count changed
+    /// the file's size — the program-detail counterpart to applySampleEdits.
+    /// Picked up by a later Save All (saveImageToDisk).
+    func applyProgramEdits(_ programFile: AkaiProgramFile) {
+        guard var data = imageData else { return }
+        let fileData = buildProgramFileData(
+            name: programFile.program.name,
+            midiChannel: programFile.program.midiChannel,
+            bendRange: programFile.program.bendRange,
+            keyzones: programFile.program.keyzones)
+
+        let bs = AkaiDiskFormat.blockSize
+        let requiredBlocks = (fileData.count + bs - 1) / bs
+        let oldStartBlock = programFile.offset / bs
+        let oldChain = fatChain(from: oldStartBlock, data: data)
+
+        var startBlock = oldStartBlock
+        func writeFile(across chain: [Int]) {
+            for (i, block) in chain.enumerated() {
+                let srcStart = i * bs
+                let dstStart = block * bs
+                guard dstStart + bs <= data.count else { break }
+                let srcEnd = min(srcStart + bs, fileData.count)
+                let chunk = srcStart < fileData.count ? fileData[srcStart..<srcEnd] : Data()
+                let padded = chunk + Data(repeating: 0, count: bs - chunk.count)
+                data.replaceSubrange(dstStart..<dstStart + bs, with: padded)
+            }
+        }
+
+        if requiredBlocks == oldChain.count {
+            // Same size — reuse the existing chain in place.
+            writeFile(across: oldChain)
+        } else {
+            // The keygroup count changed the file's size — free the old chain
+            // and allocate a fresh one of the right length, then update the
+            // directory entry's start block + size to match.
+            freeChain(from: oldStartBlock, data: &data)
+            guard let newBlocks = findFreeBlocks(count: requiredBlocks, data: data) else {
+                // Not enough room to grow — leave the disk untouched rather than
+                // half-write a corrupt program. The in-memory model still has the
+                // attempted edit; it just won't persist until there's space.
+                return
+            }
+            for i in 0..<newBlocks.count {
+                let value: UInt16 = (i == newBlocks.count - 1) ? AkaiDiskFormat.fatEnd : UInt16(newBlocks[i + 1])
+                setFatValue(block: newBlocks[i], value: value, data: &data)
+            }
+            writeFile(across: newBlocks)
+            startBlock = newBlocks[0]
+
+            let entry = programFile.directoryEntry
+            if entry.diskOffset >= 0, entry.diskOffset + AkaiDiskFormat.dirEntrySize <= data.count {
+                let totalSize = UInt32(fileData.count)
+                data[entry.diskOffset + 17] = UInt8(totalSize & 0xFF)
+                data[entry.diskOffset + 18] = UInt8((totalSize >> 8) & 0xFF)
+                data[entry.diskOffset + 19] = UInt8((totalSize >> 16) & 0xFF)
+                data[entry.diskOffset + 20] = UInt8(startBlock & 0xFF)
+                data[entry.diskOffset + 21] = UInt8((startBlock >> 8) & 0xFF)
+            }
+            freeBlocks = countFreeBlocks(data: data)
+        }
+
+        imageData = data
+
+        var updated = programFile
+        updated.program.rawData = fileData
+        updated.offset = startBlock * bs
+        var updatedEntry = programFile.directoryEntry
+        updatedEntry.startBlock = UInt16(startBlock)
+        updatedEntry.size = UInt32(fileData.count)
+        updated.directoryEntry = updatedEntry
+        if let index = programs.firstIndex(where: { $0.id == programFile.id }) {
+            programs[index] = updated
+        }
+        hasUnsavedChanges = true
+    }
+
     // MARK: - Rename
 
     /// Rename a sample everywhere it appears: the sample header (offset 0x03) and
@@ -1269,6 +1521,138 @@ class AkaiDiskImage: ObservableObject {
         if let url = imageURL { try data.write(to: url, options: .atomic) }
         hasUnsavedChanges = false
         return sample
+    }
+
+    /// Rename a program: patches the 12-byte name field at the start of its raw
+    /// file data (offset 0x03, mirroring the sample header layout) and the
+    /// directory entry's name field. Writes to disk immediately, matching
+    /// renameSample's behaviour.
+    @discardableResult
+    func renameProgram(id: UUID, to newRawName: String) throws -> AkaiProgramFile {
+        guard var data = imageData else { throw AkaiError.noImageLoaded }
+        guard let index = programs.firstIndex(where: { $0.id == id }) else {
+            throw AkaiError.dataError("Program not found")
+        }
+        let cleanName = Self.sanitizeName(newRawName)
+        guard !cleanName.trimmingCharacters(in: .whitespaces).isEmpty else {
+            throw AkaiError.dataError("Name cannot be empty")
+        }
+
+        var progFile = programs[index]
+        let nameBytes = akaiBytes(from: cleanName, length: 12)
+
+        // 1. Patch the 12-byte name in the program's raw data (name @ 0x03).
+        var fileData = progFile.program.rawData
+        if fileData.count >= 0x03 + 12 {
+            for (i, b) in nameBytes.enumerated() { fileData[0x03 + i] = b }
+        }
+        progFile.program.rawData = fileData
+        progFile.program.name = cleanName
+
+        // 2. Write the patched data back across the program's FAT chain.
+        let chain = fatChain(from: progFile.offset / AkaiDiskFormat.blockSize, data: data)
+        let bs = AkaiDiskFormat.blockSize
+        for (i, block) in chain.enumerated() {
+            let srcStart = i * bs
+            guard srcStart < fileData.count else { break }
+            let srcEnd = min(srcStart + bs, fileData.count)
+            let dstStart = block * bs
+            guard dstStart + bs <= data.count else { break }
+            data.replaceSubrange(dstStart..<dstStart + bs,
+                                 with: fileData[srcStart..<srcEnd] + Data(repeating: 0, count: bs - (srcEnd - srcStart)))
+        }
+
+        // 3. Rewrite the directory entry's name field.
+        var entry = progFile.directoryEntry
+        if entry.diskOffset >= 0, entry.diskOffset + 12 <= data.count {
+            for (i, b) in nameBytes.enumerated() { data[entry.diskOffset + i] = b }
+            entry.name = cleanName
+        }
+        progFile.directoryEntry = entry
+
+        // 4. Commit.
+        imageData = data
+        programs[index] = progFile
+        programs.sort { $0.program.name < $1.program.name }
+        if let url = imageURL { try data.write(to: url, options: .atomic) }
+        hasUnsavedChanges = false
+        return progFile
+    }
+
+    /// Duplicate an existing program into a new program on the disk, carrying
+    /// over every setting (MIDI channel, polyphony, bend range, keyzones). The
+    /// clone gets fresh blocks, a fresh directory entry, and a unique name. Does
+    /// not write to disk immediately — persist via Save. Returns the new program.
+    @discardableResult
+    func cloneProgram(id: UUID) throws -> AkaiProgramFile {
+        guard var data = imageData else { throw AkaiError.noImageLoaded }
+        guard let src = programs.first(where: { $0.id == id }) else {
+            throw AkaiError.dataError("Program to clone not found")
+        }
+        let newName = uniqueProgramName(basedOn: src.program.name)
+        let nameBytes = akaiBytes(from: newName, length: 12)
+
+        // Copy the source's raw file bytes verbatim, then patch in the new name.
+        var fileData = src.program.rawData
+        if fileData.count >= 0x03 + 12 {
+            for (i, b) in nameBytes.enumerated() { fileData[0x03 + i] = b }
+        }
+
+        let bs = AkaiDiskFormat.blockSize
+        let blocksNeeded = (fileData.count + bs - 1) / bs
+        guard let blocks = findFreeBlocks(count: blocksNeeded, data: data) else {
+            throw AkaiError.diskFull("Not enough space on the disk to clone this program.")
+        }
+        guard let dirSlot = findFreeDirectorySlot(data: data) else {
+            throw AkaiError.dataError("Disk directory is full")
+        }
+
+        // Chain blocks (last = end-of-chain) and write the file data.
+        for i in 0..<blocks.count {
+            let value: UInt16 = (i == blocks.count - 1) ? AkaiDiskFormat.fatEnd : UInt16(blocks[i + 1])
+            setFatValue(block: blocks[i], value: value, data: &data)
+        }
+        for (i, block) in blocks.enumerated() {
+            let srcStart = i * bs
+            let srcEnd = min(srcStart + bs, fileData.count)
+            let dstStart = block * bs
+            guard dstStart + bs <= data.count else { throw AkaiError.dataError("Block out of range") }
+            let chunk = fileData[srcStart..<srcEnd]
+            let padded = chunk + Data(repeating: 0, count: bs - (srcEnd - srcStart))
+            data.replaceSubrange(dstStart..<dstStart + bs, with: padded)
+        }
+
+        // Directory entry: type 0xF0 (program), osver 0x1100 like real S3000 programs.
+        let startBlock = blocks[0]
+        let totalSize = UInt32(fileData.count)
+        var entryBytes = Data(repeating: 0, count: AkaiDiskFormat.dirEntrySize)
+        for (i, b) in nameBytes.enumerated() { entryBytes[i] = b }
+        entryBytes[16] = AkaiDiskFormat.ftypeProgram
+        entryBytes[17] = UInt8(totalSize & 0xFF)
+        entryBytes[18] = UInt8((totalSize >> 8) & 0xFF)
+        entryBytes[19] = UInt8((totalSize >> 16) & 0xFF)
+        entryBytes[20] = UInt8(startBlock & 0xFF)
+        entryBytes[21] = UInt8((startBlock >> 8) & 0xFF)
+        entryBytes[22] = 0x00; entryBytes[23] = 0x11   // osver 0x1100 (v17.00)
+        data.replaceSubrange(dirSlot..<dirSlot + AkaiDiskFormat.dirEntrySize, with: entryBytes)
+
+        // Commit to in-memory image + model.
+        imageData = data
+        freeBlocks = countFreeBlocks(data: data)
+
+        let dirEntry = AkaiDirectoryEntry(
+            name: newName, fileType: AkaiDiskFormat.ftypeProgram,
+            startBlock: UInt16(startBlock), size: totalSize,
+            rawEntry: entryBytes, diskOffset: dirSlot)
+        var clonedProgram = src.program
+        clonedProgram.name = newName
+        clonedProgram.rawData = fileData
+        let progFile = AkaiProgramFile(directoryEntry: dirEntry, program: clonedProgram,
+                                       offset: startBlock * bs)
+        programs.append(progFile)
+        programs.sort { $0.program.name < $1.program.name }
+        hasUnsavedChanges = true
+        return progFile
     }
 }
 

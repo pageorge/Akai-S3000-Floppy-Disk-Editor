@@ -481,7 +481,7 @@ struct SidebarView: View {
         } message: {
             Text("This removes the selected programs from the list. The disk image file is not modified until you save.")
         }
-        .alert("Couldn't complete", isPresented: $cloneSpaceAlert) {
+        .alert("Couldn’t complete", isPresented: $cloneSpaceAlert) {
             Button("OK", role: .cancel) {}
         } message: {
             Text(cloneSpaceMessage)
@@ -645,7 +645,7 @@ struct GreaseweazleSection: View {
                             .foregroundStyle(.white)
                     }
                     .buttonStyle(.borderedProminent)
-                    .tint(.accentColor)
+                    .tint(.accentColor)   // match Drive B (system accent blue)
                     .disabled(runner.isBusy)
 
                     Button {
@@ -653,10 +653,13 @@ struct GreaseweazleSection: View {
                     } label: {
                         Label("Write", systemImage: "square.and.arrow.up.on.square")
                             .frame(maxWidth: .infinity)
+                            .padding(.vertical, 6)
                             .foregroundStyle(.white)
+                            .background(Color.red)   // explicit fill so List context can't pale it, matching Open Disk Image
+                            .clipShape(RoundedRectangle(cornerRadius: 6))
+                            .opacity(runner.isBusy ? 0.5 : 1)
                     }
-                    .buttonStyle(.borderedProminent)
-                    .tint(.red)
+                    .buttonStyle(.plain)
                     .disabled(runner.isBusy)
                 }
 
@@ -679,7 +682,7 @@ struct GreaseweazleSection: View {
             }
             .padding(.vertical, 4)
         }
-        .alert("Couldn't save before writing", isPresented: $saveErrorAlert) {
+        .alert("Couldn’t save before writing", isPresented: $saveErrorAlert) {
             Button("OK", role: .cancel) {}
         } message: {
             Text(saveErrorMessage)

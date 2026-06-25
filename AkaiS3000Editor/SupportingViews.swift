@@ -479,6 +479,271 @@ struct InfoRow: View {
     }
 }
 
+// MARK: - Flow Layout
+
+/// A simple left-to-right, top-to-bottom wrapping layout — lets pills/bubbles of
+/// varying sizes pack naturally onto multiple lines (used by the program editor's
+/// sample-pill bar).
+struct FlowLayout: Layout {
+    var spacing: CGFloat = 8
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        let maxWidth = proposal.width ?? .infinity
+        var x: CGFloat = 0, lineHeight: CGFloat = 0, totalHeight: CGFloat = 0
+        for subview in subviews {
+            let size = subview.sizeThatFits(.unspecified)
+            if x + size.width > maxWidth, x > 0 {
+                totalHeight += lineHeight + spacing
+                x = 0; lineHeight = 0
+            }
+            x += size.width + spacing
+            lineHeight = max(lineHeight, size.height)
+        }
+        totalHeight += lineHeight
+        return CGSize(width: maxWidth.isFinite ? maxWidth : x, height: totalHeight)
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        var x = bounds.minX, y = bounds.minY, lineHeight: CGFloat = 0
+        for subview in subviews {
+            let size = subview.sizeThatFits(.unspecified)
+            if x + size.width > bounds.maxX, x > bounds.minX {
+                x = bounds.minX
+                y += lineHeight + spacing
+                lineHeight = 0
+            }
+            subview.place(at: CGPoint(x: x, y: y), anchor: .topLeading, proposal: .unspecified)
+            x += size.width + spacing
+            lineHeight = max(lineHeight, size.height)
+        }
+    }
+}
+
+// MARK: - Disk Map
+
+/// A wide map of the whole disk: the 1600 real blocks wrapped across just 3
+/// rows (instead of a tall 40-row square), full width, so each item gets far
+/// more vertical room. Plain black background represents free space implicitly
+/// — no grid lines, no per-block cells, no separate "free" bubble — with each
+/// sample/program/volume drawn as one continuous rounded bubble merged from its
+/// REAL FAT-chain run(s), positioned exactly where it physically sits. Hover
+/// anywhere for exact details; names show inside a bubble when there's room.
+struct DiskMapView: View {
+    @ObservedObject var diskImage: AkaiDiskImage
+    @State private var hoverText: String? = nil
+
+    private let rows = 3
+    private let rowHeight: CGFloat = 34   // fixed; total map height = rowHeight * rows
+
+    private var cols: Int {
+        max(1, Int(ceil(Double(diskImage.totalBlocks) / Double(rows))))
+    }
+
+    private var usedFraction: Double {
+        guard diskImage.totalBlocks > 0 else { return 0 }
+        return Double(diskImage.totalBlocks - diskImage.freeBlocks) / Double(diskImage.totalBlocks)
+    }
+
+    private func color(for kind: AkaiDiskImage.DiskBlockKind) -> Color {
+        switch kind {
+        case .system:  return Color.secondary.opacity(0.55)
+        case .free:    return Color.black   // unused for drawing; background already black
+        case .sample:  return Color.red
+        case .program: return Color.purple
+        }
+    }
+
+    private func name(for kind: AkaiDiskImage.DiskBlockKind) -> String {
+        switch kind {
+        case .system:         return diskImage.diskName.isEmpty ? "VOLUME" : diskImage.diskName
+        case .free:           return "Free Space"
+        case .sample(let n):  return n
+        case .program(let n): return n
+        }
+    }
+
+    private func kindLabel(for kind: AkaiDiskImage.DiskBlockKind) -> String {
+        switch kind {
+        case .system:  return "Volume"
+        case .free:    return "Free"
+        case .sample:  return "Sample"
+        case .program: return "Program"
+        }
+    }
+
+    private func sameItem(_ a: AkaiDiskImage.DiskBlockKind, _ b: AkaiDiskImage.DiskBlockKind) -> Bool {
+        switch (a, b) {
+        case (.system, .system), (.free, .free): return true
+        case (.sample(let n1), .sample(let n2)): return n1 == n2
+        case (.program(let n1), .program(let n2)): return n1 == n2
+        default: return false
+        }
+    }
+
+    /// One drawable, label-able segment: a horizontal run of same-item blocks
+    /// within a single row (a contiguous FAT-chain run is split at row
+    /// boundaries, since the grid wraps every `cols` blocks).
+    private struct Segment {
+        let row: Int
+        let colStart: Int
+        let colSpan: Int
+        let kind: AkaiDiskImage.DiskBlockKind
+    }
+
+    /// Walk the real block map and merge consecutive blocks belonging to the
+    /// same sample/program/system/free run into row-segments, so a file's actual
+    /// contiguous space renders as ONE continuous bubble instead of many tiny
+    /// cells. Free segments are dropped — the black background already shows them.
+    private func segments(from map: [AkaiDiskImage.DiskBlockKind]) -> [Segment] {
+        guard !map.isEmpty else { return [] }
+        let c = cols
+        var result: [Segment] = []
+        var i = 0
+        while i < map.count {
+            let kind = map[i]
+            var j = i + 1
+            while j < map.count, sameItem(map[j], kind) { j += 1 }
+            // [i, j) is one contiguous real run — split it at row boundaries.
+            if case .free = kind {
+                i = j
+                continue
+            }
+            var start = i
+            while start < j {
+                let row = start / c
+                let rowEnd = (row + 1) * c
+                let segEnd = min(j, rowEnd)
+                result.append(Segment(row: row, colStart: start % c, colSpan: segEnd - start, kind: kind))
+                start = segEnd
+            }
+            i = j
+        }
+        return result
+    }
+
+    var body: some View {
+        // Computed ONCE per render and reused by both the bubbles and the hover
+        // layer below, rather than re-walking every FAT chain on every mouse move.
+        let map = diskImage.blockMap()
+        let segs = segments(from: map)
+        let c = cols
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(alignment: .firstTextBaseline) {
+                Text("Disk Map")
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                Spacer()
+                Text(String(format: "%.1f%% used", usedFraction * 100))
+                    .font(.system(.title3, design: .monospaced).bold())
+            }
+
+            GeometryReader { geo in
+                let cellWidth = geo.size.width / CGFloat(c)
+
+                ZStack(alignment: .topLeading) {
+                    Rectangle().fill(Color.black)
+
+                    ForEach(Array(segs.enumerated()), id: \.offset) { _, seg in
+                        segmentBubble(seg, cellWidth: cellWidth)
+                    }
+
+                    // Invisible hover layer on top: map pointer position back to a
+                    // block index so hovering ANYWHERE (including plain black free
+                    // space) shows exactly what's there. Reuses `map` computed
+                    // above instead of recomputing it on every mouse-move tick.
+                    Rectangle()
+                        .fill(Color.clear)
+                        .onContinuousHover { phase in
+                            switch phase {
+                            case .active(let location):
+                                let col = min(c - 1, max(0, Int(location.x / cellWidth)))
+                                let row = min(rows - 1, max(0, Int(location.y / rowHeight)))
+                                let idx = row * c + col
+                                if idx >= 0 && idx < map.count { hoverText = detail(for: map[idx]) }
+                            case .ended:
+                                hoverText = nil
+                            }
+                        }
+                }
+                .frame(width: geo.size.width, height: rowHeight * CGFloat(rows), alignment: .topLeading)
+            }
+            .frame(maxWidth: .infinity)
+            .frame(height: rowHeight * CGFloat(rows))
+            .clipShape(RoundedRectangle(cornerRadius: 10))
+
+            // Hover readout (reserves its line so the layout doesn't jump).
+            Text(hoverText ?? " ")
+                .font(.caption.monospaced())
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+
+            // Legend.
+            HStack(spacing: 16) {
+                legendItem(color: .red, text: "Samples")
+                legendItem(color: .purple, text: "Programs")
+                legendItem(color: Color.secondary.opacity(0.55), text: "Volume / System")
+                legendItem(color: .black, text: "Free")
+            }
+            .font(.caption)
+            .foregroundStyle(.secondary)
+        }
+    }
+
+    private func detail(for kind: AkaiDiskImage.DiskBlockKind) -> String {
+        "\(kindLabel(for: kind)) \u{2014} \(name(for: kind))"
+    }
+
+    /// Draw one row-segment as a continuous rounded bubble at its real position,
+    /// full row height, with the item's name centred inside if there's room
+    /// (otherwise just the colour — hover still gives the name).
+    ///
+    /// A bubble's TRUE width can be sub-pixel for tiny files (e.g. a 1-block
+    /// program in a ~530-column grid), making it invisible and impossible to
+    /// hover. We fudge a minimum visual width so every item is at least visible
+    /// and hoverable — the hover/help text always reports the real block count,
+    /// so this is purely a visibility aid, not a misrepresentation of the data.
+    private let minVisualWidth: CGFloat = 10
+
+    @ViewBuilder
+    private func segmentBubble(_ seg: Segment, cellWidth: CGFloat) -> some View {
+        let realWidth = CGFloat(seg.colSpan) * cellWidth
+        let width = max(realWidth, minVisualWidth)
+        let height = rowHeight
+        // Keep the bubble's centre anchored to its real position even when
+        // fudged wider, so it still reads as "roughly here" rather than drifting.
+        let realX = CGFloat(seg.colStart) * cellWidth
+        let x = realX - (width - realWidth) / 2
+        let y = CGFloat(seg.row) * rowHeight
+        let inset: CGFloat = 1.5
+        let label = name(for: seg.kind)
+        let canFitLabel = width > 30
+
+        ZStack {
+            RoundedRectangle(cornerRadius: min(height, width) * 0.35)
+                .fill(color(for: seg.kind))
+            if canFitLabel {
+                Text(label)
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(.white)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.5)
+                    .padding(.horizontal, 4)
+            }
+        }
+        .frame(width: max(0, width - inset * 2), height: max(0, height - inset * 2))
+        .position(x: x + width / 2, y: y + height / 2)
+        .help(detail(for: seg.kind))
+    }
+
+    @ViewBuilder
+    private func legendItem(color: Color, text: String) -> some View {
+        HStack(spacing: 5) {
+            RoundedRectangle(cornerRadius: 2).fill(color).frame(width: 10, height: 10)
+            Text(text)
+        }
+    }
+}
+
 // MARK: - Disk Info View
 
 struct DiskInfoView: View {
@@ -491,12 +756,18 @@ struct DiskInfoView: View {
                     Image(systemName: "internaldrive.fill")
                         .font(.largeTitle)
                         .foregroundStyle(.blue)
-                    VStack(alignment: .leading) {
+                    VStack(alignment: .leading, spacing: 4) {
+                        // Read-only — this is an info screen, not an editor.
                         Text(diskImage.diskName.isEmpty ? "Untitled Disk" : diskImage.diskName)
                             .font(.title.bold())
                         Text("Akai S3000 Disk Image")
                             .foregroundStyle(.secondary)
                     }
+                }
+
+                GroupBox {
+                    DiskMapView(diskImage: diskImage)
+                        .padding(.top, 4)
                 }
 
                 LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 16) {

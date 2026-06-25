@@ -130,7 +130,6 @@ struct ProgramDetailView: View {
                         ForEach(Array(editedProgram.keyzones.enumerated()), id: \.offset) { idx, kz in
                             KeyzoneRow(keyzone: kz, sampleNames: diskImage.samples.map { $0.header.name })
                                 .listRowBackground(selectedKeyzoneIndex == idx ? Color.accentColor.opacity(0.15) : Color.clear)
-                                .contentShape(Rectangle())
                                 .onTapGesture {
                                     selectedKeyzoneIndex = (selectedKeyzoneIndex == idx) ? nil : idx
                                 }
@@ -629,8 +628,9 @@ struct KeyzoneRow: View {
             }
             Spacer()
         }
-        .frame(maxWidth: .infinity)
+        .frame(maxWidth: .infinity, minHeight: 44)
         .padding(.vertical, 2)
+        .contentShape(Rectangle())
     }
 
     private func midiNoteName(_ note: UInt8) -> String {

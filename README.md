@@ -6,6 +6,18 @@ A personal macOS project for reading and editing **Akai S3000 floppy disk images
 
 ---
 
+## Download
+
+**[⬇️ Download latest build](https://github.com/pageorge/Akai-S3000-Floppy-Disk-Editor/releases/latest)**
+
+1. Download `AkaiS3000Editor.zip` from the link above
+2. Unzip and drag `AkaiS3000Editor.app` to your Applications folder
+3. On first launch, right-click the app and choose **Open** to bypass Gatekeeper (the app is unsigned)
+
+The app is built automatically from the latest commit on `main` — no Xcode required.
+
+---
+
 ## What it does
 
 - 📂 **Open .img disk images** — drag & drop or File → Open
@@ -14,9 +26,10 @@ A personal macOS project for reading and editing **Akai S3000 floppy disk images
 - 📥 **Import WAV files** — add new samples to a disk image
 - ✏️ **Edit sample parameters** — root note, fine tune, loudness, loop points
 - 🎹 **Browse and edit programs** — view keyzone mappings on a piano keyboard
+- 🥁 **Drum preset tool** — drag multiple WAV files to auto-map each to a single key
 - 🖱️ **Drag on the keyboard** — set low key, high key and root note by dragging
 - 💾 **Save changes** back to the .img file
-- ℹ️ **Disk info** — free blocks, file counts, disk name
+- ℹ️ **Disk info** — free blocks, file counts, disk map
 
 ---
 
@@ -33,12 +46,13 @@ Then open `my_disk.img` in this app.
 ## Requirements
 
 - **macOS 14 Sonoma** or later
-- **Xcode 15** or later (to build from source)
 - No third-party dependencies
+
+To build from source: **Xcode 15** or later.
 
 ---
 
-## Building
+## Building from source
 
 1. Clone this repo
 2. Open `AkaiS3000Editor.xcodeproj` in Xcode
@@ -62,7 +76,7 @@ This project wouldn't have been possible without the open-source work of people 
 - [GreaseWeazle](https://github.com/keirf/greaseweazle) — floppy imaging hardware & software
 - [akaiutil (Midi-In)](https://github.com/Midi-In/akaiutil) — S1000/S3000 filesystem utility
 - [akai-fs (dialtr)](https://github.com/dialtr/akai-fs) — another Akai filesystem implementation
-- [Akai S3000 Wikipedia](https://en.wikipedia.org/wiki/Akai_S3000) — background on the sampler
+- [Akai S3000XL Wikipedia](https://en.wikipedia.org/wiki/Akai_S3000XL) — background on the sampler
 
 ---
 

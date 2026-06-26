@@ -117,12 +117,10 @@ struct ProgramDetailView: View {
                     HStack {
                         Text("Keyzones").font(.headline)
                         Spacer()
-                        Button { addKeyzone() } label: { Image(systemName: "plus") }.buttonStyle(.borderless)
-                        Button {
+                        RoundIconButton(systemImage: "plus") { addKeyzone() }
+                        RoundIconButton(systemImage: "minus", isDisabled: selectedKeyzoneIndex == nil) {
                             if let idx = selectedKeyzoneIndex { deleteKeyzone(at: idx) }
-                        } label: { Image(systemName: "minus") }
-                        .buttonStyle(.borderless)
-                        .disabled(selectedKeyzoneIndex == nil)
+                        }
                     }
                     .padding(.horizontal).padding(.top, 8)
 
@@ -270,7 +268,11 @@ struct ProgramDetailView: View {
                 }
             }
         }
-        .onChange(of: isDirty) { _, _ in diskImage.hasUnsavedChanges = isDirty }
+        .onChange(of: isDirty) { _, dirty in
+            // Only ever RAISE the global flag here, never lower it — see the
+            // identical comment in SampleDetailView for why.
+            if dirty { diskImage.hasUnsavedChanges = true }
+        }
         .toast($toast)
     }
 
@@ -314,7 +316,14 @@ struct ProgramDetailView: View {
             sampleName: diskImage.samples.first?.header.name ?? "NO NAME",
             lowKey: 24, highKey: 95, rootNote: 60,
             tuneOffset: 0, fineTune: 0, volume: 99, pan: 0,
-            loopEnabled: false, velocityLow: 0, velocityHigh: 127
+            filterOffset: 0,
+            // .sample mimics real S3000 hardware: a freshly created keygroup
+            // defaults to "use the sample's own loop setting" (pmode 0x00, which
+            // is also the natural zero-value default), not an override that
+            // forces no loop. Previously this was `loopEnabled: false`, which
+            // mapped to pmode 0x03 (NOLOOP) — silently overriding any loop the
+            // user had carefully set up in Sample Edit.
+            playbackMode: .sample, velocityLow: 0, velocityHigh: 127
         )
         editedProgram.keyzones.append(newKZ)
         selectedKeyzoneIndex = editedProgram.keyzones.count - 1
@@ -359,9 +368,21 @@ struct ProgramDetailView: View {
     /// Push the current `editedProgram` into the in-memory disk image so the
     /// global Save (or quit-confirmation) picks it up — mirrors
     /// SampleDetailView's commitEditsToImage. Does not write a file.
+    ///
+    /// IMPORTANT: must start from the LIVE entry in diskImage.programs, not the
+    /// `programFile` constant captured at init. `programFile` never updates, but
+    /// applyProgramEdits reallocates the program to new FAT blocks (and updates
+    /// its `.offset`/`.directoryEntry`) whenever the keygroup count changes the
+    /// file's size. If we kept reusing the stale `programFile.offset` here, every
+    /// edit AFTER the first resize would operate on the WRONG (already-freed or
+    /// reused) block chain — either silently corrupting unrelated data or hitting
+    /// applyProgramEdits' "not enough room, leave disk untouched" bailout, which
+    /// discards the edit entirely. That's exactly what "keyzones no longer saving"
+    /// looked like: the first add/remove-keyzone edit in a session would persist,
+    /// every edit after it silently wouldn't.
     private func commitProgramEdits() {
         isDirty = true
-        var updated = programFile
+        var updated = diskImage.programs.first(where: { $0.id == programFile.id }) ?? programFile
         updated.program = editedProgram
         diskImage.applyProgramEdits(updated)
     }
@@ -557,7 +578,15 @@ struct DrumPresetDropZone: View {
                         sampleName: sample.header.name,
                         lowKey: note, highKey: note, rootNote: note,
                         tuneOffset: 0, fineTune: 0, volume: 99, pan: 0,
-                        loopEnabled: false, velocityLow: 0, velocityHigh: 127))
+                        filterOffset: 0,
+                        // .noLoop, NOT .sample: drum/percussion hits are one-shots
+                        // by nature — force no loop regardless of whatever loop
+                        // points happen to be set on the sample itself. Unlike
+                        // addKeyzone() (regular keyzones, which mimic the hardware
+                        // default of inheriting the sample's setting), a drum
+                        // preset should never loop just because the source WAV/
+                        // sample had a loop region.
+                        playbackMode: .noLoop, velocityLow: 0, velocityHigh: 127))
                     nextNote += 1
                 } catch {
                     errors.append(url.lastPathComponent + ": " + error.localizedDescription)
@@ -667,6 +696,27 @@ struct KeyzoneEditorView: View {
                     }
                 }
 
+                GroupBox("Playback") {
+                    VStack(alignment: .leading, spacing: 6) {
+                        HStack {
+                            Text("Playback Mode").frame(width: 100, alignment: .leading).font(.subheadline)
+                            Picker("", selection: $keyzone.playbackMode) {
+                                ForEach(AkaiPlaybackMode.allCases) { mode in
+                                    Text(mode.displayName).tag(mode)
+                                }
+                            }
+                            .labelsHidden()
+                            .onChange(of: keyzone.playbackMode) { _, _ in onChange() }
+                            Spacer()
+                        }
+                        Text(keyzone.playbackMode.explanation)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .padding(.leading, 100)
+                    }
+                }
+
                 GroupBox("Tuning & Mix") {
                     VStack(alignment: .leading, spacing: 10) {
                         HStack {
@@ -693,11 +743,47 @@ struct KeyzoneEditorView: View {
                             Text(keyzone.pan == 0 ? "C" : keyzone.pan > 0 ? "R\(keyzone.pan)" : "L\(abs(keyzone.pan))")
                                 .frame(width: 35).font(.system(.caption, design: .monospaced))
                         }
+                        HStack {
+                            Text("Filter Trim").frame(width: 100, alignment: .leading).font(.subheadline)
+                            Slider(value: .init(get: { Double(keyzone.filterOffset) },
+                                               set: { keyzone.filterOffset = Int8($0); onChange() }), in: -50...50, step: 1)
+                            Text("\(keyzone.filterOffset)").frame(width: 35).font(.system(.caption, design: .monospaced))
+                        }
+                        Text("Fine-tunes this keyzone's filter cutoff (±50) to keep tone consistent between adjacent keygroups — it does NOT set the filter itself. Source: S3000XL Operator's Manual, SMP2 page.")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .padding(.leading, 100)
 
                     }
                 }
             }
         }
+    }
+}
+
+// MARK: - Round Icon Button
+
+/// A small circular icon button with a real, generous tappable area — unlike a
+/// bare SF Symbol with `.buttonStyle(.borderless)`, whose hit target is just the
+/// glyph's own tight bounding box. Used for the Keyzones list's +/- controls,
+/// which were previously only clickable if you hit the glyph pixels exactly.
+struct RoundIconButton: View {
+    let systemImage: String
+    var isDisabled: Bool = false
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: systemImage)
+                .font(.system(size: 12, weight: .semibold))
+                .frame(width: 22, height: 22)
+                .background(Circle().fill(Color.secondary.opacity(0.15)))
+                .contentShape(Circle())
+        }
+        .buttonStyle(.plain)
+        .disabled(isDisabled)
+        .opacity(isDisabled ? 0.4 : 1)
     }
 }
 
@@ -713,7 +799,13 @@ struct MidiKeyPicker: View {
         HStack {
             Text(label).frame(width: 80, alignment: .leading).font(.subheadline)
             Picker("", selection: $value) {
-                ForEach(0..<128) { note in Text(noteName(UInt8(note))).tag(UInt8(note)) }
+                // Reversed (127 → 0) so the dropdown lists highest-to-lowest, top
+                // to bottom — matching the on-keyboard layout (high notes are to
+                // the right/visually "up" in pitch) rather than the raw MIDI
+                // note-number order.
+                ForEach((0..<128).reversed(), id: \.self) { note in
+                    Text(noteName(UInt8(note))).tag(UInt8(note))
+                }
             }
             .labelsHidden()
             .onChange(of: value) { _, _ in onChange() }

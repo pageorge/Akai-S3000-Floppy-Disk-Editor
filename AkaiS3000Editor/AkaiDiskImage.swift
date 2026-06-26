@@ -15,7 +15,7 @@ import Foundation
 //                             holds the 0xFF S3000 volume flag (name 'VVVVVVVVVVVV',
 //                             AKAI_EMPTY1000_FNAME), the rest are empty. DO NOT touch block 0.
 //   0x0600: fatblk[1600][2] — FAT, 2 bytes LE per block (next-block or special code)
-//   0x0D80: label           — akai_flvol_label_s (volume name + osver + params)
+//   0x1280: label           — akai_flvol_label_s (volume name + osver + params)
 //
 // LIVE VOLUME DIRECTORY (struct akai_voldir3000fl_s): starts at BLOCK 5
 //   (AKAI_VOLDIR3000FLH_BSTART = 5), 510 entries × 24 bytes, spans 12 blocks.
@@ -112,13 +112,53 @@ struct AkaiSampleHeader {
     var loopEnd: UInt32
     var numSamples: UInt32
     var midiRootNote: UInt8
-    var loopEnabled: Bool
+    var playbackMode: AkaiSamplePlaybackMode
     var bitDepth: Int
     var numChannels: Int
     var fineTune: Int8        // ctune: cents tune (0x14), signed
     var semitoneTune: Int8    // stune: semitone tune (0x15), signed
     var loudness: UInt8
     var rawHeader: Data
+}
+
+/// Sample-level playback mode (`pmode` @ 0x13 in `akai_sample1000_s`). Same idea
+/// as AkaiPlaybackMode for keyzones, but this is THE actual loop behavior a
+/// sample carries — what a keyzone's `.sample` playback mode defers to.
+/// Matches `SAMPLE1000_PMODE_*` in akaiutil_file.h. Note there is no "inherit"
+/// option here (unlike the keyzone enum) since this IS the source of truth;
+/// also note the format only ever has ONE active loop region per sample for our
+/// purposes (loop[0]) even though the struct technically has 8 slots — see the
+/// `loop[8]` / `lnum` note where loopStart/loopEnd are read.
+enum AkaiSamplePlaybackMode: UInt8, CaseIterable, Identifiable {
+    case loop       = 0x00   // SAMPLE1000_PMODE_LOOP
+    case loopNotRel = 0x01   // SAMPLE1000_PMODE_LOOPNOTREL: loop, but no release tail on key-up
+    case noLoop     = 0x02   // SAMPLE1000_PMODE_NOLOOP
+    case toEnd      = 0x03   // SAMPLE1000_PMODE_TOEND: play to end regardless of key-up or loop points
+
+    var id: UInt8 { rawValue }
+
+    var displayName: String {
+        switch self {
+        case .loop:       return "Loop"
+        case .loopNotRel: return "Loop Until Release"
+        case .noLoop:     return "No Loop"
+        case .toEnd:      return "Play to End"
+        }
+    }
+
+    /// User-facing explanation shown under the Playback Mode picker in Sample Edit.
+    var explanation: String {
+        switch self {
+        case .loop:
+            return "This sample will loop between the start/end points below for as long as the key is held."
+        case .loopNotRel:
+            return "This sample will loop between the start/end points below, but will NOT play a release tail when the key is lifted — it just stops."
+        case .noLoop:
+            return "This sample will play straight through once and stop. The start/end points below are ignored during playback (but kept here so you can switch back to a loop mode without losing them)."
+        case .toEnd:
+            return "This sample will always play out to the very end — ignoring both the loop points and key-up — even if the key is released early."
+        }
+    }
 }
 
 struct AkaiProgramKeyzone {
@@ -130,9 +170,67 @@ struct AkaiProgramKeyzone {
     var fineTune: Int8
     var volume: UInt8
     var pan: Int8
-    var loopEnabled: Bool
+    /// Per-velocity-zone filter cutoff fine-tune, signed, range ±50 —
+    /// `filter` @ +0x11 in `akai_program1000kgvelzone_s`. Confirmed against the
+    /// real S3000XL Operator's Manual (SMP2 page, p.93): "This parameter allows
+    /// you to fine tune the filter cutoff slightly to maintain a consistent tone
+    /// between keygroups." This is layered ON TOP of the keygroup's own main
+    /// filter cutoff/resonance/key-follow/mod-depth controls (FILT page, p.96-98)
+    /// — those are NOT yet exposed here, since their byte offsets within
+    /// akai_program1000kg_s are unconfirmed (akaiutil's struct leaves them as
+    /// undocumented dummy bytes), and guessing at offsets risks corrupting
+    /// sampler-managed data we don't actually understand.
+    var filterOffset: Int8
+    var playbackMode: AkaiPlaybackMode
     var velocityLow: UInt8
     var velocityHigh: UInt8
+}
+
+/// Velocity-zone playback mode (`pmode` @ +0x13 in `akai_program1000kgvelzone_s`).
+/// This is NOT just a loop on/off switch — it's the full set of options a real
+/// S3000 offers per keyzone/velocity-zone, matching `PROGRAM1000_PMODE_*` in
+/// akaiutil_file.h. `.sample` (raw 0x00) is both "inherit the sample's own loop
+/// setting" AND the natural zero-value default — i.e. it's what a freshly
+/// created keygroup gets if nothing overrides it, which is why new keyzones in
+/// this app default to it (mimicking real hardware) rather than to `.noLoop`.
+enum AkaiPlaybackMode: UInt8, CaseIterable, Identifiable {
+    case sample      = 0x00   // PROGRAM1000_PMODE_SAMPLE: use the sample's own loop setting
+    case loop        = 0x01   // PROGRAM1000_PMODE_LOOP: force loop
+    case loopNotRel  = 0x02   // PROGRAM1000_PMODE_LOOPNOTREL: force loop, don't release into the tail on key-up
+    case noLoop      = 0x03   // PROGRAM1000_PMODE_NOLOOP: force no loop, overriding the sample
+    case toEnd       = 0x04   // PROGRAM1000_PMODE_TOEND: play to end regardless of key-up or loop points
+
+    var id: UInt8 { rawValue }
+
+    var displayName: String {
+        switch self {
+        case .sample:     return "Sample's Setting"
+        case .loop:       return "Loop"
+        case .loopNotRel: return "Loop Until Release"
+        case .noLoop:     return "No Loop"
+        case .toEnd:      return "Play to End"
+        }
+    }
+
+    /// User-facing explanation shown under the Playback Mode picker. Spells out
+    /// what will actually happen on playback, since "pmode" naming alone (even
+    /// translated to e.g. "Loop Until Release") doesn't make the behavior obvious
+    /// — and critically, makes clear that the loop POINTS always come from the
+    /// sample itself (set in Sample Edit), never from the keyzone.
+    var explanation: String {
+        switch self {
+        case .sample:
+            return "Playback will use this sample's own loop setting from Sample Edit — if the sample loops, this keyzone loops; if not, it won't."
+        case .loop:
+            return "Playback will loop using the start/end points set on the sample in Sample Edit, for as long as the key is held."
+        case .loopNotRel:
+            return "Playback will loop (using the sample's loop points) but will NOT play any release tail when the key is lifted — it just stops."
+        case .noLoop:
+            return "Playback will ignore the sample's loop points entirely and just play through once, stopping at the end (or on key-up)."
+        case .toEnd:
+            return "Playback will ignore both the loop points and key-up — the whole sample plays out to the end no matter what."
+        }
+    }
 }
 
 struct AkaiProgram {
@@ -211,11 +309,15 @@ class AkaiDiskImage: ObservableObject {
     }
 
     private func parseImage(data: Data) throws {
-        // Volume label (akai_flvol_label_s.name) lives at ABSOLUTE offset 0xD80
-        // within the header (blocks 0-4), per akai_flhhead_s — NOT 4*blockSize
-        // (0x1000), which was the previous, wrong offset and meant the disk name
-        // was always read from the wrong bytes (typically blank/garbage).
-        let labelOffset = 0xD80
+        // Volume label (akai_flvol_label_s.name) lives at ABSOLUTE offset 0x1280
+        // within the header (blocks 0-4), per akai_flhhead_s:
+        //   file[64] (64*24 = 0x600) + fatblk[1600][2] (1600*2 = 0xC80) = 0x1280.
+        // A previous offset of 0xD80 was wrong — that's only (0xD80-0x600)/2 = 960
+        // entries into the FAT table, i.e. the FAT entry for block 960, not the
+        // label. That meant we were reading a FAT value as the volume name while
+        // the real (zero-filled) label sat untouched — which a real S3000 renders
+        // as "000000000000" (Akai char code 0x00 = digit '0').
+        let labelOffset = 0x1280
         diskName = labelOffset + 12 <= data.count
             ? akaiString(from: data, offset: labelOffset, length: 12)
             : ""
@@ -371,8 +473,9 @@ class AkaiDiskImage: ObservableObject {
             audioData.append(readFromChain(chain, fileOffset: headerSize, length: audioSize, data: data))
         }
 
-        // pmode @ 0x13: 0=loop, 1=loop-until-release, 2=no loop, 3=play-to-end.
-        let loopEnabled = headerData[0x13] != 0x02
+        // pmode @ 0x13: full 4-state byte (see AkaiSamplePlaybackMode). Fall
+        // back to .noLoop for any unrecognized byte value.
+        let playbackMode = AkaiSamplePlaybackMode(rawValue: headerData[0x13]) ?? .noLoop
 
         // loop[0]: at[4] @ 0x26 (return-to point), len[4] @ 0x2C (loop length in
         // samples). The real loop region is [at, at+len) — verified by hardware
@@ -402,7 +505,7 @@ class AkaiDiskImage: ObservableObject {
             loopEnd: loopEnd,
             numSamples: numSamples,
             midiRootNote: midiRootNote,
-            loopEnabled: loopEnabled,
+            playbackMode: playbackMode,
             bitDepth: 16, numChannels: 1,
             fineTune: fineTune,
             semitoneTune: semitoneTune,
@@ -459,7 +562,11 @@ class AkaiDiskImage: ObservableObject {
                 fineTune:   Int8(bitPattern: fileData[vz + 0x0E]),   // ctune
                 volume: fileData[vz + 0x10],                          // loud
                 pan: Int8(bitPattern: fileData[vz + 0x12]),           // pan
-                loopEnabled: fileData[vz + 0x13] != 0x03,             // pmode 0x03=NOLOOP
+                filterOffset: Int8(bitPattern: fileData[vz + 0x11]),  // filter (fine-tune)
+                // pmode — decode the full 5-state byte (see AkaiPlaybackMode).
+                // Fall back to .sample (the natural zero-value/inherit state) for
+                // any byte value not in the known range, rather than guessing.
+                playbackMode: AkaiPlaybackMode(rawValue: fileData[vz + 0x13]) ?? .sample,
                 velocityLow:  fileData[vz + 0x0C],
                 velocityHigh: fileData[vz + 0x0D]))
         }
@@ -701,7 +808,7 @@ class AkaiDiskImage: ObservableObject {
         for (i, b) in nameBytes.enumerated() { hdr[AkaiDiskFormat.hdrNameOffset + i] = b }
         hdr[0x0F] = 0x80            // dummy1 (canonical constant)
         hdr[0x10] = 0x00           // lnum = 0 loops
-        hdr[0x13] = 0x02           // pmode = NOLOOP by default
+        hdr[0x13] = AkaiSamplePlaybackMode.noLoop.rawValue   // pmode = NOLOOP by default
         hdr[0x14] = 0x00           // ctune
         hdr[0x15] = 0x00           // stune
 
@@ -717,6 +824,22 @@ class AkaiDiskImage: ObservableObject {
         hdr[0x24] = UInt8((endMarker >> 16) & 0xFF)
         hdr[0x25] = UInt8((endMarker >> 24) & 0xFF)
 
+        // loop[0]: at[4] @ 0x26 = 0, len[4] @ 0x2C = numSamples-1 — i.e. a
+        // full-sample loop region, matching the in-memory model default
+        // (AkaiSampleHeader.loopEnd = numSamples-1) set by addImportedSample.
+        // pmode above stays NOLOOP, so this has no audible effect until the user
+        // actually enables looping — but it means the on-disk bytes already agree
+        // with the model from creation, instead of silently reading back as a
+        // zero-length loop (loopAt=0, loopLen=0) the next time this header is
+        // parsed (e.g. after Save + reload), which is what happened before this
+        // fix: the model's "loop the whole sample" default never made it to disk
+        // unless the user happened to touch a loop slider first.
+        hdr[0x26] = 0; hdr[0x27] = 0; hdr[0x28] = 0; hdr[0x29] = 0   // loop[0].at = 0
+        hdr[0x2C] = UInt8(endMarker & 0xFF)
+        hdr[0x2D] = UInt8((endMarker >> 8) & 0xFF)
+        hdr[0x2E] = UInt8((endMarker >> 16) & 0xFF)
+        hdr[0x2F] = UInt8((endMarker >> 24) & 0xFF)               // loop[0].len = numSamples-1
+
         // stpaira[2] @ 0x88 = 0xFFFF (none) — canonical AKAI_SAMPLE1000_STPAIRA_NONE.
         hdr[AkaiDiskFormat.hdrStPairOffset]     = 0xFF
         hdr[AkaiDiskFormat.hdrStPairOffset + 1] = 0xFF
@@ -725,8 +848,7 @@ class AkaiDiskImage: ObservableObject {
         hdr[AkaiDiskFormat.hdrSampleRateOffset]     = UInt8(sr16 & 0xFF)
         hdr[AkaiDiskFormat.hdrSampleRateOffset + 1] = UInt8(sr16 >> 8)
 
-        // locat (0x16) and the loop array (0x26..0x85) stay zero — sampler-managed
-        // / no loop. pad to 0xC0 stays zero.
+        // locat (0x16) stays zero — sampler-managed. pad to 0xC0 stays zero.
         return hdr
     }
 
@@ -802,7 +924,7 @@ class AkaiDiskImage: ObservableObject {
         let hdrModel = AkaiSampleHeader(
             name: name, sampleRate: sampleRate, loopStart: 0,
             loopEnd: numSamples > 0 ? numSamples - 1 : 0, numSamples: numSamples,
-            midiRootNote: 60, loopEnabled: false, bitDepth: 16,
+            midiRootNote: 60, playbackMode: .noLoop, bitDepth: 16,
             numChannels: numChannels, fineTune: 0, semitoneTune: 0, loudness: 99, rawHeader: header)
         let sample = AkaiSample(
             directoryEntry: dirEntry, header: hdrModel, audioData: pcmData,
@@ -901,7 +1023,7 @@ class AkaiDiskImage: ObservableObject {
         clone.header.midiRootNote = src.header.midiRootNote
         clone.header.fineTune     = src.header.fineTune
         clone.header.semitoneTune = src.header.semitoneTune
-        clone.header.loopEnabled  = src.header.loopEnabled
+        clone.header.playbackMode = src.header.playbackMode
         clone.header.loopStart    = src.header.loopStart
         clone.header.loopEnd      = src.header.loopEnd
         applySampleEdits(clone)
@@ -1073,9 +1195,9 @@ class AkaiDiskImage: ObservableObject {
         }
         // Remaining blocks already 0x0000 (free).
 
-        // --- Volume label (akai_flvol_label_s name field at 0xD80) ---
+        // --- Volume label (akai_flvol_label_s name field at 0x1280) ---
         let labelBytes = akaiBytes(from: Self.sanitizeName(volumeName), length: 12)
-        let labelOffset = 0xD80
+        let labelOffset = 0x1280
         if labelOffset + 12 <= data.count {
             for (i, b) in labelBytes.enumerated() { data[labelOffset + i] = b }
         }
@@ -1094,14 +1216,14 @@ class AkaiDiskImage: ObservableObject {
         hasUnsavedChanges = false
     }
 
-    /// Rename the disk's volume label (akai_flvol_label_s.name @ absolute 0xD80).
+    /// Rename the disk's volume label (akai_flvol_label_s.name @ absolute 0x1280).
     /// Patches the in-memory image only — persist via Save, matching every other
     /// edit in the app. Used by the sidebar's click-to-edit volume name.
     @discardableResult
     func renameVolume(to newName: String) throws -> String {
         guard var data = imageData else { throw AkaiError.noImageLoaded }
         let clean = Self.sanitizeName(newName)
-        let labelOffset = 0xD80
+        let labelOffset = 0x1280
         guard labelOffset + 12 <= data.count else {
             throw AkaiError.dataError("Disk image too small for a volume label")
         }
@@ -1124,7 +1246,7 @@ class AkaiDiskImage: ObservableObject {
         var hdr = sample.header.rawHeader
         guard hdr.count >= AkaiDiskFormat.sampleHeaderSize else { return }
         hdr[0x02] = sample.header.midiRootNote
-        hdr[0x13] = sample.header.loopEnabled ? 0x00 : 0x02
+        hdr[0x13] = sample.header.playbackMode.rawValue
         hdr[0x14] = UInt8(bitPattern: sample.header.fineTune)
         hdr[0x15] = UInt8(bitPattern: sample.header.semitoneTune)
         let ls = sample.header.loopStart
@@ -1161,7 +1283,7 @@ class AkaiDiskImage: ObservableObject {
     /// Patch a raw sample header with correct S1000/S3000 offsets and write to disk.
     /// Struct: akai_sample1000_s (from akaiutil_file.h)
     ///   0x02: rkey (root MIDI note)
-    ///   0x13: pmode (0=loop, 2=noloop)
+    ///   0x13: pmode (see AkaiSamplePlaybackMode: 0=loop,1=loopNotRel,2=noLoop,3=toEnd)
     ///   0x14: ctune (cents tune, signed)
     ///   0x15: stune (semitone tune, signed)
     ///   0x26: loop[0].at (loop start, 32-bit LE)
@@ -1174,8 +1296,8 @@ class AkaiDiskImage: ObservableObject {
         }
         // Root key
         hdr[0x02] = sample.header.midiRootNote
-        // Playback mode: 0=loop, 2=noloop
-        hdr[0x13] = sample.header.loopEnabled ? 0x00 : 0x02
+        // Playback mode
+        hdr[0x13] = sample.header.playbackMode.rawValue
         // Cents tune (signed)
         hdr[0x14] = UInt8(bitPattern: sample.header.fineTune)
         // Semitone tune (signed)
@@ -1254,8 +1376,7 @@ class AkaiDiskImage: ObservableObject {
         guard offset + length <= data.count else { return "" }
         let str = data[offset..<offset+length].compactMap { byte -> Character? in
             switch byte {
-            case 0:       return nil
-            case 1...9:   return Character(UnicodeScalar(UInt32("0".unicodeScalars.first!.value) + UInt32(byte))!)
+            case 0...9:   return Character(UnicodeScalar(UInt32("0".unicodeScalars.first!.value) + UInt32(byte))!)
             case 10:      return " "
             case 11...36: return Character(UnicodeScalar(UInt32("A".unicodeScalars.first!.value) + UInt32(byte) - 11)!)
             case 37:      return "#"
@@ -1356,8 +1477,9 @@ class AkaiDiskImage: ObservableObject {
                     file[vz + 0x0E] = UInt8(bitPattern: kz.fineTune)    // ctune
                     file[vz + 0x0F] = UInt8(bitPattern: kz.tuneOffset) // stune
                     file[vz + 0x10] = kz.volume                         // loud
+                    file[vz + 0x11] = UInt8(bitPattern: kz.filterOffset) // filter (fine-tune)
                     file[vz + 0x12] = UInt8(bitPattern: kz.pan)
-                    file[vz + 0x13] = kz.loopEnabled ? 0x00 : 0x03      // pmode
+                    file[vz + 0x13] = kz.playbackMode.rawValue          // pmode
                     file[vz + 0x16] = 0xFF; file[vz + 0x17] = 0xFF       // shdra = none
                 } else {
                     for (i, b) in emptyName.enumerated() { file[vz + i] = b }
@@ -1403,12 +1525,16 @@ class AkaiDiskImage: ObservableObject {
         }
 
         if requiredBlocks == oldChain.count {
-            // Same size — reuse the existing chain in place.
+            // Same number of BLOCKS — reuse the existing chain in place. The
+            // ACTUAL FILE SIZE can still have changed even when the block count
+            // hasn't (e.g. 0 keygroups → 1 keygroup is 192 → 384 bytes, both of
+            // which fit in a single 1024-byte block) — so the directory entry's
+            // size field still needs updating below, unconditionally.
             writeFile(across: oldChain)
         } else {
-            // The keygroup count changed the file's size — free the old chain
-            // and allocate a fresh one of the right length, then update the
-            // directory entry's start block + size to match.
+            // The keygroup count changed the file's BLOCK COUNT — free the old
+            // chain and allocate a fresh one of the right length, updating the
+            // directory entry's start block (size is handled below either way).
             freeChain(from: oldStartBlock, data: &data)
             guard let newBlocks = findFreeBlocks(count: requiredBlocks, data: data) else {
                 // Not enough room to grow — leave the disk untouched rather than
@@ -1422,17 +1548,26 @@ class AkaiDiskImage: ObservableObject {
             }
             writeFile(across: newBlocks)
             startBlock = newBlocks[0]
-
-            let entry = programFile.directoryEntry
-            if entry.diskOffset >= 0, entry.diskOffset + AkaiDiskFormat.dirEntrySize <= data.count {
-                let totalSize = UInt32(fileData.count)
-                data[entry.diskOffset + 17] = UInt8(totalSize & 0xFF)
-                data[entry.diskOffset + 18] = UInt8((totalSize >> 8) & 0xFF)
-                data[entry.diskOffset + 19] = UInt8((totalSize >> 16) & 0xFF)
-                data[entry.diskOffset + 20] = UInt8(startBlock & 0xFF)
-                data[entry.diskOffset + 21] = UInt8((startBlock >> 8) & 0xFF)
-            }
+            data[programFile.directoryEntry.diskOffset + 20] = UInt8(startBlock & 0xFF)
+            data[programFile.directoryEntry.diskOffset + 21] = UInt8((startBlock >> 8) & 0xFF)
             freeBlocks = countFreeBlocks(data: data)
+        }
+
+        // ALWAYS patch the directory entry's size field to match the real file
+        // size, regardless of which branch above ran — this was the actual bug:
+        // it used to only happen in the realloc branch, so any edit that changed
+        // the file's byte count WITHOUT crossing a 1024-byte block boundary (e.g.
+        // the very first keyzone added to a brand-new 0-keygroup program: 192 →
+        // 384 bytes, both 1 block) left the on-disk directory entry reporting the
+        // OLD size. On reload, parseProgram only reads that many bytes from the
+        // chain — silently truncating the file and losing every keygroup, since
+        // they live right after the 0xC0-byte header.
+        let entry = programFile.directoryEntry
+        if entry.diskOffset >= 0, entry.diskOffset + AkaiDiskFormat.dirEntrySize <= data.count {
+            let totalSize = UInt32(fileData.count)
+            data[entry.diskOffset + 17] = UInt8(totalSize & 0xFF)
+            data[entry.diskOffset + 18] = UInt8((totalSize >> 8) & 0xFF)
+            data[entry.diskOffset + 19] = UInt8((totalSize >> 16) & 0xFF)
         }
 
         imageData = data

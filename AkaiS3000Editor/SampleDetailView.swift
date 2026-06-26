@@ -8,7 +8,7 @@ struct SampleDetailView: View {
     @State private var editedRootNote: Int
     @State private var editedFineTune: Double
     @State private var editedSemitone: Double
-    @State private var editedLoopEnabled: Bool
+    @State private var editedPlaybackMode: AkaiSamplePlaybackMode
     @State private var editedLoopStart: Double
     @State private var editedLoopEnd: Double
     @State private var isPlaying = false
@@ -31,15 +31,20 @@ struct SampleDetailView: View {
         self.diskImage = diskImage
         _editedRootNote = State(initialValue: Int(sample.header.midiRootNote))
         _editedFineTune = State(initialValue: Double(sample.header.fineTune))
-        _editedLoopEnabled = State(initialValue: sample.header.loopEnabled)
-        // When the sample has no loop set, default the start to 0; otherwise
-        // preserve the stored loop start so existing loop points aren't lost.
-        _editedLoopStart = State(initialValue: sample.header.loopEnabled
+        _editedPlaybackMode = State(initialValue: sample.header.playbackMode)
+        // When the sample isn't currently in a looping mode, default the start
+        // to 0; otherwise preserve the stored loop start so existing loop points
+        // aren't lost.
+        let isLooping = sample.header.playbackMode == .loop || sample.header.playbackMode == .loopNotRel
+        _editedLoopStart = State(initialValue: isLooping
             ? Double(sample.header.loopStart)
             : 0)
         // loopEnd comes straight from the header model: the real loop region
         // [loopStart, loopStart+len), clamped so it never exceeds the buffer
-        // (there's no audio past numSamples).
+        // (there's no audio past numSamples). Defaulting an unset loop's end to
+        // the end of the sample happens at sample-creation/import time
+        // (addImportedSample), not here — this view just reflects whatever is
+        // already stored, and changing Playback Mode must not change it.
         _editedLoopEnd = State(initialValue: Double(sample.header.loopEnd))
         _editedSemitone = State(initialValue: Double(sample.header.semitoneTune))
     }
@@ -58,6 +63,13 @@ struct SampleDetailView: View {
     /// playback.
     private var audioFrameCount: Int {
         Int(sample.header.numSamples)
+    }
+
+    /// Whether the currently selected playback mode actually loops. `.toEnd`
+    /// and `.noLoop` don't use the loop points at all, so the loop sliders and
+    /// playback preview should only engage for `.loop`/`.loopNotRel`.
+    private var isLooping: Bool {
+        editedPlaybackMode == .loop || editedPlaybackMode == .loopNotRel
     }
 
     var body: some View {
@@ -129,7 +141,7 @@ struct SampleDetailView: View {
                 WaveformView(
                     audioData: sample.audioData,
                     numSamples: Int(sample.header.numSamples),
-                    loopEnabled: editedLoopEnabled,
+                    loopEnabled: isLooping,
                     loopStart: $editedLoopStart,
                     loopEnd: $editedLoopEnd,
                     playhead: playheadPosition
@@ -186,9 +198,28 @@ struct SampleDetailView: View {
 
                 InfoCard(title: "Loop") {
                     VStack(alignment: .leading, spacing: 12) {
-                        Toggle("Loop Enabled", isOn: $editedLoopEnabled)
-                            .onChange(of: editedLoopEnabled) { _, _ in commitEditsToImage() }
-                        if editedLoopEnabled {
+                        VStack(alignment: .leading, spacing: 6) {
+                            HStack {
+                                Text("Playback Mode").font(.subheadline).foregroundStyle(.secondary)
+                                Spacer()
+                                Picker("", selection: $editedPlaybackMode) {
+                                    ForEach(AkaiSamplePlaybackMode.allCases) { mode in
+                                        Text(mode.displayName).tag(mode)
+                                    }
+                                }
+                                .labelsHidden().frame(width: 160)
+                                // Changing mode must not touch loopStart/loopEnd —
+                                // only the mode itself, preserving whatever loop
+                                // points are already set (matches the keyzone
+                                // picker's behavior).
+                                .onChange(of: editedPlaybackMode) { _, _ in commitEditsToImage() }
+                            }
+                            Text(editedPlaybackMode.explanation)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                        if isLooping {
                             let maxSamples = Double(max(audioFrameCount, 1))
                             VStack(alignment: .leading, spacing: 4) {
                                 HStack {
@@ -221,7 +252,7 @@ struct SampleDetailView: View {
                 if isDirty {
                     HStack {
                         Spacer()
-                        Button("Reset") { resetSampleEdits() }.buttonStyle(.bordered)
+                        Button("Revert") { revertSampleEdits() }.buttonStyle(.bordered)
                     }
                 }
             }
@@ -233,7 +264,15 @@ struct SampleDetailView: View {
                 return event
             }
         }
-        .onChange(of: isDirty) { _, _ in diskImage.hasUnsavedChanges = isDirty }
+        .onChange(of: isDirty) { _, dirty in
+            // Only ever RAISE the global flag here, never lower it. Lowering it
+            // is the disk image's own job (saveImageToDisk/closeImage) — if this
+            // view's local edits are reverted/undone while some OTHER sample or
+            // program elsewhere still has unsaved changes, clearing the global
+            // flag from here would incorrectly suppress the close/quit
+            // "save changes?" prompt for that other pending edit.
+            if dirty { diskImage.hasUnsavedChanges = true }
+        }
         .onDisappear {
             if let m = keyMonitor { NSEvent.removeMonitor(m); keyMonitor = nil }
             diskImage.isEditingText = false
@@ -368,7 +407,7 @@ struct SampleDetailView: View {
         engine.attach(node)
         engine.connect(node, to: engine.mainMixerNode, format: format)
 
-        let useLoop = editedLoopEnabled
+        let useLoop = isLooping
         // loopStart/loopEnd come straight from the sliders, which mirror the real
         // header fields (at, and at+len clamped to the buffer) — the loop region
         // is genuinely [loopStart, loopEnd), not always the whole buffer.
@@ -420,7 +459,7 @@ struct SampleDetailView: View {
             let total = self.totalPlayFrames
             guard total > 0 else { return }
 
-            if self.editedLoopEnabled && self.loopFrameCount > 0 {
+            if self.isLooping && self.loopFrameCount > 0 {
                 // First pass plays 0 → loopEnd; afterwards the playhead wraps
                 // within the loopStart → loopEnd region.
                 let firstPassFrames = self.loopStartFrame + self.loopFrameCount  // 0 → loopEnd
@@ -441,7 +480,7 @@ struct SampleDetailView: View {
         var h = sample.header
         h.midiRootNote = UInt8(editedRootNote)
         h.fineTune = Int8(editedFineTune)
-        h.loopEnabled = editedLoopEnabled
+        h.playbackMode = editedPlaybackMode
         h.loopStart = UInt32(editedLoopStart)
         h.loopEnd = UInt32(editedLoopEnd)
         var s = sample
@@ -490,16 +529,21 @@ struct SampleDetailView: View {
         }
     }
 
-    /// Reset tuning (fine + semitone) and the loop to defaults: tune to 0, loop
-    /// disabled, loop start at 0 and loop end at the end of the sample. Root note
-    /// is left as-is.
-    private func resetSampleEdits() {
-        editedFineTune = 0
-        editedSemitone = 0
-        editedLoopEnabled = false
-        editedLoopStart = 0
-        editedLoopEnd = Double(max(audioFrameCount - 1, 0))
-        commitEditsToImage()
+    /// Revert all edits (tune, root note, loop) back to this sample's original
+    /// on-disk values — i.e. `sample.header`, which is the immutable snapshot
+    /// this view was created with and never mutates itself. Pushes the reverted
+    /// values into the in-memory image directly (undoing any prior edits already
+    /// committed there this session) and clears the local dirty flag, since the
+    /// edited state now matches the original exactly.
+    private func revertSampleEdits() {
+        editedRootNote = Int(sample.header.midiRootNote)
+        editedFineTune = Double(sample.header.fineTune)
+        editedSemitone = Double(sample.header.semitoneTune)
+        editedPlaybackMode = sample.header.playbackMode
+        editedLoopStart = Double(sample.header.loopStart)
+        editedLoopEnd = Double(sample.header.loopEnd)
+        diskImage.applySampleEdits(editedSample())
+        isDirty = false
     }
 
     private func formatDuration() -> String {
@@ -552,8 +596,9 @@ struct SampleListView: View {
                         return Text(dur < 1 ? String(format: "%.0fms", dur*1000) : String(format: "%.2fs", dur))
                     }.width(70)
                     TableColumn("Loop") { s in
-                        Image(systemName: s.header.loopEnabled ? "repeat" : "minus")
-                            .foregroundStyle(s.header.loopEnabled ? .blue : .secondary)
+                        let loops = s.header.playbackMode == .loop || s.header.playbackMode == .loopNotRel
+                        Image(systemName: loops ? "repeat" : "minus")
+                            .foregroundStyle(loops ? .blue : .secondary)
                     }.width(40)
                     TableColumn("Size") { s in
                         Text(formatSize(Int(s.directoryEntry.size))).foregroundStyle(.secondary)

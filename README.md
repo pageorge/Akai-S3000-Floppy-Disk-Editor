@@ -18,7 +18,12 @@ My app is built with SwiftUI — no dependencies — so it should run on most mo
 
 1. Download `AkaiS3000Editor.zip` from the link above
 2. Run the App
-3. On first launch modern Mac will say it can't run, if you then go in Settings -> Permissions you can set to I trust this app...
+3. On first launch modern Mac will say it can't run, go in to Settings -> Permissions and click open anyway:
+
+
+<p align="center">
+  <img src="screenshots/permissions.png" alt="Showing permissions for the app">
+</p>
 
 ---
 
@@ -41,21 +46,21 @@ My app is built with SwiftUI — no dependencies — so it should run on most mo
 <table>
   <tr>
     <td width="50%" valign="top">
-      <img src="screenshots/sample-edit.png" alt="Sample editing">
+      <img src="screenshots/sample-edit.png" alt="Sample editing" width="100%">
       <p align="center">Quick edit of samples</p>
     </td>
     <td width="50%" valign="top">
-      <img src="screenshots/program-drum.png" alt="Program and drum program creation">
+      <img src="screenshots/program-drum.png" alt="Program and drum program creation" width="100%">
       <p align="center">Quickly create a program or drum program by dragging in multiple drum samples</p>
     </td>
   </tr>
   <tr>
     <td width="50%" valign="top">
-      <img src="screenshots/disk-info.png" alt="Disk info and map">
+      <img src="screenshots/disk-info.png" alt="Disk info and map" width="100%">
       <p align="center">Floppy disk info and a map of where everything is stored</p>
     </td>
     <td width="50%" valign="top">
-      <img src="screenshots/greaseweazle.png" alt="Greaseweazle integration">
+      <img src="screenshots/greaseweazle.png" alt="Greaseweazle integration" width="100%">
       <p align="center">Easy integration with Greaseweazle</p>
     </td>
   </tr>

@@ -18,26 +18,12 @@ My app is built with SwiftUI — no dependencies — so it should run on most mo
 
 1. Download `AkaiS3000Editor.zip` from the link above
 2. Run the App
-3. On first launch modern Mac will say it can't run, go in to Settings -> Permissions and click open anyway:
+3. On first launch modern Mac will say it can't run, go in to Settings -> Privacy & Security -> Open Anyway - I trust this guy!
 
 
 <p align="center">
   <img src="screenshots/permissions.png" alt="Showing permissions for the app">
 </p>
-
----
-
-## What it does
-
-- 📂 **Open .img disk images** — drag & drop or File → Open
-- 🎵 **Browse and preview samples** — waveform display, spacebar to play
-- 📥 **Import WAV files** — add new samples to a disk image
-- ✏️ **Edit sample parameters** — root note, fine tune, loop points
-- 🎹 **Browse and edit programs** — view keyzone mappings on a piano keyboard
-- 🥁 **Drum preset tool** — drag multiple WAV files to auto-map each to a single key
-- 🖱️ **Drag on the keyboard** — set low key, high key and root note by dragging
-- 💾 **Save changes** back to the .img file and Read and Write using Greaseweazle
-- ℹ️ **Disk info** — free blocks, file counts, disk map
 
 ---
 

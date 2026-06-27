@@ -17,7 +17,7 @@ My app is built with SwiftUI — no dependencies — so it should run on most mo
 **[⬇️ Download latest build](https://github.com/pageorge/Akai-S3000-Floppy-Disk-Editor/releases/latest)**
 
 1. Download `AkaiS3000Editor.zip` from the link above
-2. Run the App.
+2. Run the App
 3. On first launch modern Mac will say it can't run, if you then go in Settings -> Permissions you can set to I trust this app...
 
 ---
@@ -36,13 +36,32 @@ My app is built with SwiftUI — no dependencies — so it should run on most mo
 
 ---
 
-## Reading a floppy with GreaseWeazle
+## Screenshots
 
-```bash
-gw read --format=akai.1600 my_disk.img --drive=B
-```
+<table>
+  <tr>
+    <td width="50%" valign="top">
+      <img src="screenshots/sample-edit.png" alt="Sample editing">
+      <p align="center">Quick edit of samples</p>
+    </td>
+    <td width="50%" valign="top">
+      <img src="screenshots/program-drum.png" alt="Program and drum program creation">
+      <p align="center">Quickly create a program or drum program by dragging in multiple drum samples</p>
+    </td>
+  </tr>
+  <tr>
+    <td width="50%" valign="top">
+      <img src="screenshots/disk-info.png" alt="Disk info and map">
+      <p align="center">Floppy disk info and a map of where everything is stored</p>
+    </td>
+    <td width="50%" valign="top">
+      <img src="screenshots/greaseweazle.png" alt="Greaseweazle integration">
+      <p align="center">Easy integration with Greaseweazle</p>
+    </td>
+  </tr>
+</table>
 
-Then open `my_disk.img` in this app.
+---
 
 ## Requirements
 
@@ -53,7 +72,7 @@ To build from source: **Xcode 15** or later.
 
 ---
 
-## Building from source
+## All source code is available - if you want to building it yourself:
 
 1. Clone this repo
 2. Open `AkaiS3000Editor.xcodeproj` in Xcode
@@ -61,6 +80,8 @@ To build from source: **Xcode 15** or later.
 4. Press **⌘R**
 
 ---
+
+### Tips & Tricks
 
 ## How to create a new program on the S3000XL
 
@@ -197,7 +218,7 @@ Starts at **block 5**, 510 × 24-byte entries, spans 12 blocks.
 | `0x13` | `pmode` | `0x00`=Sample's Setting, `0x01`=Loop, `0x02`=Loop Until Release, `0x03`=No Loop, `0x04`=Play to End. |
 | `0x16`–`0x17` | `shdra[2]` | Sample header address; `0xFFFF`=none. |
 
-### Filter — not yet located
+### Filter — remaining gaps
 
 Mod-depth source selectors (which of Modwheel/Bend/Pressure/External/Key/Lfo1/Env1/Velocity/Lfo2/Env2, or their note-on-only "!" variants, each of the 3 depth slots above routes from) and ENV2's own 4-stage rate/level envelope.
 
@@ -211,6 +232,12 @@ Mod-depth source selectors (which of Modwheel/Bend/Pressure/External/Key/Lfo1/En
 | | | `40` | `'.'` |
 
 ---
+
+### Reading a floppy with GreaseWeazle
+
+```bash
+gw read --format=akai.1600 my_disk.img --drive=B
+```
 
 ## Special thanks
 

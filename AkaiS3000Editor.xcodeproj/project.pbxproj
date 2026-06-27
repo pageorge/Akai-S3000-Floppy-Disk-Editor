@@ -3,7 +3,7 @@
 	archiveVersion = 1;
 	classes = {
 	};
-	objectVersion = 56;
+	objectVersion = 70;
 	objects = {
 
 /* Begin PBXBuildFile section */
@@ -21,6 +21,7 @@
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
+		AF3138DD2FF040E50040BCA9 /* README.md */ = {isa = PBXFileReference; lastKnownFileType = net.daringfireball.markdown; path = README.md; sourceTree = "<group>"; };
 		AF33648B2FE58687002905E2 /* GreaseweazleRunner.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GreaseweazleRunner.swift; sourceTree = "<group>"; };
 		AF45316B2FE042900063F9EF /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		B1000001 /* AkaiS3000EditorApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AkaiS3000EditorApp.swift; sourceTree = "<group>"; };
@@ -34,6 +35,10 @@
 		B1000009 /* SupportingViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SupportingViews.swift; sourceTree = "<group>"; };
 		C1000001 /* AkaiS3000Editor.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = AkaiS3000Editor.app; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
+
+/* Begin PBXFileSystemSynchronizedRootGroup section */
+		AF3138E22FF040FE0040BCA9 /* screenshots */ = {isa = PBXFileSystemSynchronizedRootGroup; explicitFileTypes = {}; explicitFolders = (); path = screenshots; sourceTree = "<group>"; };
+/* End PBXFileSystemSynchronizedRootGroup section */
 
 /* Begin PBXFrameworksBuildPhase section */
 		D1000001 /* Frameworks */ = {
@@ -49,6 +54,8 @@
 		E1000001 = {
 			isa = PBXGroup;
 			children = (
+				AF3138E22FF040FE0040BCA9 /* screenshots */,
+				AF3138DD2FF040E50040BCA9 /* README.md */,
 				E1000002 /* AkaiS3000Editor */,
 				E1000003 /* Products */,
 			);

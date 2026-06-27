@@ -174,13 +174,70 @@ struct AkaiProgramKeyzone {
     /// `filter` @ +0x11 in `akai_program1000kgvelzone_s`. Confirmed against the
     /// real S3000XL Operator's Manual (SMP2 page, p.93): "This parameter allows
     /// you to fine tune the filter cutoff slightly to maintain a consistent tone
-    /// between keygroups." This is layered ON TOP of the keygroup's own main
-    /// filter cutoff/resonance/key-follow/mod-depth controls (FILT page, p.96-98)
-    /// — those are NOT yet exposed here, since their byte offsets within
-    /// akai_program1000kg_s are unconfirmed (akaiutil's struct leaves them as
-    /// undocumented dummy bytes), and guessing at offsets risks corrupting
-    /// sampler-managed data we don't actually understand.
+    /// between keygroups." This is layered ON TOP of `filterCutoff` below.
     var filterOffset: Int8
+    /// Keygroup-level filter cutoff, 0–99 — `filter` @ kg+0x07 in
+    /// `akai_program1000kg_s`. CONFIRMED BY REAL HARDWARE BYTE-DIFF (not just
+    /// struct field naming): a single-variable test on a real S3000XL —
+    /// Frequency 99→50, every other FILT-page control held at baseline —
+    /// produced exactly ONE changed byte in the saved program file, at kg+0x07,
+    /// going 0x63 (99) → 0x32 (50). Raw byte = the literal 0–99 value, no
+    /// scaling or sign bit. So despite akaiutil's struct calling this single
+    /// byte just `filter`, it is literally the Frequency/cutoff control itself,
+    /// not an offset (the offset is the per-zone `filterOffset` above).
+    var filterCutoff: UInt8
+    /// Keygroup-level filter key-follow, signed — `dummy1[0]`/kg+0x08 in
+    /// `akai_program1000kg_s` (the first byte of akaiutil's undocumented 22-byte
+    /// dummy region). CONFIRMED BY REAL HARDWARE BYTE-DIFF: a test changing ONLY
+    /// Key Follow 12→0 (Frequency left at a known, already-confirmed value)
+    /// produced exactly that single additional byte change at kg+0x08, going
+    /// 0x0c(12)→0x00(0) — raw byte, no scaling. The manual (p.97) describes +12
+    /// (octave-for-octave tracking) as "the default," but a real, never-touched
+    /// keygroup (a fresh KG on a copy of TEST PROGRAM, never edited) was
+    /// photographed showing key follow: +00 — so the TRUE factory/blank default
+    /// is 0 (no key tracking at all), not +12. +12 is better described as the
+    /// manual's recommended starting point for normal tonal playing, not what a
+    /// fresh keygroup actually contains. Negative values not yet hardware-tested,
+    /// so sign encoding (two's complement assumed) is unconfirmed for that range.
+    var filterKeyFollow: Int8
+    /// Keygroup-level filter resonance, 0–15 — `kg+0x95`, WELL PAST the end of
+    /// akaiutil's documented `akai_program1000kg_s` struct (which only maps out
+    /// to relative offset 0x82, the end of the 4th velocity zone) — genuinely
+    /// new territory, not in any source we'd referenced before. CONFIRMED BY
+    /// REAL HARDWARE BYTE-DIFF: a save with ONLY Resonance changed 0→15
+    /// (relative to the prior reference capture) differed in exactly that one
+    /// byte: `kg+0x95` went `0x00`→`0x0f`(15) — direct, unscaled. Boosts
+    /// harmonics around the cutoff; high settings give the classic synth
+    /// "weeow" sound (manual, p.97).
+    var filterResonance: UInt8
+    /// Keygroup-level filter modulation depth #1 (default source: Velocity→Freq),
+    /// signed, range ±50 — `kg+0x97`. CONFIRMED BY REAL HARDWARE BYTE-DIFF:
+    /// isolated test changing ONLY this depth 0→50 produced exactly one changed
+    /// byte, `kg+0x97` 0x00→0x32(50) — direct, unscaled. This also retroactively
+    /// explained an earlier ambiguous combined-change capture that showed
+    /// kg+0x95/0x97/0x98/0x99 all non-zero at once (Resonance + the 3 mod depths,
+    /// strongly suggesting they're adjacent in memory with kg+0x96 unused/padding
+    /// between Resonance and this group) — but ONLY this one (kg+0x97) has
+    /// actually been independently isolated; mod depths #2/#3 are deliberately
+    /// NOT yet modeled here, pending their own isolated tests, to avoid writing
+    /// to bytes we haven't individually confirmed (same discipline as everywhere
+    /// else in this format). Source selector (Modwheel/Bend/Pressure/External/
+    /// Key/Lfo1/Env1/Velocity/Lfo2/Env2 + "!" variants) not yet located either.
+    var filterModDepth1: Int8
+    /// Keygroup-level filter modulation depth #2 (default source: Lfo2→Freq),
+    /// signed, range ±50 — `kg+0x98`. CONFIRMED BY REAL HARDWARE BYTE-DIFF:
+    /// isolated test changing ONLY this depth 0→50 produced exactly one changed
+    /// byte, `kg+0x98` 0x00→0x32(50) — direct, unscaled, confirming the adjacency
+    /// pattern predicted from depth #1. Source selector not yet located.
+    var filterModDepth2: Int8
+    /// Keygroup-level filter modulation depth #3 (default source: Env2→Freq),
+    /// signed, range ±50 — `kg+0x99`. CONFIRMED BY REAL HARDWARE BYTE-DIFF:
+    /// isolated test changing ONLY this depth 0→50 produced exactly one changed
+    /// byte, `kg+0x99` 0x00→0x32(50) — direct, unscaled. Completes the 3-byte
+    /// adjacency run (0x97/0x98/0x99) predicted from depth #1, now confirmed
+    /// three-for-three by isolated single-variable tests. Source selector not
+    /// yet located for any of the three depths.
+    var filterModDepth3: Int8
     var playbackMode: AkaiPlaybackMode
     var velocityLow: UInt8
     var velocityHigh: UInt8
@@ -550,6 +607,14 @@ class AkaiDiskImage: ObservableObject {
             guard kg + kgSize <= fileData.count else { break }
             let kgKeylo = fileData[kg + 0x03]
             let kgKeyhi = fileData[kg + 0x04]
+            // Filter cutoff (Frequency), 0–99, and Key Follow, signed —
+            // confirmed real-hardware offsets, see AkaiProgramKeyzone.
+            let kgFilterCutoff = fileData[kg + 0x07]
+            let kgFilterKeyFollow = Int8(bitPattern: fileData[kg + 0x08])
+            let kgFilterResonance = fileData[kg + 0x95]
+            let kgFilterModDepth1 = Int8(bitPattern: fileData[kg + 0x97])
+            let kgFilterModDepth2 = Int8(bitPattern: fileData[kg + 0x98])
+            let kgFilterModDepth3 = Int8(bitPattern: fileData[kg + 0x99])
             // Velocity zone 1 holds the primary sample assignment.
             let vz = kg + 0x22
             guard vz + 0x18 <= fileData.count else { break }
@@ -563,6 +628,12 @@ class AkaiDiskImage: ObservableObject {
                 volume: fileData[vz + 0x10],                          // loud
                 pan: Int8(bitPattern: fileData[vz + 0x12]),           // pan
                 filterOffset: Int8(bitPattern: fileData[vz + 0x11]),  // filter (fine-tune)
+                filterCutoff: kgFilterCutoff,
+                filterKeyFollow: kgFilterKeyFollow,
+                filterResonance: kgFilterResonance,
+                filterModDepth1: kgFilterModDepth1,
+                filterModDepth2: kgFilterModDepth2,
+                filterModDepth3: kgFilterModDepth3,
                 // pmode — decode the full 5-state byte (see AkaiPlaybackMode).
                 // Fall back to .sample (the natural zero-value/inherit state) for
                 // any byte value not in the known range, rather than guessing.
@@ -1465,6 +1536,12 @@ class AkaiDiskImage: ObservableObject {
             let kz: AkaiProgramKeyzone? = kgi < keyzones.count ? keyzones[kgi] : nil
             file[kg + 0x03] = kz?.lowKey ?? 0
             file[kg + 0x04] = kz?.highKey ?? 127
+            file[kg + 0x07] = kz?.filterCutoff ?? 99   // Frequency, 0–99 — confirmed offset
+            file[kg + 0x08] = UInt8(bitPattern: kz?.filterKeyFollow ?? 0) // Key Follow — confirmed offset, true blank default
+            file[kg + 0x95] = kz?.filterResonance ?? 0   // Resonance, 0–15 — confirmed offset
+            file[kg + 0x97] = UInt8(bitPattern: kz?.filterModDepth1 ?? 0)  // Mod depth #1 (Velocity→Freq) — confirmed offset
+            file[kg + 0x98] = UInt8(bitPattern: kz?.filterModDepth2 ?? 0)  // Mod depth #2 (Lfo2→Freq) — confirmed offset
+            file[kg + 0x99] = UInt8(bitPattern: kz?.filterModDepth3 ?? 0)  // Mod depth #3 (Env2→Freq) — confirmed offset
 
             for z in 0..<4 {
                 let vz = kg + 0x22 + z * 0x18

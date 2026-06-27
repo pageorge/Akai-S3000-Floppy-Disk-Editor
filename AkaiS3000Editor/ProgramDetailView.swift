@@ -4,7 +4,11 @@ struct ProgramDetailView: View {
     let programFile: AkaiProgramFile
     @ObservedObject var diskImage: AkaiDiskImage
     @State private var editedProgram: AkaiProgram
-    @State private var selectedKeyzoneIndex: Int? = nil
+    @State private var selectedKeyzoneIndices: Set<Int> = []
+    /// The most recently clicked keyzone — used as (a) the shift-click range
+    /// anchor and (b) the "primary" keyzone whose values are shown in the piano
+    /// keyboard / Low-Root-High pickers / editor when several are selected.
+    @State private var anchorKeyzoneIndex: Int? = nil
     @State private var isDirty = false
     @State private var isEditingName = false
     @State private var editedName: String = ""
@@ -117,9 +121,13 @@ struct ProgramDetailView: View {
                     HStack {
                         Text("Keyzones").font(.headline)
                         Spacer()
+                        if selectedKeyzoneIndices.count > 1 {
+                            Text("\(selectedKeyzoneIndices.count) selected")
+                                .font(.caption).foregroundStyle(.secondary)
+                        }
                         RoundIconButton(systemImage: "plus") { addKeyzone() }
-                        RoundIconButton(systemImage: "minus", isDisabled: selectedKeyzoneIndex == nil) {
-                            if let idx = selectedKeyzoneIndex { deleteKeyzone(at: idx) }
+                        RoundIconButton(systemImage: "minus", isDisabled: selectedKeyzoneIndices.isEmpty) {
+                            deleteSelectedKeyzones()
                         }
                     }
                     .padding(.horizontal).padding(.top, 8)
@@ -127,9 +135,11 @@ struct ProgramDetailView: View {
                     List {
                         ForEach(Array(editedProgram.keyzones.enumerated()), id: \.offset) { idx, kz in
                             KeyzoneRow(keyzone: kz, sampleNames: diskImage.samples.map { $0.header.name })
-                                .listRowBackground(selectedKeyzoneIndex == idx ? Color.accentColor.opacity(0.15) : Color.clear)
+                                .listRowBackground(selectedKeyzoneIndices.contains(idx) ? Color.accentColor.opacity(0.15) : Color.clear)
+                                .contentShape(Rectangle())
                                 .onTapGesture {
-                                    selectedKeyzoneIndex = (selectedKeyzoneIndex == idx) ? nil : idx
+                                    let flags = NSEvent.modifierFlags
+                                    handleKeyzoneTap(idx, shift: flags.contains(.shift), command: flags.contains(.command))
                                 }
                                 .contextMenu {
                                     Button { addKeyzone() } label: {
@@ -139,8 +149,8 @@ struct ProgramDetailView: View {
                                         Label("Clone", systemImage: "plus.square.on.square")
                                     }
                                     Divider()
-                                    Button(role: .destructive) { deleteKeyzone(at: idx) } label: {
-                                        Label("Delete", systemImage: "trash")
+                                    Button(role: .destructive) { deleteSelectedKeyzones() } label: {
+                                        Label(selectedKeyzoneIndices.count > 1 ? "Delete \(selectedKeyzoneIndices.count) Keyzones" : "Delete", systemImage: "trash")
                                     }
                                 }
                         }
@@ -153,8 +163,9 @@ struct ProgramDetailView: View {
                             // SidebarView's identical (always-active) key monitor.
                             guard !diskImage.isEditingText else { return event }
                             if event.keyCode == 53 { // esc
-                                if self.selectedKeyzoneIndex != nil {
-                                    self.selectedKeyzoneIndex = nil
+                                if !self.selectedKeyzoneIndices.isEmpty {
+                                    self.selectedKeyzoneIndices = []
+                                    self.anchorKeyzoneIndex = nil
                                     return nil
                                 }
                             }
@@ -167,8 +178,8 @@ struct ProgramDetailView: View {
                                 return nil
                             }
                             if event.keyCode == 51 || event.keyCode == 117 {  // delete / forward-delete
-                                if let idx = selectedKeyzoneIndex {
-                                    deleteKeyzone(at: idx)
+                                if !selectedKeyzoneIndices.isEmpty {
+                                    deleteSelectedKeyzones()
                                     return nil
                                 }
                             }
@@ -184,7 +195,7 @@ struct ProgramDetailView: View {
                 // Right: sample picker + piano keyboard + keyzone editor
                 VStack(alignment: .leading, spacing: 0) {
                     // Sample pills — only shown when a keyzone is selected
-                    if selectedKeyzoneIndex != nil && !diskImage.samples.isEmpty {
+                    if anchorKeyzoneIndex != nil && !diskImage.samples.isEmpty {
                         GroupBox {
                             FlowLayout(spacing: 6) {
                                 ForEach(diskImage.samples) { sample in
@@ -201,10 +212,10 @@ struct ProgramDetailView: View {
                     if !editedProgram.keyzones.isEmpty {
                         PianoKeyboardView(
                             keyzones: editedProgram.keyzones,
-                            selectedIndex: selectedKeyzoneIndex,
+                            selectedIndex: anchorKeyzoneIndex,
                             onKeyzoneChanged: { updated in
-                                if let idx = selectedKeyzoneIndex, idx < editedProgram.keyzones.count {
-                                    editedProgram.keyzones[idx] = updated
+                                if let idx = anchorKeyzoneIndex, idx < editedProgram.keyzones.count {
+                                    applyToSelectedKeyzones(updated, primaryIndex: idx)
                                     commitProgramEdits()
                                 }
                             }
@@ -215,15 +226,15 @@ struct ProgramDetailView: View {
                         // Low / Root / High pickers positioned directly under the
                         // keyboard, matching their on-keyboard position: low at the
                         // bottom-left, root centred, high at the bottom-right.
-                        if let idx = selectedKeyzoneIndex, idx < editedProgram.keyzones.count {
+                        if let idx = anchorKeyzoneIndex, idx < editedProgram.keyzones.count {
                             HStack {
-                                MidiKeyPicker(label: "Low", value: $editedProgram.keyzones[idx].lowKey,
+                                MidiKeyPicker(label: "Low", value: keyzoneFieldBinding(idx, \.lowKey),
                                              onChange: { commitProgramEdits() })
                                 Spacer()
-                                MidiKeyPicker(label: "Root", value: $editedProgram.keyzones[idx].rootNote,
+                                MidiKeyPicker(label: "Root", value: keyzoneFieldBinding(idx, \.rootNote),
                                              onChange: { commitProgramEdits() })
                                 Spacer()
-                                MidiKeyPicker(label: "High", value: $editedProgram.keyzones[idx].highKey,
+                                MidiKeyPicker(label: "High", value: keyzoneFieldBinding(idx, \.highKey),
                                              onChange: { commitProgramEdits() })
                             }
                             .padding(.horizontal, 10)
@@ -233,9 +244,13 @@ struct ProgramDetailView: View {
                         Divider()
                     }
 
-                    if let idx = selectedKeyzoneIndex, idx < editedProgram.keyzones.count {
+                    if let idx = anchorKeyzoneIndex, idx < editedProgram.keyzones.count {
                         KeyzoneEditorView(
-                            keyzone: $editedProgram.keyzones[idx],
+                            keyzone: Binding(
+                                get: { editedProgram.keyzones[idx] },
+                                set: { newValue in applyToSelectedKeyzones(newValue, primaryIndex: idx) }
+                            ),
+                            selectedCount: selectedKeyzoneIndices.count,
                             onChange: { commitProgramEdits() }
                         )
                         .padding()
@@ -256,7 +271,9 @@ struct ProgramDetailView: View {
                             existingKeyzones: editedProgram.keyzones,
                             onSamplesImported: { newKeyzones in
                                 editedProgram.keyzones.append(contentsOf: newKeyzones)
-                                selectedKeyzoneIndex = editedProgram.keyzones.count - 1
+                                let newIdx = editedProgram.keyzones.count - 1
+                                selectedKeyzoneIndices = [newIdx]
+                                anchorKeyzoneIndex = newIdx
                                 commitProgramEdits()
                             }
                         )
@@ -317,6 +334,18 @@ struct ProgramDetailView: View {
             lowKey: 24, highKey: 95, rootNote: 60,
             tuneOffset: 0, fineTune: 0, volume: 99, pan: 0,
             filterOffset: 0,
+            // 99 = filter wide open (no audible filtering) — matches real
+            // hardware default and is a safe "inaudible until you touch it" start.
+            filterCutoff: 99,
+            // 0 matches the real factory/blank-keygroup default — confirmed by
+            // photographing a fresh keygroup on a copy of TEST PROGRAM. The
+            // manual's "+12 is the default" claim is its recommended starting
+            // point for tonal playing, not what a never-touched keygroup contains.
+            filterKeyFollow: 0,
+            filterResonance: 0,
+            filterModDepth1: 0,
+            filterModDepth2: 0,
+            filterModDepth3: 0,
             // .sample mimics real S3000 hardware: a freshly created keygroup
             // defaults to "use the sample's own loop setting" (pmode 0x00, which
             // is also the natural zero-value default), not an override that
@@ -326,43 +355,153 @@ struct ProgramDetailView: View {
             playbackMode: .sample, velocityLow: 0, velocityHigh: 127
         )
         editedProgram.keyzones.append(newKZ)
-        selectedKeyzoneIndex = editedProgram.keyzones.count - 1
+        let newIdx = editedProgram.keyzones.count - 1
+        selectedKeyzoneIndices = [newIdx]
+        anchorKeyzoneIndex = newIdx
         commitProgramEdits()
     }
 
     /// Duplicate the keyzone at `index` (all its settings) and insert the copy
-    /// right after it, then select the new one — mirrors cloneSample/cloneProgram.
+    /// right after it, then select the new one (and only the new one) — mirrors
+    /// cloneSample/cloneProgram.
     private func cloneKeyzone(at index: Int) {
         guard editedProgram.keyzones.indices.contains(index) else { return }
         let copy = editedProgram.keyzones[index]
         let insertAt = index + 1
         editedProgram.keyzones.insert(copy, at: insertAt)
-        selectedKeyzoneIndex = insertAt
+        selectedKeyzoneIndices = [insertAt]
+        anchorKeyzoneIndex = insertAt
         commitProgramEdits()
     }
 
-    /// Remove the keyzone at `index` and select a sensible neighbour afterwards.
-    private func deleteKeyzone(at index: Int) {
-        guard editedProgram.keyzones.indices.contains(index) else { return }
-        editedProgram.keyzones.remove(at: index)
+    /// Remove every currently-selected keyzone and select a sensible neighbour
+    /// afterwards. Replaces the old single-index deleteKeyzone(at:).
+    private func deleteSelectedKeyzones() {
+        guard !selectedKeyzoneIndices.isEmpty else { return }
+        let sortedIndices = selectedKeyzoneIndices.sorted()
+        let firstRemoved = sortedIndices.first ?? 0
+        // Remove highest-index-first so earlier removals don't shift the
+        // positions of indices still queued for removal.
+        for idx in sortedIndices.reversed() where editedProgram.keyzones.indices.contains(idx) {
+            editedProgram.keyzones.remove(at: idx)
+        }
         if editedProgram.keyzones.isEmpty {
-            selectedKeyzoneIndex = nil
+            selectedKeyzoneIndices = []
+            anchorKeyzoneIndex = nil
         } else {
-            selectedKeyzoneIndex = min(index, editedProgram.keyzones.count - 1)
+            let newIdx = min(firstRemoved, editedProgram.keyzones.count - 1)
+            selectedKeyzoneIndices = [newIdx]
+            anchorKeyzoneIndex = newIdx
         }
         commitProgramEdits()
+    }
+
+    /// Handle a click on keyzone row `idx`, replicating standard Finder/Mail-style
+    /// multi-select: plain click selects just this row (or deselects if it was the
+    /// only thing selected), ⌘-click toggles this row in/out of the selection,
+    /// ⇧-click selects the contiguous range from the anchor to this row.
+    private func handleKeyzoneTap(_ idx: Int, shift: Bool, command: Bool) {
+        if shift, let anchor = anchorKeyzoneIndex {
+            let range = anchor <= idx ? anchor...idx : idx...anchor
+            selectedKeyzoneIndices = Set(range)
+            // Anchor deliberately NOT moved on shift-click, so repeated shift-clicks
+            // keep extending/shrinking the range from the same fixed start point.
+        } else if command {
+            if selectedKeyzoneIndices.contains(idx) {
+                selectedKeyzoneIndices.remove(idx)
+            } else {
+                selectedKeyzoneIndices.insert(idx)
+            }
+            anchorKeyzoneIndex = idx
+        } else {
+            if selectedKeyzoneIndices == [idx] {
+                selectedKeyzoneIndices = []
+                anchorKeyzoneIndex = nil
+            } else {
+                selectedKeyzoneIndices = [idx]
+                anchorKeyzoneIndex = idx
+            }
+        }
     }
 
     /// Move the keyzone selection up/down by `delta`, mirroring SidebarView's
     /// moveSelection — if nothing is selected yet, arrow keys select an end.
+    /// Arrow-key navigation always collapses to a single selection (matching
+    /// standard list behavior), even if several keyzones were selected before.
     private func moveKeyzoneSelection(by delta: Int) {
         let count = editedProgram.keyzones.count
         guard count > 0 else { return }
-        if let idx = selectedKeyzoneIndex {
-            selectedKeyzoneIndex = max(0, min(count - 1, idx + delta))
+        let newIdx: Int
+        if let idx = anchorKeyzoneIndex {
+            newIdx = max(0, min(count - 1, idx + delta))
         } else {
-            selectedKeyzoneIndex = delta > 0 ? 0 : count - 1
+            newIdx = delta > 0 ? 0 : count - 1
         }
+        selectedKeyzoneIndices = [newIdx]
+        anchorKeyzoneIndex = newIdx
+    }
+
+    /// Apply a field-level change made to the keyzone at `primaryIndex` to every
+    /// OTHER currently-selected keyzone too — this is the actual "highlight
+    /// several, change a setting, it updates all of them" feature, mirroring the
+    /// real S3000XL's ED: ALL mode. Works by diffing `newValue` against the
+    /// primary's CURRENT value and copying over only the field(s) that actually
+    /// changed (in practice, exactly one per UI interaction — one slider/stepper/
+    /// picker edits one property at a time), so unrelated fields on the other
+    /// selected keyzones are left untouched.
+    ///
+    /// `sampleName` is deliberately EXCLUDED from the broadcast, matching the
+    /// real hardware's own documented behavior (S3000XL manual, SMP1 page note):
+    /// "Selecting ALL doesn't apply to assigning samples... only one sample is
+    /// assigned and the other keygroups remain unchanged even if ALL is
+    /// selected." Every other field (key range, root note, velocity range, tune,
+    /// volume, pan, filter, playback mode) IS broadcast.
+    private func applyToSelectedKeyzones(_ newValue: AkaiProgramKeyzone, primaryIndex: Int) {
+        guard editedProgram.keyzones.indices.contains(primaryIndex) else { return }
+        let old = editedProgram.keyzones[primaryIndex]
+        editedProgram.keyzones[primaryIndex] = newValue
+
+        let others = selectedKeyzoneIndices.subtracting([primaryIndex])
+            .filter { editedProgram.keyzones.indices.contains($0) }
+        guard !others.isEmpty else { return }
+
+        for idx in others {
+            var kz = editedProgram.keyzones[idx]
+            if old.lowKey != newValue.lowKey { kz.lowKey = newValue.lowKey }
+            if old.highKey != newValue.highKey { kz.highKey = newValue.highKey }
+            if old.rootNote != newValue.rootNote { kz.rootNote = newValue.rootNote }
+            if old.tuneOffset != newValue.tuneOffset { kz.tuneOffset = newValue.tuneOffset }
+            if old.fineTune != newValue.fineTune { kz.fineTune = newValue.fineTune }
+            if old.volume != newValue.volume { kz.volume = newValue.volume }
+            if old.pan != newValue.pan { kz.pan = newValue.pan }
+            if old.filterOffset != newValue.filterOffset { kz.filterOffset = newValue.filterOffset }
+            if old.filterCutoff != newValue.filterCutoff { kz.filterCutoff = newValue.filterCutoff }
+            if old.filterKeyFollow != newValue.filterKeyFollow { kz.filterKeyFollow = newValue.filterKeyFollow }
+            if old.filterResonance != newValue.filterResonance { kz.filterResonance = newValue.filterResonance }
+            if old.filterModDepth1 != newValue.filterModDepth1 { kz.filterModDepth1 = newValue.filterModDepth1 }
+            if old.filterModDepth2 != newValue.filterModDepth2 { kz.filterModDepth2 = newValue.filterModDepth2 }
+            if old.filterModDepth3 != newValue.filterModDepth3 { kz.filterModDepth3 = newValue.filterModDepth3 }
+            if old.playbackMode != newValue.playbackMode { kz.playbackMode = newValue.playbackMode }
+            if old.velocityLow != newValue.velocityLow { kz.velocityLow = newValue.velocityLow }
+            if old.velocityHigh != newValue.velocityHigh { kz.velocityHigh = newValue.velocityHigh }
+            // sampleName: intentionally not copied — see doc comment above.
+            editedProgram.keyzones[idx] = kz
+        }
+    }
+
+    /// A binding to a single UInt8 field (lowKey/highKey/rootNote) on the keyzone
+    /// at `idx`, routed through applyToSelectedKeyzones so the MIDI key pickers
+    /// broadcast to the rest of the selection exactly like every other control.
+    private func keyzoneFieldBinding(_ idx: Int, _ keyPath: WritableKeyPath<AkaiProgramKeyzone, UInt8>) -> Binding<UInt8> {
+        Binding(
+            get: { editedProgram.keyzones.indices.contains(idx) ? editedProgram.keyzones[idx][keyPath: keyPath] : 0 },
+            set: { newVal in
+                guard editedProgram.keyzones.indices.contains(idx) else { return }
+                var updated = editedProgram.keyzones[idx]
+                updated[keyPath: keyPath] = newVal
+                applyToSelectedKeyzones(updated, primaryIndex: idx)
+            }
+        )
     }
 
     /// Push the current `editedProgram` into the in-memory disk image so the
@@ -391,8 +530,13 @@ struct ProgramDetailView: View {
     /// Tapping the already-assigned sample's pill clears the assignment;
     /// tapping any other pill assigns it (replacing whatever was there) —
     /// this is the whole "sample picker", replacing the old dropdown.
+    ///
+    /// Always applies to the ANCHOR keyzone only, even when several are
+    /// selected — matching the real S3000XL's documented behavior that ALL mode
+    /// never broadcasts sample assignment (see applyToSelectedKeyzones' doc
+    /// comment for the manual quote).
     private func toggleSample(_ name: String) {
-        guard let idx = selectedKeyzoneIndex, editedProgram.keyzones.indices.contains(idx) else { return }
+        guard let idx = anchorKeyzoneIndex, editedProgram.keyzones.indices.contains(idx) else { return }
         if editedProgram.keyzones[idx].sampleName == name {
             editedProgram.keyzones[idx].sampleName = ""
         } else {
@@ -407,8 +551,8 @@ struct ProgramDetailView: View {
     @ViewBuilder
     private func samplePill(for sample: AkaiSample) -> some View {
         let name = sample.header.name.isEmpty ? sample.directoryEntry.name : sample.header.name
-        let hasSelection = selectedKeyzoneIndex != nil
-        let isAssigned = selectedKeyzoneIndex.flatMap { idx in
+        let hasSelection = anchorKeyzoneIndex != nil
+        let isAssigned = anchorKeyzoneIndex.flatMap { idx in
             editedProgram.keyzones.indices.contains(idx) ? editedProgram.keyzones[idx].sampleName == name : nil
         } ?? false
 
@@ -579,6 +723,12 @@ struct DrumPresetDropZone: View {
                         lowKey: note, highKey: note, rootNote: note,
                         tuneOffset: 0, fineTune: 0, volume: 99, pan: 0,
                         filterOffset: 0,
+                        filterCutoff: 99,
+                        filterKeyFollow: 0,
+                        filterResonance: 0,
+                        filterModDepth1: 0,
+                        filterModDepth2: 0,
+                        filterModDepth3: 0,
                         // .noLoop, NOT .sample: drum/percussion hits are one-shots
                         // by nature — force no loop regardless of whatever loop
                         // points happen to be set on the sample itself. Unlike
@@ -672,12 +822,23 @@ struct KeyzoneRow: View {
 
 struct KeyzoneEditorView: View {
     @Binding var keyzone: AkaiProgramKeyzone
+    var selectedCount: Int = 1
     let onChange: () -> Void
 
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
-                Text("Keyzone Settings").font(.headline)
+                HStack {
+                    Text("Keyzone Settings").font(.headline)
+                    if selectedCount > 1 {
+                        Spacer()
+                        Text("Editing \(selectedCount) keygroups — changes apply to all selected")
+                            .font(.caption)
+                            .foregroundStyle(.white)
+                            .padding(.horizontal, 8).padding(.vertical, 3)
+                            .background(Capsule().fill(Color.accentColor))
+                    }
+                }
 
                 GroupBox("Velocity") {
                     VStack(alignment: .leading, spacing: 10) {
@@ -713,7 +874,82 @@ struct KeyzoneEditorView: View {
                             .font(.caption)
                             .foregroundStyle(.secondary)
                             .fixedSize(horizontal: false, vertical: true)
+                            .padding(.top, 4)
                             .padding(.leading, 100)
+                    }
+                }
+
+                GroupBox("Filter") {
+                    VStack(alignment: .leading, spacing: 16) {
+                        VStack(alignment: .leading, spacing: 6) {
+                            HStack {
+                                Text("Cutoff").frame(width: 100, alignment: .leading).font(.subheadline)
+                                Slider(value: .init(get: { Double(keyzone.filterCutoff) },
+                                                   set: { keyzone.filterCutoff = UInt8($0); onChange() }), in: 0...99, step: 1)
+                                Text("\(keyzone.filterCutoff)").frame(width: 30).font(.system(.body, design: .monospaced))
+                            }
+                            Text("This keygroup's main filter (0–99). Lower = softer/darker tone.")
+                                .font(.caption2).foregroundStyle(.secondary).padding(.top, 2).padding(.leading, 100)
+                        }
+                        VStack(alignment: .leading, spacing: 6) {
+                            HStack {
+                                Text("Key Follow").frame(width: 100, alignment: .leading).font(.subheadline)
+                                Stepper("\(keyzone.filterKeyFollow)", value: $keyzone.filterKeyFollow, in: -24...24)
+                                    .onChange(of: keyzone.filterKeyFollow) { _, _ in onChange() }
+                            }
+                            Text("How much the cutoff tracks keyboard position. Default is 0 (no tracking); +12 gives octave-for-octave tracking.")
+                                .font(.caption2).foregroundStyle(.secondary).padding(.top, 2).padding(.leading, 100)
+                        }
+                        VStack(alignment: .leading, spacing: 6) {
+                            HStack {
+                                Text("Resonance").frame(width: 100, alignment: .leading).font(.subheadline)
+                                Slider(value: .init(get: { Double(keyzone.filterResonance) },
+                                                   set: { keyzone.filterResonance = UInt8($0); onChange() }), in: 0...15, step: 1)
+                                Text("\(keyzone.filterResonance)").frame(width: 30).font(.system(.body, design: .monospaced))
+                            }
+                            Text("Boosts harmonics around the cutoff (0–15). High settings give the classic synth \"weeow\" sound.")
+                                .font(.caption2).foregroundStyle(.secondary).padding(.top, 2).padding(.leading, 100)
+                        }
+                        VStack(alignment: .leading, spacing: 6) {
+                            HStack {
+                                Text("Vel→Freq").frame(width: 100, alignment: .leading).font(.subheadline)
+                                Slider(value: .init(get: { Double(keyzone.filterModDepth1) },
+                                                   set: { keyzone.filterModDepth1 = Int8($0); onChange() }), in: -50...50, step: 1)
+                                Text("\(keyzone.filterModDepth1)").frame(width: 35).font(.system(.caption, design: .monospaced))
+                            }
+                            Text("How much harder hits open the filter (±50).")
+                                .font(.caption2).foregroundStyle(.secondary).padding(.top, 2).padding(.leading, 100)
+                        }
+                        VStack(alignment: .leading, spacing: 6) {
+                            HStack {
+                                Text("Lfo2→Freq").frame(width: 100, alignment: .leading).font(.subheadline)
+                                Slider(value: .init(get: { Double(keyzone.filterModDepth2) },
+                                                   set: { keyzone.filterModDepth2 = Int8($0); onChange() }), in: -50...50, step: 1)
+                                Text("\(keyzone.filterModDepth2)").frame(width: 35).font(.system(.caption, design: .monospaced))
+                            }
+                            Text("Sweeps the filter with the second LFO (±50).")
+                                .font(.caption2).foregroundStyle(.secondary).padding(.top, 2).padding(.leading, 100)
+                        }
+                        VStack(alignment: .leading, spacing: 6) {
+                            HStack {
+                                Text("Env2→Freq").frame(width: 100, alignment: .leading).font(.subheadline)
+                                Slider(value: .init(get: { Double(keyzone.filterModDepth3) },
+                                                   set: { keyzone.filterModDepth3 = Int8($0); onChange() }), in: -50...50, step: 1)
+                                Text("\(keyzone.filterModDepth3)").frame(width: 35).font(.system(.caption, design: .monospaced))
+                            }
+                            Text("Shapes the filter with the dedicated filter envelope (±50).")
+                                .font(.caption2).foregroundStyle(.secondary).padding(.top, 2).padding(.leading, 100)
+                        }
+                        VStack(alignment: .leading, spacing: 6) {
+                            HStack {
+                                Text("Filter Trim").frame(width: 100, alignment: .leading).font(.subheadline)
+                                Slider(value: .init(get: { Double(keyzone.filterOffset) },
+                                                   set: { keyzone.filterOffset = Int8($0); onChange() }), in: -50...50, step: 1)
+                                Text("\(keyzone.filterOffset)").frame(width: 35).font(.system(.caption, design: .monospaced))
+                            }
+                            Text("Small ±50 adjustment on top of Cutoff, for matching tone between adjacent keygroups.")
+                                .font(.caption2).foregroundStyle(.secondary).padding(.top, 2).padding(.leading, 100)
+                        }
                     }
                 }
 
@@ -743,17 +979,6 @@ struct KeyzoneEditorView: View {
                             Text(keyzone.pan == 0 ? "C" : keyzone.pan > 0 ? "R\(keyzone.pan)" : "L\(abs(keyzone.pan))")
                                 .frame(width: 35).font(.system(.caption, design: .monospaced))
                         }
-                        HStack {
-                            Text("Filter Trim").frame(width: 100, alignment: .leading).font(.subheadline)
-                            Slider(value: .init(get: { Double(keyzone.filterOffset) },
-                                               set: { keyzone.filterOffset = Int8($0); onChange() }), in: -50...50, step: 1)
-                            Text("\(keyzone.filterOffset)").frame(width: 35).font(.system(.caption, design: .monospaced))
-                        }
-                        Text("Fine-tunes this keyzone's filter cutoff (±50) to keep tone consistent between adjacent keygroups — it does NOT set the filter itself. Source: S3000XL Operator's Manual, SMP2 page.")
-                            .font(.caption2)
-                            .foregroundStyle(.secondary)
-                            .fixedSize(horizontal: false, vertical: true)
-                            .padding(.leading, 100)
 
                     }
                 }

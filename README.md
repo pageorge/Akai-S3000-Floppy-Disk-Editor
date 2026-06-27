@@ -33,21 +33,21 @@ My app is built with SwiftUI — no dependencies — so it should run on most mo
   <tr>
     <td width="50%" valign="top">
       <img src="screenshots/sample-edit.png" alt="Sample editing" width="100%">
-      <p align="center">Quick edit of samples</p>
+      <p align="center">Drag in a sample, tweak loop points etc...</p>
     </td>
     <td width="50%" valign="top">
       <img src="screenshots/program-drum.png" alt="Program and drum program creation" width="100%">
-      <p align="center">Quickly create a program or drum program by dragging in multiple drum samples</p>
+      <p align="center">Easily create new or clone keyzones, create a drum program by dragging in multiple samples on to the drum drop zone! Set filter settings</p>
     </td>
   </tr>
   <tr>
     <td width="50%" valign="top">
       <img src="screenshots/disk-info.png" alt="Disk info and map" width="100%">
-      <p align="center">Floppy disk info and a map of where everything is stored</p>
+      <p align="center">Floppy disk info and a map of where everything will live on the disk</p>
     </td>
     <td width="50%" valign="top">
       <img src="screenshots/greaseweazle.png" alt="Greaseweazle integration" width="100%">
-      <p align="center">Easy integration with Greaseweazle</p>
+      <p align="center">Read / Write buttons call Greaseweazle commands and show log and progress writing to disk</p>
     </td>
   </tr>
 </table>

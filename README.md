@@ -2,8 +2,6 @@
 
 ![Akai S3000 Editor Logo](AkaiS3000Editor/Assets.xcassets/AppIcon.appiconset/icon_128x128@2x.png)
 
-I love the sound of Akai samplers. Maybe it’s just me, but when I play back old drum and bass loops from the 90s, they sound MASSIVE! Sure, plugin samplers are easy to use, but they just seem to lack the magic of going through the crunch and op amps of the Akais. I also love the simplicity of being restricted to a 1.4Mb floppy disk — it really does make you think, “I need to choose my samples carefully, every one must be a banger and cut through the mix!"
-
 This is a personal macOS project that allows me to read and write Akai S3000XL floppy disks using a UI that is super easy and powerful: quickly create programs, then drag and drop WAV files into program or drum key group configs with filter and loop settings, then save to an .img file. For reading and editing Akai S3000 floppy disk images (.img), I use the AMAZING [Greaseweazle](https://github.com/keirf/greaseweazle) floppy-to-USB-C card.
 
 My app is built with SwiftUI — no dependencies — so it should run on most modern Macs. You will need to edit permissions in Settings to trust it, as it’s not on the App Store yet!

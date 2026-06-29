@@ -7,6 +7,13 @@ struct ContentView: View {
     @State private var selectedTab: SidebarTab = .samples
     @State private var selectedSampleID: UUID? = nil
     @State private var selectedProgramID: UUID? = nil
+    @State private var selectedMultiID: UUID? = nil
+    /// The in-memory "preview" multi created by MultiListView's "New Multi"
+    /// button — see AkaiMultiFile's doc comment for why this never touches the
+    /// disk image. Fixed sentinel ID so selectedMultiID can point at it the same
+    /// way it points at a real AkaiMultiFile's id.
+    @State private var previewMulti: AkaiMulti? = nil
+    private let previewMultiID = UUID()
     @State private var showingAlert = false
     @State private var alertMessage = ""
 
@@ -17,12 +24,14 @@ struct ContentView: View {
     enum SidebarTab: String, CaseIterable {
         case samples = "Samples"
         case programs = "Programs"
+        case multis = "Multis"
         case diskInfo = "Disk Info"
 
         var icon: String {
             switch self {
             case .samples: return "waveform"
             case .programs: return "pianokeys"
+            case .multis: return "square.stack.3d.up"
             case .diskInfo: return "internaldrive"
             }
         }
@@ -67,6 +76,30 @@ struct ContentView: View {
                                     .id(id)
                             } else {
                                 ProgramListView(diskImage: diskImage, selectedProgramID: $selectedProgramID)
+                            }
+                        case .multis:
+                            if selectedMultiID == previewMultiID, previewMulti != nil {
+                                MultiMixEditorView(
+                                    multi: Binding(
+                                        get: { previewMulti ?? .blank() },
+                                        set: { previewMulti = $0 }
+                                    ),
+                                    availableProgramNames: diskImage.programs.map { $0.program.name },
+                                    onClose: { previewMulti = nil; selectedMultiID = nil }
+                                )
+                            } else if let id = selectedMultiID,
+                                      let real = diskImage.multis.first(where: { $0.id == id }) {
+                                MultiPlaceholderView(multiFile: real, diskImage: diskImage,
+                                                     onBack: { selectedMultiID = nil })
+                            } else {
+                                MultiListView(
+                                    diskImage: diskImage,
+                                    selectedMultiID: $selectedMultiID,
+                                    onCreatePreview: {
+                                        previewMulti = .blank()
+                                        selectedMultiID = previewMultiID
+                                    }
+                                )
                             }
                         case .diskInfo:
                             DiskInfoView(diskImage: diskImage)
@@ -113,6 +146,8 @@ struct ContentView: View {
                     try diskImage.load(from: url)
                     selectedSampleID = nil
                     selectedProgramID = nil
+                    selectedMultiID = nil
+                    previewMulti = nil
                     greaseweazle.clearLog()   // dismiss log so the loaded disk shows
                     toast = ToastData(message: "Loaded \(url.lastPathComponent)")
                 } catch {
@@ -159,6 +194,8 @@ struct ContentView: View {
             diskImage.closeImage()
             selectedSampleID = nil
             selectedProgramID = nil
+            selectedMultiID = nil
+            previewMulti = nil
             selectedTab = .samples
             greaseweazle.clearLog()
         }
@@ -210,6 +247,8 @@ struct ContentView: View {
                 try diskImage.createBlankImage(at: url, volumeName: vol)
                 selectedSampleID = nil
                 selectedProgramID = nil
+                selectedMultiID = nil
+                previewMulti = nil
                 toast = ToastData(message: "Created \(url.lastPathComponent)")
             } catch {
                 alertMessage = error.localizedDescription
@@ -232,6 +271,8 @@ struct ContentView: View {
                 try diskImage.load(from: url)
                 selectedSampleID = nil
                 selectedProgramID = nil
+                selectedMultiID = nil
+                previewMulti = nil
             } catch {
                 alertMessage = error.localizedDescription
                 showingAlert = true
@@ -316,6 +357,8 @@ struct ContentView: View {
                 try diskImage.load(from: url)
                 selectedSampleID = nil
                 selectedProgramID = nil
+                selectedMultiID = nil
+                previewMulti = nil
             } catch {
                 alertMessage = error.localizedDescription
                 showingAlert = true

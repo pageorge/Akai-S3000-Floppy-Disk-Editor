@@ -413,6 +413,13 @@ struct SidebarView: View {
                         .onTapGesture { selectedTab = .diskInfo }
                 }
 
+                Section {
+                    Label(diskImage.multis.isEmpty ? "Multis" : "Multis (\(diskImage.multis.count))",
+                          systemImage: "square.stack.3d.up")
+                        .contentShape(Rectangle())
+                        .onTapGesture { selectedTab = .multis }
+                }
+
             } else {
                 VStack(alignment: .leading, spacing: 8) {
                     Label("No Disk Loaded", systemImage: "externaldrive.badge.questionmark")

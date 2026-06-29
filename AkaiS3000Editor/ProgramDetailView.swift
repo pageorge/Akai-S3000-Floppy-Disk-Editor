@@ -13,7 +13,14 @@ struct ProgramDetailView: View {
     @State private var isEditingName = false
     @State private var editedName: String = ""
     @State private var toast: ToastData?
+    @State private var showDeleteKeyzoneConfirm = false
     @State private var keyzoneKeyMonitor: Any? = nil
+    /// True while the keyzone List has keyboard focus. Gates the key monitor
+    /// below, mirroring SidebarView's `sidebarFocused` — without this gate, the
+    /// monitor would fire (or fail to fire reliably) regardless of which list
+    /// actually has focus, since two separate global key monitors are alive at
+    /// once (this one and SidebarView's) whenever a program is open.
+    @FocusState private var keyzoneListFocused: Bool
     @FocusState private var nameFieldFocused: Bool
     init(programFile: AkaiProgramFile, diskImage: AkaiDiskImage) {
         self.programFile = programFile
@@ -113,6 +120,65 @@ struct ProgramDetailView: View {
                             Stepper("\(editedProgram.bendRange) st", value: $editedProgram.bendRange, in: 0...12)
                                 .onChange(of: editedProgram.bendRange) { _, _ in commitProgramEdits() }
                         }
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text("Filter Mod Sources").font(.subheadline).foregroundStyle(.secondary)
+                            HStack {
+                                Text("Slot 1").frame(width: 100, alignment: .leading)
+                                Picker("", selection: $editedProgram.filterModSource1) {
+                                    ForEach(AkaiFilterModSource.allCases) { src in
+                                        Text(src.displayName).tag(src)
+                                    }
+                                }
+                                .labelsHidden()
+                                .onChange(of: editedProgram.filterModSource1) { _, _ in commitProgramEdits() }
+                            }
+                            HStack {
+                                Text("Slot 2").frame(width: 100, alignment: .leading)
+                                Picker("", selection: $editedProgram.filterModSource2) {
+                                    ForEach(AkaiFilterModSource.allCases) { src in
+                                        Text(src.displayName).tag(src)
+                                    }
+                                }
+                                .labelsHidden()
+                                .onChange(of: editedProgram.filterModSource2) { _, _ in commitProgramEdits() }
+                            }
+                            HStack {
+                                Text("Slot 3").frame(width: 100, alignment: .leading)
+                                Picker("", selection: $editedProgram.filterModSource3) {
+                                    ForEach(AkaiFilterModSource.allCases) { src in
+                                        Text(src.displayName).tag(src)
+                                    }
+                                }
+                                .labelsHidden()
+                                .onChange(of: editedProgram.filterModSource3) { _, _ in commitProgramEdits() }
+                            }
+                            Text("Hardware-confirmed: these 3 sources are shared by every keygroup in this program — each keygroup's own Filter section only sets how much (depth), not which source.")
+                                .font(.caption2).foregroundStyle(.secondary)
+                        }
+                        .padding(.top, 6)
+                        VStack(alignment: .leading, spacing: 8) {
+                            HStack {
+                                Text("Stereo Level").frame(width: 100, alignment: .leading)
+                                Slider(value: .init(get: { Double(editedProgram.stereoLevel) },
+                                                   set: { editedProgram.stereoLevel = UInt8($0); commitProgramEdits() }), in: 0...99, step: 1)
+                                Text("\(editedProgram.stereoLevel)").frame(width: 30).font(.system(.body, design: .monospaced))
+                            }
+                            Text("Master volume at the main L/R outputs. 0 = silent (mixed out of the main bus entirely).")
+                                .font(.caption2).foregroundStyle(.secondary).padding(.leading, 100)
+                        }
+                        .padding(.top, 10)
+                        VStack(alignment: .leading, spacing: 8) {
+                            HStack {
+                                Text("Basic Loudness").frame(width: 100, alignment: .leading)
+                                Slider(value: .init(get: { Double(editedProgram.basicLoudness) },
+                                                   set: { editedProgram.basicLoudness = UInt8($0); commitProgramEdits() }), in: 0...99, step: 1)
+                                Text("\(editedProgram.basicLoudness)").frame(width: 30).font(.system(.body, design: .monospaced))
+                            }
+                            Text("Base loudness every note starts from, before velocity sensitivity. 0 = silent regardless of velocity.")
+                                .font(.caption2).foregroundStyle(.secondary).padding(.leading, 100)
+                        }
+                        .padding(.top, 10)
+                        .padding(.bottom, 6)
                     }
                     .padding(.horizontal).padding(.vertical, 8)
 
@@ -127,7 +193,7 @@ struct ProgramDetailView: View {
                         }
                         RoundIconButton(systemImage: "plus") { addKeyzone() }
                         RoundIconButton(systemImage: "minus", isDisabled: selectedKeyzoneIndices.isEmpty) {
-                            deleteSelectedKeyzones()
+                            showDeleteKeyzoneConfirm = true
                         }
                     }
                     .padding(.horizontal).padding(.top, 8)
@@ -138,6 +204,7 @@ struct ProgramDetailView: View {
                                 .listRowBackground(selectedKeyzoneIndices.contains(idx) ? Color.accentColor.opacity(0.15) : Color.clear)
                                 .contentShape(Rectangle())
                                 .onTapGesture {
+                                    keyzoneListFocused = true
                                     let flags = NSEvent.modifierFlags
                                     handleKeyzoneTap(idx, shift: flags.contains(.shift), command: flags.contains(.command))
                                 }
@@ -149,19 +216,24 @@ struct ProgramDetailView: View {
                                         Label("Clone", systemImage: "plus.square.on.square")
                                     }
                                     Divider()
-                                    Button(role: .destructive) { deleteSelectedKeyzones() } label: {
+                                    Button(role: .destructive) { showDeleteKeyzoneConfirm = true } label: {
                                         Label(selectedKeyzoneIndices.count > 1 ? "Delete \(selectedKeyzoneIndices.count) Keyzones" : "Delete", systemImage: "trash")
                                     }
                                 }
                         }
                     }
                     .listStyle(.inset)
+                    .focused($keyzoneListFocused)
                     .onAppear {
                         keyzoneKeyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
-                            // Only act when this list actually has keyboard focus,
-                            // so we never double-handle the same keypress alongside
-                            // SidebarView's identical (always-active) key monitor.
-                            guard !diskImage.isEditingText else { return event }
+                            // Only act when THIS list actually has keyboard focus
+                            // (mirrors SidebarView's sidebarFocused gate) — without
+                            // this, two independently-registered global key monitors
+                            // (this one and SidebarView's) are both alive whenever a
+                            // program is open, and arrow/delete handling becomes
+                            // unreliable regardless of which list the user actually
+                            // clicked into.
+                            guard self.keyzoneListFocused, !diskImage.isEditingText else { return event }
                             if event.keyCode == 53 { // esc
                                 if !self.selectedKeyzoneIndices.isEmpty {
                                     self.selectedKeyzoneIndices = []
@@ -179,7 +251,7 @@ struct ProgramDetailView: View {
                             }
                             if event.keyCode == 51 || event.keyCode == 117 {  // delete / forward-delete
                                 if !selectedKeyzoneIndices.isEmpty {
-                                    deleteSelectedKeyzones()
+                                    showDeleteKeyzoneConfirm = true
                                     return nil
                                 }
                             }
@@ -196,7 +268,7 @@ struct ProgramDetailView: View {
                 VStack(alignment: .leading, spacing: 0) {
                     // Sample pills — only shown when a keyzone is selected
                     if anchorKeyzoneIndex != nil && !diskImage.samples.isEmpty {
-                        GroupBox {
+                        GroupBox("Sample (Zone 1, Left)") {
                             FlowLayout(spacing: 6) {
                                 ForEach(diskImage.samples) { sample in
                                     samplePill(for: sample)
@@ -205,6 +277,21 @@ struct ProgramDetailView: View {
                         }
                         .padding(.horizontal)
                         .padding(.top, 8)
+                        .padding(.bottom, 4)
+
+                        GroupBox("Stereo Right Channel (Zone 2, optional)") {
+                            VStack(alignment: .leading, spacing: 6) {
+                                FlowLayout(spacing: 6) {
+                                    ForEach(diskImage.samples) { sample in
+                                        rightSamplePill(for: sample)
+                                    }
+                                }
+                                Text("Pairs a second sample as the stereo right channel of this same keygroup — the real S3000 convention for stereo playback (one keygroup, two zones panned hard left/right), not two separate keygroups.")
+                                    .font(.caption2)
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+                        .padding(.horizontal)
                         .padding(.bottom, 4)
                     }
 
@@ -251,6 +338,9 @@ struct ProgramDetailView: View {
                                 set: { newValue in applyToSelectedKeyzones(newValue, primaryIndex: idx) }
                             ),
                             selectedCount: selectedKeyzoneIndices.count,
+                            modSource1: editedProgram.filterModSource1,
+                            modSource2: editedProgram.filterModSource2,
+                            modSource3: editedProgram.filterModSource3,
                             onChange: { commitProgramEdits() }
                         )
                         .padding()
@@ -289,6 +379,21 @@ struct ProgramDetailView: View {
             // Only ever RAISE the global flag here, never lower it — see the
             // identical comment in SampleDetailView for why.
             if dirty { diskImage.hasUnsavedChanges = true }
+        }
+        .confirmationDialog(
+            selectedKeyzoneIndices.count > 1
+                ? "Delete \(selectedKeyzoneIndices.count) keyzones?"
+                : "Delete this keyzone?",
+            isPresented: $showDeleteKeyzoneConfirm,
+            titleVisibility: .visible
+        ) {
+            Button(selectedKeyzoneIndices.count > 1 ? "Delete \(selectedKeyzoneIndices.count) Keyzones" : "Delete Keyzone", role: .destructive) {
+                deleteSelectedKeyzones()
+            }
+            .keyboardShortcut(.defaultAction)
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("This removes the keyzone\(selectedKeyzoneIndices.count > 1 ? "s" : "") from the program. The disk image file is not modified until you save.")
         }
         .toast($toast)
     }
@@ -346,6 +451,8 @@ struct ProgramDetailView: View {
             filterModDepth1: 0,
             filterModDepth2: 0,
             filterModDepth3: 0,
+            rightSampleName: "",
+            rightPan: 50,
             // .sample mimics real S3000 hardware: a freshly created keygroup
             // defaults to "use the sample's own loop setting" (pmode 0x00, which
             // is also the natural zero-value default), not an override that
@@ -484,7 +591,10 @@ struct ProgramDetailView: View {
             if old.playbackMode != newValue.playbackMode { kz.playbackMode = newValue.playbackMode }
             if old.velocityLow != newValue.velocityLow { kz.velocityLow = newValue.velocityLow }
             if old.velocityHigh != newValue.velocityHigh { kz.velocityHigh = newValue.velocityHigh }
-            // sampleName: intentionally not copied — see doc comment above.
+            // sampleName / rightSampleName / rightPan: intentionally not copied
+            // — see doc comment above. A stereo pairing is specific to one
+            // keygroup's two samples; broadcasting it to other selected
+            // keygroups would assign the wrong right-channel sample to them.
             editedProgram.keyzones[idx] = kz
         }
     }
@@ -545,6 +655,32 @@ struct ProgramDetailView: View {
         commitProgramEdits()
     }
 
+    /// Toggle whether `name` is assigned as the STEREO RIGHT channel (zone 2)
+    /// of the currently selected keyzone — the real hardware convention for
+    /// stereo playback: one keygroup, left sample in zone 1, right sample in
+    /// zone 2, each panned hard left/right (see AkaiProgramKeyzone.rightSampleName
+    /// doc comment for the manual citation). Tapping the already-assigned right
+    /// sample's pill clears the stereo pairing entirely (reverting to mono);
+    /// tapping any other pill assigns it.
+    ///
+    /// The first time a right sample is assigned to a keyzone that's still at
+    /// pan=0 (center, i.e. never deliberately panned), this also nudges zone 1
+    /// to hard left (−50) to match — the real hardware default for a stereo
+    /// pair — without overriding a pan the user already set on purpose.
+    private func toggleRightSample(_ name: String) {
+        guard let idx = anchorKeyzoneIndex, editedProgram.keyzones.indices.contains(idx) else { return }
+        if editedProgram.keyzones[idx].rightSampleName == name {
+            editedProgram.keyzones[idx].rightSampleName = ""
+        } else {
+            editedProgram.keyzones[idx].rightSampleName = name
+            editedProgram.keyzones[idx].rightPan = 50
+            if editedProgram.keyzones[idx].pan == 0 {
+                editedProgram.keyzones[idx].pan = -50
+            }
+        }
+        commitProgramEdits()
+    }
+
     /// One sample pill: filled red when it's the selected keyzone's assigned
     /// sample, outlined otherwise. Dimmed (and inert) when no keyzone is selected,
     /// since there's nothing yet to assign it to.
@@ -568,6 +704,34 @@ struct ProgramDetailView: View {
             .contentShape(Capsule())
             .onTapGesture { if hasSelection { toggleSample(name) } }
             .help(hasSelection ? (isAssigned ? "Remove from this keyzone" : "Assign to this keyzone")
+                                : "Select a keyzone first")
+    }
+
+    /// One "right channel" pill, for assigning a stereo pair's RIGHT sample to
+    /// zone 2 of the selected keyzone (see toggleRightSample). Filled blue when
+    /// it's the assigned right channel — a different color from the regular
+    /// (red) sample pills so the two rows are never visually confused, since a
+    /// sample could in principle be tapped into either row.
+    @ViewBuilder
+    private func rightSamplePill(for sample: AkaiSample) -> some View {
+        let name = sample.header.name.isEmpty ? sample.directoryEntry.name : sample.header.name
+        let hasSelection = anchorKeyzoneIndex != nil
+        let isAssigned = anchorKeyzoneIndex.flatMap { idx in
+            editedProgram.keyzones.indices.contains(idx) ? editedProgram.keyzones[idx].rightSampleName == name : nil
+        } ?? false
+
+        Text(name)
+            .font(.system(size: 11, weight: .semibold, design: .monospaced))
+            .foregroundStyle(isAssigned ? .white : .primary)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 5)
+            .background(isAssigned ? Color.blue : Color.secondary.opacity(0.12))
+            .clipShape(Capsule())
+            .overlay(Capsule().strokeBorder(isAssigned ? Color.clear : Color.secondary.opacity(0.35)))
+            .opacity(hasSelection ? 1 : 0.45)
+            .contentShape(Capsule())
+            .onTapGesture { if hasSelection { toggleRightSample(name) } }
+            .help(hasSelection ? (isAssigned ? "Remove stereo right channel" : "Assign as stereo right channel (zone 2)")
                                 : "Select a keyzone first")
     }
 }
@@ -729,6 +893,8 @@ struct DrumPresetDropZone: View {
                         filterModDepth1: 0,
                         filterModDepth2: 0,
                         filterModDepth3: 0,
+                        rightSampleName: "",
+                        rightPan: 50,
                         // .noLoop, NOT .sample: drum/percussion hits are one-shots
                         // by nature — force no loop regardless of whatever loop
                         // points happen to be set on the sample itself. Unlike
@@ -794,8 +960,18 @@ struct KeyzoneRow: View {
                 .fill(Color.blue.opacity(0.7))
                 .frame(width: 4, height: 32)
             VStack(alignment: .leading, spacing: 2) {
-                Text(keyzone.sampleName.trimmingCharacters(in: .whitespaces).isEmpty ? "(unnamed)" : keyzone.sampleName)
-                    .font(.system(.body, design: .monospaced)).lineLimit(1)
+                HStack(spacing: 6) {
+                    Text(keyzone.sampleName.trimmingCharacters(in: .whitespaces).isEmpty ? "(unnamed)" : keyzone.sampleName)
+                        .font(.system(.body, design: .monospaced)).lineLimit(1)
+                    if !keyzone.rightSampleName.trimmingCharacters(in: .whitespaces).isEmpty {
+                        Text("L+R")
+                            .font(.system(size: 9, weight: .bold))
+                            .padding(.horizontal, 4).padding(.vertical, 1)
+                            .background(Capsule().fill(Color.blue.opacity(0.2)))
+                            .foregroundStyle(.blue)
+                            .help("Stereo pair: zone 2 = \(keyzone.rightSampleName.trimmingCharacters(in: .whitespaces))")
+                    }
+                }
                 HStack(spacing: 8) {
                     Text("\(midiNoteName(keyzone.lowKey))–\(midiNoteName(keyzone.highKey))")
                         .font(.caption).foregroundStyle(.secondary)
@@ -814,7 +990,9 @@ struct KeyzoneRow: View {
 
     private func midiNoteName(_ note: UInt8) -> String {
         let names = ["C","C#","D","D#","E","F","F#","G","G#","A","A#","B"]
-        return "\(names[Int(note) % 12])\(Int(note) / 12 - 1)"
+        // -2, not -1: matches the real S3000XL's own octave display (confirmed
+        // against hardware), not the common "middle C = C4" MIDI convention.
+        return "\(names[Int(note) % 12])\(Int(note) / 12 - 2)"
     }
 }
 
@@ -823,6 +1001,11 @@ struct KeyzoneRow: View {
 struct KeyzoneEditorView: View {
     @Binding var keyzone: AkaiProgramKeyzone
     var selectedCount: Int = 1
+    /// Program-level mod sources (read-only here — see AkaiProgram.filterModSource1/2/3's
+    /// doc comment for why these aren't per-keyzone). Edited in Program Settings, not here.
+    var modSource1: AkaiFilterModSource = .velocity
+    var modSource2: AkaiFilterModSource = .lfo2
+    var modSource3: AkaiFilterModSource = .env2
     let onChange: () -> Void
 
     var body: some View {
@@ -912,32 +1095,32 @@ struct KeyzoneEditorView: View {
                         }
                         VStack(alignment: .leading, spacing: 6) {
                             HStack {
-                                Text("Vel→Freq").frame(width: 100, alignment: .leading).font(.subheadline)
+                                Text(modSource1.displayName).frame(width: 100, alignment: .leading).font(.subheadline).foregroundStyle(.secondary)
                                 Slider(value: .init(get: { Double(keyzone.filterModDepth1) },
                                                    set: { keyzone.filterModDepth1 = Int8($0); onChange() }), in: -50...50, step: 1)
                                 Text("\(keyzone.filterModDepth1)").frame(width: 35).font(.system(.caption, design: .monospaced))
                             }
-                            Text("How much harder hits open the filter (±50).")
+                            Text("How much this source opens/closes the filter (±50). Source is set in Program Settings (shared by every keygroup).")
                                 .font(.caption2).foregroundStyle(.secondary).padding(.top, 2).padding(.leading, 100)
                         }
                         VStack(alignment: .leading, spacing: 6) {
                             HStack {
-                                Text("Lfo2→Freq").frame(width: 100, alignment: .leading).font(.subheadline)
+                                Text(modSource2.displayName).frame(width: 100, alignment: .leading).font(.subheadline).foregroundStyle(.secondary)
                                 Slider(value: .init(get: { Double(keyzone.filterModDepth2) },
                                                    set: { keyzone.filterModDepth2 = Int8($0); onChange() }), in: -50...50, step: 1)
                                 Text("\(keyzone.filterModDepth2)").frame(width: 35).font(.system(.caption, design: .monospaced))
                             }
-                            Text("Sweeps the filter with the second LFO (±50).")
+                            Text("How much this source sweeps the filter (±50). Source is set in Program Settings (shared by every keygroup).")
                                 .font(.caption2).foregroundStyle(.secondary).padding(.top, 2).padding(.leading, 100)
                         }
                         VStack(alignment: .leading, spacing: 6) {
                             HStack {
-                                Text("Env2→Freq").frame(width: 100, alignment: .leading).font(.subheadline)
+                                Text(modSource3.displayName).frame(width: 100, alignment: .leading).font(.subheadline).foregroundStyle(.secondary)
                                 Slider(value: .init(get: { Double(keyzone.filterModDepth3) },
                                                    set: { keyzone.filterModDepth3 = Int8($0); onChange() }), in: -50...50, step: 1)
                                 Text("\(keyzone.filterModDepth3)").frame(width: 35).font(.system(.caption, design: .monospaced))
                             }
-                            Text("Shapes the filter with the dedicated filter envelope (±50).")
+                            Text("How much this source shapes the filter (±50). Source is set in Program Settings (shared by every keygroup).")
                                 .font(.caption2).foregroundStyle(.secondary).padding(.top, 2).padding(.leading, 100)
                         }
                         VStack(alignment: .leading, spacing: 6) {
@@ -978,6 +1161,19 @@ struct KeyzoneEditorView: View {
                                                set: { keyzone.pan = Int8($0); onChange() }), in: -50...50, step: 1)
                             Text(keyzone.pan == 0 ? "C" : keyzone.pan > 0 ? "R\(keyzone.pan)" : "L\(abs(keyzone.pan))")
                                 .frame(width: 35).font(.system(.caption, design: .monospaced))
+                        }
+                        if !keyzone.rightSampleName.trimmingCharacters(in: .whitespaces).isEmpty {
+                            VStack(alignment: .leading, spacing: 2) {
+                                HStack {
+                                    Text("Right Pan").frame(width: 100, alignment: .leading).font(.subheadline)
+                                    Slider(value: .init(get: { Double(keyzone.rightPan) },
+                                                       set: { keyzone.rightPan = Int8($0); onChange() }), in: -50...50, step: 1)
+                                    Text(keyzone.rightPan == 0 ? "C" : keyzone.rightPan > 0 ? "R\(keyzone.rightPan)" : "L\(abs(keyzone.rightPan))")
+                                        .frame(width: 35).font(.system(.caption, design: .monospaced))
+                                }
+                                Text("Pan for the stereo right channel (zone 2: \(keyzone.rightSampleName.trimmingCharacters(in: .whitespaces))). Real hardware convention is hard left/right (−50/+50).")
+                                    .font(.caption2).foregroundStyle(.secondary).padding(.leading, 100)
+                            }
                         }
 
                     }
@@ -1038,7 +1234,10 @@ struct MidiKeyPicker: View {
     }
 
     private func noteName(_ note: UInt8) -> String {
-        "\(Self.noteNames[Int(note) % 12])\(Int(note) / 12 - 1) (\(note))"
+        // -2, not -1: matches the real S3000XL's own octave display (confirmed
+        // against hardware: keylo=24 shows as "C_0", not "C1"), not the common
+        // "middle C = C4" MIDI convention.
+        "\(Self.noteNames[Int(note) % 12])\(Int(note) / 12 - 2) (\(note))"
     }
 }
 

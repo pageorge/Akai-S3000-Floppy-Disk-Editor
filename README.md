@@ -176,8 +176,13 @@ Starts at **block 5**, 510 × 24-byte entries, spans 12 blocks.
 | `0x14` | `keyhi` | Program-level high key. |
 | `0x15` | `oct` | Octave offset, signed. |
 | `0x16` | `auxch1` | `0xFF`=off. |
+| `0x17` | Stereo Level | 0–99, OUTPUT LEVELS page. Master volume at the main L/R outs. **CONFIRMED by real-hardware byte-diff** (isolated test `0x00`→`0x63`(99)) — found diagnosing a real "no audio at all" bug: this app previously always wrote 0 here, which silently mixes the program out of the L/R bus entirely. Now defaults to 99. |
+| `0x19` | Basic Loudness | 0–99, OUTPUT LEVELS page, LOUDNESS CONTROL column. Base loudness before velocity sensitivity is applied. **CONFIRMED by real-hardware byte-diff** (isolated test `0x00`→`0x50`(80)) — same silence bug as Stereo Level; real factory TEST PROGRAM shows 80 by default, this app now defaults to 99. |
 | `0x29` | `kgxf` | Keygroup crossfade enable. |
 | `0x2A` | `kgnum` | Number of keygroups (must match actual count). |
+| `0x54` | Filter mod source #1 | Index 0–13 into the 14-option list (see Filter section below). **CONFIRMED by real-hardware byte-diff** (isolated test `0x00`→`0x01`, "No Source"→"Modwheel"). Default index 5 (Velocity). Despite being shown on each keygroup's FILT page, this is a PROGRAM-WIDE setting — one shared value for the whole program, not per-keygroup. |
+| `0x55` | Filter mod source #2 | Same as `0x54`, slot #2. **CONFIRMED** the same way. Default index 8 (Lfo2). |
+| `0x56` | Filter mod source #3 | Same as `0x54`, slot #3. **CONFIRMED** the same way. Default index 10 (Env2). |
 
 ### Program keygroup (`akai_program3000kg_s`) — 0xC0 bytes each, starting at file offset `0xC0`
 
@@ -209,9 +214,19 @@ Starts at **block 5**, 510 × 24-byte entries, spans 12 blocks.
 | `0x13` | `pmode` | `0x00`=Sample's Setting, `0x01`=Loop, `0x02`=Loop Until Release, `0x03`=No Loop, `0x04`=Play to End. |
 | `0x16`–`0x17` | `shdra[2]` | Sample header address; `0xFFFF`=none. |
 
-### Filter — remaining gaps
+Each keygroup has 4 of these zones (`+0x22`, `+0x18` each). This app actively uses **zone 1** (the main sample, `AkaiProgramKeyzone.sampleName`) and **zone 2** (an optional stereo right channel, `AkaiProgramKeyzone.rightSampleName`/`rightPan`) — zones 3–4 are left as empty placeholders.
 
-Mod-depth source selectors (which of Modwheel/Bend/Pressure/External/Key/Lfo1/Env1/Velocity/Lfo2/Env2, or their note-on-only "!" variants, each of the 3 depth slots above routes from) and ENV2's own 4-stage rate/level envelope.
+**Stereo playback is one keygroup with two zones, not two keygroups** — confirmed by the S3000XL Operator's Manual (p.51–52): *"the left and right samples are assigned to their own zones (1 and 2 respectively) in one keygroup and each zone is panned hard left and hard right"*, and explicitly: *"a stereo program with 5 keygroups would typically show 10 samples (5 x L and R)."* Recording in STEREO on real hardware produces two separate MONO sample files (suffixed `-L`/`-R`) — there's no native stereo sample format on the S3000 — which this app's WAV import already matches. The app exposes zone 2 as a second "Stereo Right Channel" pill row in the program editor; assigning a sample there sets zone 1 to hard left (−50, if it was still centered) and zone 2 to hard right (+50) automatically, matching the real hardware default, with both adjustable afterward.
+
+### Filter — mod sources CONFIRMED (and a surprise: they're program-level, not per-keygroup)
+
+The 3 mod-depth source options are fully confirmed (captured directly off a real S3000XL screen, see `AkaiFilterModSource`): **No Source, Modwheel, Bend, Pressure, External, Velocity, Key, Lfo1, Lfo2, Env1, Env2, !Modwheel, !Bend, !External** — 14 total (raw values 0–13, matching this exact cycle order), with only Modwheel/Bend/External getting a note-on-only "!" variant.
+
+**Byte offsets are also confirmed** — program header `0x54`/`0x55`/`0x56`, one byte per slot, each storing a direct index (0–13) into the list above. Found via a sequence of isolated single-variable hardware tests: change ONLY one slot's source from "No Source" to "Modwheel", leave everything else untouched, SAVE+GO, diff against the previous capture — each round produced exactly one new changed byte (`0x54`, then `0x55`, then `0x56`, each going `0x00`→`0x01`).
+
+**Important discovery along the way:** although each keygroup's FILT page displays its own source dropdowns, these 3 bytes live in the **program header** (`0x00`–`0xBF`), not in any keygroup's own `0xC0`-byte region. That means the source choice is **shared by every keygroup in the program** — only the *depth amount* (`0x97`/`0x98`/`0x99` on each keygroup) is genuinely per-keygroup. This was found by accident: an early two-keygroup test diff showed the change landing in the header rather than either keygroup's body. The app's UI reflects this: the 3 source pickers live in Program Settings (apply to the whole program), while each keygroup's Filter section only shows the depth sliders, with the current (shared) source name displayed read-only for context.
+
+Still open: ENV2's own 4-stage rate/level envelope (semantics confirmed by the manual, no byte offsets investigated).
 
 ### Akai character encoding
 
@@ -221,6 +236,37 @@ Mod-depth source selectors (which of Modwheel/Bend/Pressure/External/Key/Lfo1/En
 | `10` | `' '` | `38` | `'+'` |
 | `11`–`36` | `'A'`–`'Z'` | `39` | `'-'` |
 | | | `40` | `'.'` |
+
+### MULTI files — ALL 16 parts CONFIRMED and fully editable
+
+MULTI files (`AKAI_MULTI3000_FTYPE`, `'m'+0x80`) let a real S3000XL layer up to 16 programs together, each on its own MIDI channel with its own level/pan/FX send (manual, p.37–38, the "MIX" page). Unlike every other format in this README, **akaiutil has no struct at all for this file type** — only the bare file-type byte and default name (`"MULTI FILE"`). Every other offset in this document started from at least a partial struct skeleton that hardware testing then confirmed; MULTI started from nothing, and was reverse-engineered entirely from scratch via isolated hardware byte-diff tests.
+
+**Confirmed** (8 captures total: a baseline, one isolated change per field on Part 1, plus one more isolating the per-part stride via Part 2):
+
+| Offset | Field | Notes |
+|---|---|---|
+| `0x000`–`0x3FF` | Multi-level header | Not yet investigated (1024 bytes). |
+| `0x400 + (N-1)×0xC0` | Part N's record base (N=1...16) | **Stride confirmed**: Part 2 landed exactly `0xC0` (192) bytes after Part 1. `header(0x400) + 16×0xC0 = 0x1000 (4096)` exactly matches every multi file's real size — no ambiguity. |
+| `+0x00` | Record marker | Constant `0x01` — purpose unconfirmed. |
+| `+0x01`–`+0x02` | Program link pointer | 2 bytes, sampler-managed (same pattern as `kg1a`/`shdra` elsewhere) — recalculated whenever the program assignment changes; not written by this app. |
+| `+0x03`–`+0x0E` | **Program name** | 12 bytes, Akai-encoded. Confirmed on both Part 1 and Part 2, byte-for-byte. |
+| `+0x0F` | Separator/padding | Unconfirmed. |
+| `+0x10` | **Channel** | 0-indexed. Confirmed: `0x00`→`0x01` for channel 1→2. |
+| `+0x11`–`+0x16` | Unconfirmed gap | 6 bytes. |
+| `+0x17` | **Level** | 0–99 direct. Confirmed: default `99`→`56`, matches the real hardware default shown on screen. |
+| `+0x18` | **Pan** | Signed. Confirmed: default `0`→`2`. |
+| `+0x19`–`+0x70` | Unconfirmed gap | 88 bytes — may hold fields from the OUT/TUNE/RNGE/PRIO tabs visible on the same hardware screen, or may be padding. |
+| `+0x71` | **Fx bus** | Index 0–4. Confirmed: `0`(OFF)→`1`(FX1). FX2/RV3/RV4 = 2/3/4 inferred from cycle order, not independently isolated. |
+| `+0x72` | **Send** | 0–99 direct. Confirmed: default `25`→`60`, matches the real hardware default shown on screen. |
+| `+0xBE`–`+0xBF` | Second link pointer | 2 bytes, sampler-managed, confirmed present on both Part 1 and Part 2 (resolves from `0xFFFF`/none once a program is assigned — same convention as a velocity zone's `shdra`). Not written by this app. |
+
+This app **reads and writes ALL 16 parts of a real MULTI file** using these confirmed offsets (`AkaiMultiFormat`, `applyMultiPartEdit`) — editable directly from the Multis tab when you select a real file. Everything outside the confirmed fields (the multi-level header and the two small per-part gaps) is read but never written, preserved byte-for-byte.
+
+**Not yet confirmed:**
+- The two small unconfirmed gaps within each part's own record.
+- The multi-level header's internal layout (bytes `0x000`–`0x3FF`), including wherever the multi's own name is stored — renaming currently only patches the directory entry's name, not any internal field.
+
+Creating a **brand-new** multi file from scratch on disk still isn't possible — that would need writing the multi-level header and the per-part link pointers, neither of which is understood yet. The app's **"New Multi (Preview)" editor** (same MIX-page UI, reused) remains available for planning a multi before it has a backing file, clearly banner-marked as not yet saveable for that specific case.
 
 ---
 

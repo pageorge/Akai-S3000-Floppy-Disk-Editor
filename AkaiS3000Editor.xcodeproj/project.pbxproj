@@ -18,12 +18,15 @@
 		A1000009 /* SupportingViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1000009 /* SupportingViews.swift */; };
 		AF33648C2FE58687002905E2 /* GreaseweazleRunner.swift in Sources */ = {isa = PBXBuildFile; fileRef = AF33648B2FE58687002905E2 /* GreaseweazleRunner.swift */; };
 		AF45316C2FE042900063F9EF /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = AF45316B2FE042900063F9EF /* Assets.xcassets */; };
+		AF857FA62FF2A3E400FE438E /* MultiDetailView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AF857FA52FF2A3E400FE438E /* MultiDetailView.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
 		AF3138DD2FF040E50040BCA9 /* README.md */ = {isa = PBXFileReference; lastKnownFileType = net.daringfireball.markdown; path = README.md; sourceTree = "<group>"; };
 		AF33648B2FE58687002905E2 /* GreaseweazleRunner.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GreaseweazleRunner.swift; sourceTree = "<group>"; };
 		AF45316B2FE042900063F9EF /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
+		AF857FA52FF2A3E400FE438E /* MultiDetailView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MultiDetailView.swift; sourceTree = "<group>"; };
+		AFB9FA582FF2A04800E234D5 /* AkaiS3000Editor.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = AkaiS3000Editor.entitlements; sourceTree = "<group>"; };
 		B1000001 /* AkaiS3000EditorApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AkaiS3000EditorApp.swift; sourceTree = "<group>"; };
 		B1000002 /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
 		B1000003 /* AkaiDiskImage.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AkaiDiskImage.swift; sourceTree = "<group>"; };
@@ -64,6 +67,8 @@
 		E1000002 /* AkaiS3000Editor */ = {
 			isa = PBXGroup;
 			children = (
+				AF857FA52FF2A3E400FE438E /* MultiDetailView.swift */,
+				AFB9FA582FF2A04800E234D5 /* AkaiS3000Editor.entitlements */,
 				AF33648B2FE58687002905E2 /* GreaseweazleRunner.swift */,
 				AF45316B2FE042900063F9EF /* Assets.xcassets */,
 				B1000001 /* AkaiS3000EditorApp.swift */,
@@ -163,6 +168,7 @@
 				AF33648C2FE58687002905E2 /* GreaseweazleRunner.swift in Sources */,
 				A1000005 /* WelcomeView.swift in Sources */,
 				A1000006 /* SampleDetailView.swift in Sources */,
+				AF857FA62FF2A3E400FE438E /* MultiDetailView.swift in Sources */,
 				A1000007 /* ProgramDetailView.swift in Sources */,
 				A1000008 /* PianoKeyboardView.swift in Sources */,
 				A1000009 /* SupportingViews.swift in Sources */,

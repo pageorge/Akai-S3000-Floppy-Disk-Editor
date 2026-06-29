@@ -836,7 +836,9 @@ struct DiskInfoView: View {
 
     private func midiNoteName(_ note: UInt8) -> String {
         let names = ["C","C#","D","D#","E","F","F#","G","G#","A","A#","B"]
-        let octave = Int(note) / 12 - 1
+        // -2, not -1: matches the real S3000XL's own octave display (confirmed
+        // against hardware), not the common "middle C = C4" MIDI convention.
+        let octave = Int(note) / 12 - 2
         return "\(names[Int(note) % 12])\(octave)"
     }
 }

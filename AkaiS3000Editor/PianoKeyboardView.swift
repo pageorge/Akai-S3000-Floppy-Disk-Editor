@@ -104,7 +104,10 @@ struct PianoKeyboardView: View {
     private func labelsLayer(whiteKeyWidth: CGFloat, whiteKeyHeight: CGFloat) -> some View {
         ForEach([24,36,48,60,72,84,96,108].filter { $0 >= startNote && $0 <= endNote }, id: \.self) { note in
             let x = xPositionForNote(note, whiteKeyWidth: whiteKeyWidth)
-            Text("C\(note/12 - 1)")
+            // Octave numbering matches the real S3000XL's own display convention
+            // (confirmed against hardware: keylo=24 shows as "C_0" on the Akai
+            // screen, not "C1"), NOT the common "middle C = C4" MIDI convention.
+            Text("C\(note/12 - 2)")
                 .font(.system(size: 8))
                 .foregroundStyle(.secondary)
                 .offset(x: x + 1, y: whiteKeyHeight - 14)
@@ -222,7 +225,9 @@ struct PianoKeyboardView: View {
 
     private func midiNoteName(_ note: UInt8) -> String {
         let names = ["C","C#","D","D#","E","F","F#","G","G#","A","A#","B"]
-        return "\(names[Int(note) % 12])\(Int(note) / 12 - 1)"
+        // -2, not -1: matches the real S3000XL's own octave display (confirmed
+        // against hardware), not the common "middle C = C4" MIDI convention.
+        return "\(names[Int(note) % 12])\(Int(note) / 12 - 2)"
     }
 }
 

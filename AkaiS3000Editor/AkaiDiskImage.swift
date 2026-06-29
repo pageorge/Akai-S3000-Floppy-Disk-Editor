@@ -64,6 +64,12 @@ struct AkaiDiskFormat {
 
     static let ftypeSample: UInt8   = 0xF3
     static let ftypeProgram: UInt8  = 0xF0
+    /// AKAI_MULTI3000_FTYPE ('m'+0x80) — akaiutil only documents the file-type
+    /// byte and default name for this type ("MULTI FILE"); it has NO struct at
+    /// all for the internal layout. This app recognizes real multi files on
+    /// disk (so they're visible/renameable/deletable) but does not decode or
+    /// edit their actual content — see AkaiMultiFile's doc comment.
+    static let ftypeMulti: UInt8    = 0xED
 
     static let fatFree: UInt16      = 0x0000
     static let fatSystem: UInt16    = 0x4000
@@ -95,11 +101,13 @@ struct AkaiDirectoryEntry {
 
     var isSample:  Bool { fileType == AkaiDiskFormat.ftypeSample }
     var isProgram: Bool { fileType == AkaiDiskFormat.ftypeProgram }
+    var isMulti:   Bool { fileType == AkaiDiskFormat.ftypeMulti }
 
     var displayType: String {
         switch fileType {
         case AkaiDiskFormat.ftypeSample:  return "Sample"
         case AkaiDiskFormat.ftypeProgram: return "Program"
+        case AkaiDiskFormat.ftypeMulti:   return "Multi"
         default: return String(format: "0x%02X", fileType)
         }
     }
@@ -238,9 +246,75 @@ struct AkaiProgramKeyzone {
     /// three-for-three by isolated single-variable tests. Source selector not
     /// yet located for any of the three depths.
     var filterModDepth3: Int8
+    /// Zone 2: the RIGHT channel of a stereo sample pair, assigned alongside
+    /// `sampleName` (the LEFT channel, in zone 1) within this SAME keygroup —
+    /// confirmed as the real hardware convention by the S3000XL Operator's
+    /// Manual (p.51-52): "the left and right samples are assigned to their own
+    /// zones (1 and 2 respectively) in ONE keygroup and each zone is panned hard
+    /// left and hard right," and explicitly NOT two separate keygroups — "a
+    /// stereo program with 5 keygroups would typically show 10 samples (5 x L
+    /// and R)." Empty string = mono keygroup, no zone 2. When non-empty, zone 2
+    /// mirrors zone 1's velocity range/tune/filter-trim/playback mode (they're
+    /// meant to trigger together) — only the sample name and pan genuinely
+    /// differ between the two zones.
+    var rightSampleName: String
+    /// Zone 2's pan, signed ±50. Real hardware convention is hard right (+50)
+    /// to pair with zone 1 panned hard left (−50) — the app sets both
+    /// automatically the first time a right-channel sample is assigned, but
+    /// either can be adjusted afterward.
+    var rightPan: Int8
     var playbackMode: AkaiPlaybackMode
     var velocityLow: UInt8
     var velocityHigh: UInt8
+}
+
+/// The full set of modulation sources selectable for any of the 3 filter
+/// mod-depth slots, captured directly off a real S3000XL's FILT page (cycling
+/// through every option via the DATA wheel) — not inferred from the manual.
+/// Raw values are the CONFIRMED on-disk index (0–13), matching the hardware's
+/// own cycle order exactly: a real-hardware byte-diff test (No Source →
+/// Modwheel for slot 1) produced exactly one changed byte, going `0x00`→`0x01`
+/// — i.e. a direct cycle-position index, not a separate bit-flag or code.
+/// Three sources (Modwheel, Bend, External) have a second "!" note-on-only
+/// variant; the others (Pressure, Velocity, Key, Lfo1, Lfo2, Env1, Env2) do
+/// not — confirmed by cycling the full list on real hardware, not assumed for
+/// symmetry.
+enum AkaiFilterModSource: UInt8, CaseIterable, Identifiable, Codable {
+    case noSource        = 0
+    case modwheel        = 1
+    case bend            = 2
+    case pressure        = 3
+    case external        = 4
+    case velocity        = 5
+    case key             = 6
+    case lfo1            = 7
+    case lfo2            = 8
+    case env1            = 9
+    case env2            = 10
+    case modwheelNoteOn  = 11
+    case bendNoteOn      = 12
+    case externalNoteOn  = 13
+
+    var id: UInt8 { rawValue }
+
+    var displayName: String {
+        switch self {
+        case .noSource:       return "No Source"
+        case .modwheel:       return "Modwheel"
+        case .bend:           return "Bend"
+        case .pressure:       return "Pressure"
+        case .external:       return "External"
+        case .velocity:       return "Velocity"
+        case .key:            return "Key"
+        case .lfo1:           return "Lfo1"
+        case .lfo2:           return "Lfo2"
+        case .env1:           return "Env1"
+        case .env2:           return "Env2"
+        case .modwheelNoteOn: return "!Modwheel"
+        case .bendNoteOn:     return "!Bend"
+        case .externalNoteOn: return "!External"
+        }
+    }
 }
 
 /// Velocity-zone playback mode (`pmode` @ +0x13 in `akai_program1000kgvelzone_s`).
@@ -296,6 +370,47 @@ struct AkaiProgram {
     var midiChannel: UInt8
     var polyphony: UInt8
     var bendRange: UInt8
+    /// Master "stereo level" — program header offset `0x17`, 0–99. The OUTPUT
+    /// LEVELS page's level of the program at the main L/R stereo outs (manual,
+    /// p.66): "By setting this field to 00, you may use this parameter to mix a
+    /// program out of the L/R mix completely." CONFIRMED BY REAL HARDWARE
+    /// BYTE-DIFF: an isolated test changing ONLY this field 0→99 produced that
+    /// exact byte change (`0x17`: `0x00`→`0x63`), found while diagnosing a
+    /// real "no audio at all" bug — this app previously always wrote 0 here
+    /// (akaiutil leaves this whole region as undocumented dummy bytes), which is
+    /// the real silence, since 0 mixes the program out of the L/R bus entirely.
+    var stereoLevel: UInt8
+    /// "Basic loudness" — program header offset `0x19`, 0–99. Same OUTPUT LEVELS
+    /// page, LOUDNESS CONTROL column: the base loudness every note starts from
+    /// before velocity sensitivity (`velocity > loud`) is applied — manual:
+    /// "at a setting of 99, the program is at maximum level but you will not
+    /// have any velocity sensitivity." CONFIRMED BY REAL HARDWARE BYTE-DIFF:
+    /// isolated test 0→80 produced exactly one changed byte (`0x19`:
+    /// `0x00`→`0x50`). A real factory TEST PROGRAM shows this at 80 by default;
+    /// this app previously always wrote 0, contributing to the same silence bug
+    /// as stereoLevel above.
+    var basicLoudness: UInt8
+    /// Modulation SOURCE for filter mod-depth slot #1/#2/#3 — program header
+    /// offsets `0x54`/`0x55`/`0x56`. CONFIRMED BY REAL HARDWARE BYTE-DIFF: a
+    /// sequence of isolated single-variable tests, each changing exactly ONE
+    /// slot's source from "No Source" to "Modwheel" (leaving the others and all
+    /// depth amounts untouched), produced exactly one new changed byte each
+    /// time: `0x54`→`0x01`, then `0x55`→`0x01`, then `0x56`→`0x01` — a direct
+    /// index into the 14-option list (see AkaiFilterModSource), one byte per
+    /// slot, three consecutive bytes.
+    ///
+    /// IMPORTANT: despite being shown per-keygroup on the real FILT page, these
+    /// are PROGRAM-LEVEL bytes (within the 0xC0-byte header, not any keygroup's
+    /// own 0xC0-byte region) — i.e. one shared source routing per slot for the
+    /// WHOLE program, not per keygroup. Only the depth AMOUNTS
+    /// (filterModDepth1/2/3 on AkaiProgramKeyzone) are genuinely per-keygroup;
+    /// the source choice applies to every keygroup in the program at once. This
+    /// was discovered by accident: an early test diffing two keygroups in the
+    /// same program showed the change landing in the header region rather than
+    /// either keygroup's body.
+    var filterModSource1: AkaiFilterModSource
+    var filterModSource2: AkaiFilterModSource
+    var filterModSource3: AkaiFilterModSource
     var rawData: Data
 }
 
@@ -315,6 +430,162 @@ struct AkaiProgramFile: Identifiable {
     var offset: Int
 }
 
+/// One "part" (1–16) of a MULTI — the MIX page's per-part settings, as shown
+/// on the real S3000XL screen: program assignment, MIDI channel, level, pan,
+/// FX bus + send.
+///
+/// ALL 16 PARTS ARE NOW CONFIRMED BY REAL HARDWARE BYTE-DIFF (see
+/// AkaiMultiFile's doc comment for the full method). Part 1's fields were
+/// isolated first (7 captures), then one more test — assigning ONLY Part 2's
+/// program — revealed the per-part STRIDE: Part 2's record landed at absolute
+/// `0x4C0`, exactly `0xC0` (192) bytes after Part 1's `0x400`. Confirmed beyond
+/// doubt: `header(0x400) + 16 × 0xC0 = 0x1000 (4096)` exactly matches every
+/// multi file's real size.
+///
+/// So Part N's record starts at absolute `0x400 + (N-1) × 0xC0`
+/// (`AkaiMultiFormat.partBase`), and within that record, relative to the
+/// part's own base:
+///   - `+0x00`: constant `0x01` (record marker, unconfirmed purpose)
+///   - `+0x01`–`+0x02`: 2-byte program link pointer, sampler-managed (like
+///     kg1a/shdra elsewhere) — changes whenever the program assignment
+///     changes, but isn't something we compute ourselves
+///   - `+0x03`–`+0x0E`: **program name**, 12 bytes Akai-encoded (confirmed on
+///     both Part 1 and Part 2: `TEST PROGRAM` → `TEST PROG 2`/`TEST PROG 1`
+///     byte-for-byte at the predicted relative position both times)
+///   - `+0x0F`: separator/padding, unconfirmed
+///   - `+0x10`: **channel**, 0-indexed (confirmed: `0x00`→`0x01` for ch.1→ch.2)
+///   - `+0x11`–`+0x16`: unconfirmed gap (6 bytes)
+///   - `+0x17`: **level**, 0–99 direct (confirmed: default `99`→`56`)
+///   - `+0x18`: **pan**, signed (confirmed: default `0`→`2`)
+///   - `+0x19`–`+0x70`: unconfirmed gap (88 bytes)
+///   - `+0x71`: **fx bus**, index into OFF/FX1/FX2/RV3/RV4 (confirmed: `0`→`1`
+///     for OFF→FX1; FX2/RV3/RV4 = 2/3/4 inferred from cycle order, NOT
+///     independently tested)
+///   - `+0x72`: **send**, 0–99 direct (confirmed: default `25`→`60`)
+///   - `+0xBE`–`+0xBF`: a second 2-byte sampler-managed pointer (confirmed on
+///     both Part 1 and Part 2; resolves from `0xFFFF`/none to a real value once
+///     a program is assigned — same convention as a velocity zone's `shdra`).
+///     Not written by this app.
+///
+/// This app reads/writes ALL 16 parts of a real MULTI file using these
+/// offsets (see `applyMultiPartEdit`). The two small gaps within each part's
+/// own record (`+0x11`–`+0x16`, `+0x19`–`+0x70`) remain unconfirmed and are
+/// preserved byte-for-byte, never written.
+struct AkaiMultiPart {
+    /// Empty = no program assigned (shown as "?" on the real hardware screen).
+    var programName: String = ""
+    /// 1-indexed (1...16) in this model; on-disk is 0-indexed — translated at
+    /// the read/write boundary, matching AkaiProgram.midiChannel's convention.
+    var channel: UInt8 = 1
+    var level: UInt8 = 99
+    var pan: Int8 = 0
+    var fxBus: AkaiFxBus = .off
+    var fxSend: UInt8 = 25
+}
+
+/// FX bus assignment for a multi part's effects send (manual, p.38: "FX1, FX2,
+/// RV3, RV4"), and separately for a program's own FX bus (OUTPUT LEVELS page).
+enum AkaiFxBus: String, CaseIterable, Identifiable {
+    case off = "OFF"
+    case fx1 = "FX1"
+    case fx2 = "FX2"
+    case rv3 = "RV3"
+    case rv4 = "RV4"
+    var id: String { rawValue }
+
+    /// On-disk index at Part 1's `+0x71`. OFF=0 and FX1=1 are CONFIRMED by
+    /// real-hardware byte-diff; FX2=2/RV3=3/RV4=4 are inferred from the cycle
+    /// order shown on screen, not independently isolated yet.
+    var byteValue: UInt8 {
+        switch self {
+        case .off: return 0
+        case .fx1: return 1
+        case .fx2: return 2
+        case .rv3: return 3
+        case .rv4: return 4
+        }
+    }
+
+    init(byteValue: UInt8) {
+        self = AkaiFxBus.allCases.first { $0.byteValue == byteValue } ?? .off
+    }
+}
+
+/// A MULTI: up to 16 parts, each layering a program on its own MIDI channel
+/// with its own level/pan/FX send — the manual's "MIX" page. See
+/// AkaiMultiFile's doc comment for what is and isn't real here yet.
+struct AkaiMulti {
+    var name: String
+    var parts: [AkaiMultiPart]
+
+    static func blank(name: String = "NEW MULTI") -> AkaiMulti {
+        AkaiMulti(name: name, parts: (1...16).map { i in
+            var p = AkaiMultiPart()
+            p.channel = UInt8(min(i, 16))
+            return p
+        })
+    }
+}
+
+/// A MULTI file found on (or staged for) disk.
+///
+/// Unlike every other file type in this app: akaiutil has NO struct at all for
+/// MULTI files, only the bare file-type byte and default name
+/// (`AKAI_MULTI3000_FTYPE`/`AKAI_MULTI3000_FNAME`). Every other format in this
+/// app started from at least a partial struct skeleton that hardware testing
+/// then confirmed/corrected; MULTI started from nothing, and was reverse-
+/// engineered entirely from scratch via isolated hardware byte-diff tests —
+/// same method as the filter section, just with no prior art to start from.
+///
+/// CONFIRMED (real-hardware byte-diff, 8 captures total: a baseline, one
+/// isolated change per field on Part 1, plus one more isolating the per-part
+/// stride via Part 2):
+///   - Multi-level header spans the first `0x400` (1024) bytes of the file.
+///     Its own internal layout (the multi's own name field, etc.) is NOT yet
+///     investigated.
+///   - Every part's full field layout, ALL 16 of them — see AkaiMultiPart's
+///     doc comment for the complete offset table and the stride confirmation.
+///
+/// NOT yet confirmed:
+///   - The two small unconfirmed gaps within each part's own record.
+///   - The multi-level header's internal layout (bytes `0x000`–`0x3FF`),
+///     including wherever the multi's own name is stored — renaming currently
+///     only patches the directory entry's name, not any internal field.
+///
+/// Practical effect on this app's behavior:
+///   - `isContentReal: true` (a real file on disk) — ALL 16 parts' confirmed
+///     fields are decoded from real bytes and safe to edit/save (see
+///     `applyMultiPartEdit`). Only the two small per-part gaps and the
+///     multi-level header are left untouched.
+///   - `isContentReal: false` — a fresh in-app "preview" multi, entirely
+///     in-memory, never written anywhere. Still useful for planning a multi
+///     before it has a backing file on disk to save into.
+struct AkaiMultiFile: Identifiable {
+    var id = UUID()
+    var directoryEntry: AkaiDirectoryEntry?
+    var multi: AkaiMulti
+    var isContentReal: Bool
+}
+
+/// Confirmed absolute byte offsets for a real MULTI file's part records —
+/// see AkaiMultiPart's doc comment for the full evidence/method. `partIndex`
+/// is 0-based (0...15) for Parts 1...16.
+struct AkaiMultiFormat {
+    static let firstPartBase       = 0x400
+    static let partStride          = 0xC0   // confirmed via Part 2's program-assignment test
+    static let relNameOffset       = 0x03   // 12 bytes, Akai-encoded
+    static let relChannelOffset    = 0x10   // 0-indexed
+    static let relLevelOffset      = 0x17   // 0-99 direct
+    static let relPanOffset        = 0x18   // signed
+    static let relFxBusOffset      = 0x71   // index, see AkaiFxBus.byteValue
+    static let relSendOffset       = 0x72   // 0-99 direct
+
+    static func partBase(_ partIndex: Int) -> Int { firstPartBase + partIndex * partStride }
+    /// Minimum file size for `partIndex`'s confirmed fields to be safely
+    /// readable/writable.
+    static func minSizeForPart(_ partIndex: Int) -> Int { partBase(partIndex) + relSendOffset + 1 }
+}
+
 // MARK: - Disk Image
 
 class AkaiDiskImage: ObservableObject {
@@ -322,6 +593,11 @@ class AkaiDiskImage: ObservableObject {
     @Published var diskName    = ""
     @Published var samples:  [AkaiSample]      = []
     @Published var programs: [AkaiProgramFile] = []
+    /// Real MULTI files found on disk. See AkaiMultiFile's doc comment —
+    /// all 16 parts' confirmed fields are decoded from real bytes and safe to
+    /// edit/save; only two small per-part gaps and the multi-level header
+    /// remain undecoded.
+    @Published var multis: [AkaiMultiFile] = []
     @Published var freeBlocks  = 0
     @Published var totalBlocks = AkaiDiskFormat.totalBlocks
     /// True whenever there are edits (sample/program changes, deletions) that
@@ -357,6 +633,7 @@ class AkaiDiskImage: ObservableObject {
         imageURL = nil
         samples = []
         programs = []
+        multis = []
         diskName = ""
         freeBlocks = 0
         totalBlocks = AkaiDiskFormat.totalBlocks
@@ -379,10 +656,11 @@ class AkaiDiskImage: ObservableObject {
             ? akaiString(from: data, offset: labelOffset, length: 12)
             : ""
         freeBlocks = countFreeBlocks(data: data)
-        let (parsedSamples, parsedPrograms) = try parseDirectory(data: data)
+        let (parsedSamples, parsedPrograms, parsedMultis) = try parseDirectory(data: data)
         DispatchQueue.main.async {
             self.samples  = parsedSamples
             self.programs = parsedPrograms
+            self.multis   = parsedMultis
             self.isLoaded = true
         }
     }
@@ -454,7 +732,7 @@ class AkaiDiskImage: ObservableObject {
 
     // MARK: - Directory
 
-    private func parseDirectory(data: Data) throws -> ([AkaiSample], [AkaiProgramFile]) {
+    private func parseDirectory(data: Data) throws -> ([AkaiSample], [AkaiProgramFile], [AkaiMultiFile]) {
         let dirStart   = AkaiDiskFormat.volDirStartBlock * AkaiDiskFormat.blockSize
         let entrySize  = AkaiDiskFormat.dirEntrySize
         let maxEntries = AkaiDiskFormat.volDirEntryCount
@@ -468,7 +746,8 @@ class AkaiDiskImage: ObservableObject {
             // empty slot (type 0x00) is skipped, NOT a terminator. Deleting a
             // file in the middle leaves a hole, and later files must still be
             // read. So we continue scanning rather than breaking here.
-            guard ftype == AkaiDiskFormat.ftypeSample || ftype == AkaiDiskFormat.ftypeProgram else { continue }
+            guard ftype == AkaiDiskFormat.ftypeSample || ftype == AkaiDiskFormat.ftypeProgram
+                || ftype == AkaiDiskFormat.ftypeMulti else { continue }
             let name  = akaiString(from: data, offset: base, length: 12)
             let size  = UInt32(data[base+17]) | (UInt32(data[base+18]) << 8) | (UInt32(data[base+19]) << 16)
             let start = UInt16(data[base+20]) | (UInt16(data[base+21]) << 8)
@@ -479,6 +758,7 @@ class AkaiDiskImage: ObservableObject {
 
         var parsedSamples:  [AkaiSample]      = []
         var parsedPrograms: [AkaiProgramFile] = []
+        var parsedMultis:   [AkaiMultiFile]   = []
         var processedNames = Set<String>()
 
         for entry in entries {
@@ -490,10 +770,34 @@ class AkaiDiskImage: ObservableObject {
                 let parts = entries.filter { $0.isSample && $0.name == entry.name }
                     .sorted { $0.startBlock < $1.startBlock }
                 if let sample = try? parseSample(parts: parts, data: data) { parsedSamples.append(sample) }
+            } else if entry.isMulti {
+                // Most of the content is NOT decoded (the multi-level header and
+                // two small per-part gaps — no struct exists for those) — but
+                // ALL 16 parts' confirmed fields ARE decoded (see AkaiMultiPart's
+                // doc comment for the confirmed stride/offsets).
+                let chain = fatChain(from: Int(entry.startBlock), data: data)
+                let fileData = readFromChain(chain, fileOffset: 0, length: Int(entry.size), data: data)
+                var parts = [AkaiMultiPart](repeating: AkaiMultiPart(), count: 16)
+                for partIndex in 0..<16 {
+                    guard fileData.count >= AkaiMultiFormat.minSizeForPart(partIndex) else { continue }
+                    let base = AkaiMultiFormat.partBase(partIndex)
+                    var p = AkaiMultiPart()
+                    p.programName = akaiString(from: fileData, offset: base + AkaiMultiFormat.relNameOffset, length: 12)
+                    p.channel = fileData[base + AkaiMultiFormat.relChannelOffset] &+ 1   // disk 0-indexed -> model 1-indexed
+                    p.level = fileData[base + AkaiMultiFormat.relLevelOffset]
+                    p.pan = Int8(bitPattern: fileData[base + AkaiMultiFormat.relPanOffset])
+                    p.fxBus = AkaiFxBus(byteValue: fileData[base + AkaiMultiFormat.relFxBusOffset])
+                    p.fxSend = fileData[base + AkaiMultiFormat.relSendOffset]
+                    parts[partIndex] = p
+                }
+                parsedMultis.append(AkaiMultiFile(
+                    directoryEntry: entry,
+                    multi: AkaiMulti(name: entry.name, parts: parts),
+                    isContentReal: true))
             }
         }
 
-        return (parsedSamples, parsedPrograms)
+        return (parsedSamples, parsedPrograms, parsedMultis)
     }
 
     // MARK: - Sample Parsing
@@ -534,23 +838,43 @@ class AkaiDiskImage: ObservableObject {
         // back to .noLoop for any unrecognized byte value.
         let playbackMode = AkaiSamplePlaybackMode(rawValue: headerData[0x13]) ?? .noLoop
 
-        // loop[0]: at[4] @ 0x26 (return-to point), len[4] @ 0x2C (loop length in
-        // samples). The real loop region is [at, at+len) — verified by hardware
-        // testing: at=48,len=48 produces a 48-sample loop (48→96), NOT a loop to
-        // the buffer end. The end can never exceed numSamples (there's no audio
-        // past it), so it's clamped to the buffer's real size — not a fallback,
-        // just respecting that the data physically ends there. The factory SINE
-        // (at=192,len=168) gives min(360,256)=256, which happens to reach the
-        // buffer end — a coincidence of that particular sample, not the rule.
-        let loopStart = UInt32(headerData[AkaiDiskFormat.hdrLoopAtOffset]) |
+        // loop[0]: at[4] @ 0x26, flen[2] @ 0x2A (fine length, 1/65536 sample),
+        // len[4] @ 0x2C. CORRECTED (found while investigating a real loop-point
+        // mismatch against actual Akai hardware): `at` is the loop's RIGHT-HAND
+        // boundary (the return-to point), NOT the left/start as we'd previously
+        // assumed — the real region is `[at - len, at)`, not `[at, at+len)`.
+        //
+        // Proof, from a real factory SAWTOOTH sample (S3000XL hardware screens +
+        // this exact file's bytes cross-referenced): TRIM page shows
+        // start=22/end=255; LOOP page shows at=192, lng=168.562 (displaying
+        // `len + flen/65536` as a single fractional value: 168 + 36831/65536 =
+        // 168.562, confirming flen is real and must be included). The OLD
+        // (forward) interpretation gives `[192, 360.6)` — past the end of the
+        // 256-frame buffer entirely, which is impossible. The NEW (backward)
+        // interpretation gives `[192-168.56, 192)` ≈ `[23.4, 192)`, matching the
+        // real TRIM start (22) almost exactly. The previous code comment here
+        // claiming "verified by hardware testing: at=48,len=48 produces a
+        // 48-sample loop (48→96)" was apparently never actually confirmed
+        // against real hardware playback — this cross-reference is the first
+        // genuine confirmation either direction has had.
+        let loopAt = UInt32(headerData[AkaiDiskFormat.hdrLoopAtOffset]) |
                         (UInt32(headerData[AkaiDiskFormat.hdrLoopAtOffset + 1]) << 8) |
                         (UInt32(headerData[AkaiDiskFormat.hdrLoopAtOffset + 2]) << 16) |
                         (UInt32(headerData[AkaiDiskFormat.hdrLoopAtOffset + 3]) << 24)
-        let loopLen = UInt32(headerData[AkaiDiskFormat.hdrLoopLenOffset]) |
+        let loopLenInt = UInt32(headerData[AkaiDiskFormat.hdrLoopLenOffset]) |
                       (UInt32(headerData[AkaiDiskFormat.hdrLoopLenOffset + 1]) << 8) |
                       (UInt32(headerData[AkaiDiskFormat.hdrLoopLenOffset + 2]) << 16) |
                       (UInt32(headerData[AkaiDiskFormat.hdrLoopLenOffset + 3]) << 24)
-        let loopEnd = min(loopStart + loopLen, numSamples)
+        // flen is sub-sample fine length (1/65536ths) — we don't model fractional
+        // positions in the UI (sliders are whole-sample), so round to the
+        // nearest whole sample for display/editing purposes. This loses the same
+        // sub-sample precision a basic "drag a slider to a sample number" editor
+        // would lose regardless.
+        let loopFlen = UInt32(headerData[AkaiDiskFormat.hdrLoopFineOffset]) |
+                       (UInt32(headerData[AkaiDiskFormat.hdrLoopFineOffset + 1]) << 8)
+        let loopLenTotal = loopLenInt + (loopFlen >= 32768 ? 1 : 0)   // round, don't truncate
+        let loopEnd = min(loopAt, numSamples)
+        let loopStart = loopEnd > loopLenTotal ? loopEnd - loopLenTotal : 0
         let midiRootNote = headerData[0x02]
         let fineTune = Int8(bitPattern: headerData[0x14])
         let semitoneTune = Int8(bitPattern: headerData[0x15])
@@ -597,6 +921,18 @@ class AkaiDiskImage: ObservableObject {
         let midiChannel: UInt8 = rawMidi == 0xff ? 0 : rawMidi &+ 1
         let keygroupCount = fileData.count > 0x2A ? fileData[0x2A] : 0
         let octave = fileData.count > 0x15 ? fileData[0x15] : 0
+        // Master output level and base loudness — confirmed offsets, see
+        // AkaiProgram.stereoLevel/basicLoudness. Default to 99 (not 0) when the
+        // file is too short to contain them, matching real factory defaults
+        // rather than the silent value.
+        let stereoLevel = fileData.count > 0x17 ? fileData[0x17] : 99
+        let basicLoudness = fileData.count > 0x19 ? fileData[0x19] : 99
+        // Filter mod-depth sources — confirmed program-level offsets, see
+        // AkaiProgram.filterModSource1/2/3. Fall back to real hardware defaults
+        // (Velocity/Lfo2/Env2) for any byte value outside the known 0-13 range.
+        let modSource1 = fileData.count > 0x54 ? (AkaiFilterModSource(rawValue: fileData[0x54]) ?? .velocity) : .velocity
+        let modSource2 = fileData.count > 0x55 ? (AkaiFilterModSource(rawValue: fileData[0x55]) ?? .lfo2) : .lfo2
+        let modSource3 = fileData.count > 0x56 ? (AkaiFilterModSource(rawValue: fileData[0x56]) ?? .env2) : .env2
 
         // Walk keygroups: first at 0xC0, each 0xC0 bytes; kgnum tells us how many.
         var keyzones: [AkaiProgramKeyzone] = []
@@ -619,6 +955,19 @@ class AkaiDiskImage: ObservableObject {
             let vz = kg + 0x22
             guard vz + 0x18 <= fileData.count else { break }
             let sname = akaiString(from: fileData, offset: vz, length: 12)
+            // Velocity zone 2: the stereo RIGHT channel, if assigned (see
+            // AkaiProgramKeyzone.rightSampleName doc comment for the real
+            // hardware convention this reflects — one keygroup, two zones).
+            var rightName = ""
+            var rightPan: Int8 = 50
+            let vz2 = kg + 0x22 + 0x18
+            if vz2 + 0x18 <= fileData.count {
+                let s2 = akaiString(from: fileData, offset: vz2, length: 12)
+                if !s2.trimmingCharacters(in: .whitespaces).isEmpty {
+                    rightName = s2
+                    rightPan = Int8(bitPattern: fileData[vz2 + 0x12])
+                }
+            }
             keyzones.append(AkaiProgramKeyzone(
                 sampleName: sname,
                 lowKey: kgKeylo, highKey: kgKeyhi,
@@ -634,6 +983,8 @@ class AkaiDiskImage: ObservableObject {
                 filterModDepth1: kgFilterModDepth1,
                 filterModDepth2: kgFilterModDepth2,
                 filterModDepth3: kgFilterModDepth3,
+                rightSampleName: rightName,
+                rightPan: rightPan,
                 // pmode — decode the full 5-state byte (see AkaiPlaybackMode).
                 // Fall back to .sample (the natural zero-value/inherit state) for
                 // any byte value not in the known range, rather than guessing.
@@ -644,6 +995,8 @@ class AkaiDiskImage: ObservableObject {
 
         let program = AkaiProgram(name: name, keyzones: keyzones,
                                   midiChannel: midiChannel, polyphony: 16, bendRange: octave,
+                                  stereoLevel: stereoLevel, basicLoudness: basicLoudness,
+                                  filterModSource1: modSource1, filterModSource2: modSource2, filterModSource3: modSource3,
                                   rawData: fileData)
         return AkaiProgramFile(directoryEntry: entry, program: program,
                                offset: startBlock * AkaiDiskFormat.blockSize)
@@ -685,6 +1038,11 @@ class AkaiDiskImage: ObservableObject {
         file[0x14] = 127                        // keyhi
         file[0x15] = 0                          // oct
         file[0x16] = 0xFF                        // auxch1 = OFF
+        file[0x17] = 99                         // stereo level (OUTPUT LEVELS page) — confirmed offset; 0 = silent!
+        file[0x19] = 99                         // basic loudness (OUTPUT LEVELS page) — confirmed offset; real factory default is 80, but 99 matches "to 99 for both" request
+        file[0x54] = AkaiFilterModSource.velocity.rawValue   // filter mod source #1 — confirmed program-level offset
+        file[0x55] = AkaiFilterModSource.lfo2.rawValue       // filter mod source #2 — confirmed program-level offset
+        file[0x56] = AkaiFilterModSource.env2.rawValue       // filter mod source #3 — confirmed program-level offset
         file[0x29] = 0                          // kgxf
         file[0x2A] = 0                          // kgnum = 0
 
@@ -738,7 +1096,10 @@ class AkaiDiskImage: ObservableObject {
             startBlock: UInt16(startBlock), size: totalSize,
             rawEntry: entryBytes, diskOffset: dirSlot)
         let program = AkaiProgram(name: name, keyzones: [],
-            midiChannel: 0, polyphony: 16, bendRange: 0, rawData: file)
+            midiChannel: 0, polyphony: 16, bendRange: 0,
+            stereoLevel: 99, basicLoudness: 99,
+            filterModSource1: .velocity, filterModSource2: .lfo2, filterModSource3: .env2,
+            rawData: file)
         let progFile = AkaiProgramFile(directoryEntry: dirEntry, program: program,
                                        offset: startBlock * bs)
         programs.append(progFile)
@@ -1232,6 +1593,117 @@ class AkaiDiskImage: ObservableObject {
         hasUnsavedChanges = true
     }
 
+    /// Delete a real MULTI file: frees its FAT chain and blanks its directory
+    /// entry, same mechanics as deleteProgram. Safe even though we don't decode
+    /// the content — deletion only ever needs the directory entry + FAT chain,
+    /// both of which are fully understood regardless of file type.
+    func deleteMulti(id: UUID) {
+        guard let multiFile = multis.first(where: { $0.id == id }) else { return }
+        guard let entry = multiFile.directoryEntry else {
+            multis.removeAll { $0.id == id }
+            return
+        }
+        guard var data = imageData else {
+            multis.removeAll { $0.id == id }
+            return
+        }
+        freeChain(from: Int(entry.startBlock), data: &data)
+        if entry.diskOffset >= 0, entry.diskOffset + AkaiDiskFormat.dirEntrySize <= data.count {
+            let blank = Data(repeating: 0, count: AkaiDiskFormat.dirEntrySize)
+            data.replaceSubrange(entry.diskOffset..<entry.diskOffset + AkaiDiskFormat.dirEntrySize, with: blank)
+        }
+        imageData = data
+        freeBlocks = countFreeBlocks(data: data)
+        multis.removeAll { $0.id == id }
+        hasUnsavedChanges = true
+    }
+
+    /// Rename a real MULTI file's directory entry name. Does NOT touch the
+    /// file's content (any internal "multi name" field, if one exists at a
+    /// different offset, is left alone — we don't know where it'd be).
+    @discardableResult
+    func renameMulti(id: UUID, to newRawName: String) throws -> AkaiMultiFile {
+        guard let index = multis.firstIndex(where: { $0.id == id }) else {
+            throw AkaiError.dataError("Multi not found")
+        }
+        guard var entry = multis[index].directoryEntry else {
+            throw AkaiError.dataError("This multi has no on-disk entry to rename")
+        }
+        guard var data = imageData else { throw AkaiError.noImageLoaded }
+        let cleanName = Self.sanitizeName(newRawName)
+        guard !cleanName.trimmingCharacters(in: .whitespaces).isEmpty else {
+            throw AkaiError.dataError("Name cannot be empty")
+        }
+        let nameBytes = akaiBytes(from: cleanName, length: 12)
+        if entry.diskOffset >= 0, entry.diskOffset + 12 <= data.count {
+            for (i, b) in nameBytes.enumerated() { data[entry.diskOffset + i] = b }
+        }
+        entry.name = cleanName
+        imageData = data
+        multis[index].directoryEntry = entry
+        multis[index].multi.name = cleanName
+        if let url = imageURL { try data.write(to: url, options: .atomic) }
+        hasUnsavedChanges = false
+        return multis[index]
+    }
+
+    /// Patch one part's confirmed fields (program name, channel, level, pan, fx
+    /// bus, send) into a REAL multi file's bytes on disk — see AkaiMultiPart's
+    /// doc comment for the confirmed offsets/method/stride. `partIndex` is
+    /// 0-based (0...15) for Parts 1...16. Deliberately does NOT touch anything
+    /// else: each part's 2-byte program link pointer and second pointer
+    /// (sampler-managed, like kg1a/shdra elsewhere), the two unconfirmed gaps
+    /// within each part's own record, the multi-level header (bytes
+    /// `0x000`-`0x3FF`), or any other part — all of those are preserved exactly
+    /// as they were. Patches the in-memory image only; persist via Save, same
+    /// as every other edit in this app.
+    func applyMultiPartEdit(id: UUID, partIndex: Int, part: AkaiMultiPart) throws {
+        guard partIndex >= 0 && partIndex < 16 else {
+            throw AkaiError.dataError("Part index out of range")
+        }
+        guard let index = multis.firstIndex(where: { $0.id == id }) else {
+            throw AkaiError.dataError("Multi not found")
+        }
+        guard let entry = multis[index].directoryEntry else {
+            throw AkaiError.dataError("This multi has no on-disk entry to edit")
+        }
+        guard var data = imageData else { throw AkaiError.noImageLoaded }
+
+        let chain = fatChain(from: Int(entry.startBlock), data: data)
+        var fileData = readFromChain(chain, fileOffset: 0, length: Int(entry.size), data: data)
+        guard fileData.count >= AkaiMultiFormat.minSizeForPart(partIndex) else {
+            throw AkaiError.dataError("This multi file is too small to contain Part \(partIndex + 1)'s confirmed fields")
+        }
+
+        let base = AkaiMultiFormat.partBase(partIndex)
+        let nameBytes = akaiBytes(from: part.programName, length: 12)
+        for (i, b) in nameBytes.enumerated() { fileData[base + AkaiMultiFormat.relNameOffset + i] = b }
+        fileData[base + AkaiMultiFormat.relChannelOffset] = part.channel > 0 ? part.channel - 1 : 0  // model 1-indexed -> disk 0-indexed
+        fileData[base + AkaiMultiFormat.relLevelOffset] = part.level
+        fileData[base + AkaiMultiFormat.relPanOffset] = UInt8(bitPattern: part.pan)
+        fileData[base + AkaiMultiFormat.relFxBusOffset] = part.fxBus.byteValue
+        fileData[base + AkaiMultiFormat.relSendOffset] = part.fxSend
+
+        // Write the patched bytes back across the existing chain — file size
+        // never changes (we only ever patch fields, never grow/shrink), so
+        // there's no FAT reallocation needed, just an in-place rewrite.
+        let bs = AkaiDiskFormat.blockSize
+        for (i, block) in chain.enumerated() {
+            let srcStart = i * bs
+            guard srcStart < fileData.count else { break }
+            let srcEnd = min(srcStart + bs, fileData.count)
+            let dstStart = block * bs
+            guard dstStart + bs <= data.count else { break }
+            let chunk = fileData[srcStart..<srcEnd]
+            let padded = chunk + Data(repeating: 0, count: bs - chunk.count)
+            data.replaceSubrange(dstStart..<dstStart + bs, with: padded)
+        }
+
+        imageData = data
+        multis[index].multi.parts[partIndex] = part
+        hasUnsavedChanges = true
+    }
+
     /// Build a blank but VALID Akai S3000 HD floppy image (1600 blocks) and load
     /// it. Structure verified byte-for-byte against a real Greaseweazle-formatted
     /// disk: floppy-header file[64] with the 0xFF volume flag in slot 0, FAT with
@@ -1510,6 +1982,8 @@ class AkaiDiskImage: ObservableObject {
     /// fields are written outside their real struct offsets — so this always
     /// rebuilds the whole file rather than patching bytes in place.
     private func buildProgramFileData(name: String, midiChannel: UInt8, bendRange: UInt8,
+                                      stereoLevel: UInt8, basicLoudness: UInt8,
+                                      filterModSource1: AkaiFilterModSource, filterModSource2: AkaiFilterModSource, filterModSource3: AkaiFilterModSource,
                                       keyzones: [AkaiProgramKeyzone]) -> Data {
         let kgCount = keyzones.count
         let progSize = 0xC0 + kgCount * 0xC0
@@ -1525,6 +1999,11 @@ class AkaiDiskImage: ObservableObject {
         file[0x14] = 127                          // program-level keyhi
         file[0x15] = bendRange                    // oct
         file[0x16] = 0xFF                          // auxch1 = OFF
+        file[0x17] = stereoLevel                  // OUTPUT LEVELS "stereo level" — confirmed offset; 0 = total silence on main outs
+        file[0x19] = basicLoudness                 // OUTPUT LEVELS "basic loudness" — confirmed offset; 0 = total silence regardless of velocity
+        file[0x54] = filterModSource1.rawValue     // filter mod source #1 — confirmed program-level offset (shared by all keygroups)
+        file[0x55] = filterModSource2.rawValue     // filter mod source #2 — confirmed program-level offset (shared by all keygroups)
+        file[0x56] = filterModSource3.rawValue     // filter mod source #3 — confirmed program-level offset (shared by all keygroups)
         file[0x29] = 0                            // kgxf
         file[0x2A] = UInt8(min(255, kgCount))     // kgnum — MUST match real keygroup count
 
@@ -1558,6 +2037,23 @@ class AkaiDiskImage: ObservableObject {
                     file[vz + 0x12] = UInt8(bitPattern: kz.pan)
                     file[vz + 0x13] = kz.playbackMode.rawValue          // pmode
                     file[vz + 0x16] = 0xFF; file[vz + 0x17] = 0xFF       // shdra = none
+                } else if z == 1, let kz = kz, !kz.rightSampleName.trimmingCharacters(in: .whitespaces).isEmpty {
+                    // Velocity zone 2: the stereo RIGHT channel (real hardware
+                    // convention — see AkaiProgramKeyzone.rightSampleName doc
+                    // comment). Mirrors zone 1's velocity/tune/filter-trim/
+                    // playback mode (they trigger together); only the sample
+                    // name and pan genuinely differ.
+                    let snameBytes = akaiBytes(from: kz.rightSampleName, length: 12)
+                    for (i, b) in snameBytes.enumerated() { file[vz + i] = b }
+                    file[vz + 0x0C] = kz.velocityLow
+                    file[vz + 0x0D] = kz.velocityHigh
+                    file[vz + 0x0E] = UInt8(bitPattern: kz.fineTune)
+                    file[vz + 0x0F] = UInt8(bitPattern: kz.tuneOffset)
+                    file[vz + 0x10] = kz.volume
+                    file[vz + 0x11] = UInt8(bitPattern: kz.filterOffset)
+                    file[vz + 0x12] = UInt8(bitPattern: kz.rightPan)
+                    file[vz + 0x13] = kz.playbackMode.rawValue
+                    file[vz + 0x16] = 0xFF; file[vz + 0x17] = 0xFF
                 } else {
                     for (i, b) in emptyName.enumerated() { file[vz + i] = b }
                     file[vz + 0x0C] = 0
@@ -1581,6 +2077,11 @@ class AkaiDiskImage: ObservableObject {
             name: programFile.program.name,
             midiChannel: programFile.program.midiChannel,
             bendRange: programFile.program.bendRange,
+            stereoLevel: programFile.program.stereoLevel,
+            basicLoudness: programFile.program.basicLoudness,
+            filterModSource1: programFile.program.filterModSource1,
+            filterModSource2: programFile.program.filterModSource2,
+            filterModSource3: programFile.program.filterModSource3,
             keyzones: programFile.program.keyzones)
 
         let bs = AkaiDiskFormat.blockSize

@@ -9,79 +9,43 @@ import SwiftUI
 struct MultiListView: View {
     @ObservedObject var diskImage: AkaiDiskImage
     @Binding var selectedMultiID: UUID?
-    let onCreatePreview: () -> Void
 
-    @State private var renamingID: UUID? = nil
-    @State private var renameText = ""
     @State private var showDeleteConfirm = false
     @State private var pendingDeleteID: UUID? = nil
+    @State private var cloneErrorMessage = ""
+    @State private var showCloneError = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             HStack {
-                Text("Multis").font(.headline)
+                Text("Multis").font(.title2.bold())
                 Spacer()
-                Button {
-                    onCreatePreview()
-                } label: {
-                    Label("New Multi (Preview)", systemImage: "plus.square.on.square")
-                }
+                Text("\(diskImage.multis.count) files").foregroundStyle(.secondary)
             }
             .padding()
-
+            Divider()
             if diskImage.multis.isEmpty {
-                VStack(spacing: 8) {
-                    Image(systemName: "square.stack.3d.up.slash")
-                        .font(.system(size: 32))
-                        .foregroundStyle(.secondary)
-                    Text("No MULTI files on this disk")
-                        .foregroundStyle(.secondary)
-                    Text("Use \"New Multi (Preview)\" above to plan one before it has a file on disk -- see the banner on that screen for why a brand-new multi can't be saved to disk yet (existing multi files ARE fully editable, see above).")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .multilineTextAlignment(.center)
-                        .frame(maxWidth: 360)
-                }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                ContentUnavailableView("No Multis", systemImage: "square.stack.3d.up",
+                    description: Text("Use New Multi to create one, or load a disk that has MULTI files."))
             } else {
-                List {
-                    ForEach(diskImage.multis) { mf in
-                        HStack {
-                            Image(systemName: "square.stack.3d.up")
-                            if renamingID == mf.id {
-                                TextField("Name", text: $renameText, onCommit: {
-                                    // @discardableResult only covers the function's
-                                    // own return value, not the Optional that `try?`
-                                    // wraps it in — explicitly discard to silence the
-                                    // "result is unused" warning.
-                                    _ = try? diskImage.renameMulti(id: mf.id, to: renameText)
-                                    renamingID = nil
-                                })
-                                .textFieldStyle(.roundedBorder)
-                            } else {
-                                Text(mf.multi.name.isEmpty ? "(unnamed)" : mf.multi.name)
-                                    .font(.system(.body, design: .monospaced))
-                            }
-                            Spacer()
-                            Text("All 16 parts editable")
-                                .font(.caption2)
-                                .foregroundStyle(.green)
-                        }
-                        .contentShape(Rectangle())
-                        .onTapGesture { selectedMultiID = mf.id }
-                        .contextMenu {
-                            Button("Rename") {
-                                renameText = mf.multi.name
-                                renamingID = mf.id
-                            }
-                            Button("Delete", role: .destructive) {
-                                pendingDeleteID = mf.id
-                                showDeleteConfirm = true
-                            }
-                        }
+                Table(diskImage.multis, selection: $selectedMultiID) {
+                    TableColumn("Name") { mf in
+                        Text(mf.multi.name.isEmpty ? "(unnamed)" : mf.multi.name)
+                            .font(.system(.body, design: .monospaced))
                     }
+                    TableColumn("Parts") { mf in
+                        let active = mf.multi.parts.filter {
+                            !$0.programName.trimmingCharacters(in: .whitespaces).isEmpty
+                        }.count
+                        Text(active == 0 ? "—" : "\(active) assigned")
+                            .foregroundStyle(.secondary)
+                    }.width(100)
+                    TableColumn("Status") { _ in
+                        Text("All 16 parts editable")
+                            .font(.caption)
+                            .foregroundStyle(.green)
+                    }.width(130)
                 }
-                .listStyle(.inset)
             }
         }
         .confirmationDialog("Delete this multi?", isPresented: $showDeleteConfirm, titleVisibility: .visible) {
@@ -89,9 +53,31 @@ struct MultiListView: View {
                 if let id = pendingDeleteID { diskImage.deleteMulti(id: id) }
                 pendingDeleteID = nil
             }
+            .keyboardShortcut(.defaultAction)
             Button("Cancel", role: .cancel) { pendingDeleteID = nil }
         } message: {
             Text("This removes the multi file from the disk. The disk image file is not modified until you save.")
+        }
+        .alert("Couldn't clone", isPresented: $showCloneError) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text(cloneErrorMessage)
+        }
+    }
+
+    private func clone(_ mf: AkaiMultiFile) {
+        do {
+            let cloned = try diskImage.cloneMulti(id: mf.id)
+            selectedMultiID = cloned.id
+        } catch {
+            cloneErrorMessage = error.localizedDescription
+            showCloneError = true
+        }
+    }
+
+    private func createNew() {
+        if let created = try? diskImage.createMulti() {
+            selectedMultiID = created.id
         }
     }
 }
@@ -104,38 +90,80 @@ struct MultiListView: View {
 struct MultiPlaceholderView: View {
     let multiFile: AkaiMultiFile
     @ObservedObject var diskImage: AkaiDiskImage
-    let onBack: () -> Void
 
     @State private var parts: [AkaiMultiPart] = Array(repeating: AkaiMultiPart(), count: 16)
     @State private var saveError: String? = nil
+    @State private var isEditingName = false
+    @State private var editedName = ""
+    @FocusState private var nameFieldFocused: Bool
+
+    /// Active part count for the subtitle.
+    private var activeParts: Int {
+        multiFile.multi.parts.filter {
+            !$0.programName.trimmingCharacters(in: .whitespaces).isEmpty
+        }.count
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
+
+            // Header — matches ProgramDetailView layout exactly
             HStack {
-                Button("< Back to Multis") { onBack() }
-                Spacer()
-                Text(multiFile.multi.name)
-                    .font(.title3).fontWeight(.semibold)
+                VStack(alignment: .leading, spacing: 4) {
+                    if isEditingName {
+                        HStack(spacing: 8) {
+                            TextField("Multi name", text: $editedName)
+                                .textFieldStyle(.roundedBorder)
+                                .font(.system(.title2, design: .monospaced))
+                                .frame(maxWidth: 280)
+                                .focused($nameFieldFocused)
+                                .onChange(of: editedName) { _, newValue in
+                                    let clean = AkaiDiskImage.sanitizeName(newValue)
+                                    if clean != newValue { editedName = clean }
+                                }
+                                .onSubmit { commitRename() }
+                            Text("\(editedName.count)/12")
+                                .font(.caption.monospaced())
+                                .foregroundStyle(.secondary)
+                            Button { commitRename() } label: {
+                                Image(systemName: "checkmark.circle.fill")
+                            }
+                            .buttonStyle(.borderless)
+                            .help("Save name")
+                            .disabled(editedName.trimmingCharacters(in: .whitespaces).isEmpty)
+                            Button { cancelRename() } label: {
+                                Image(systemName: "xmark.circle")
+                            }
+                            .buttonStyle(.borderless)
+                            .help("Cancel")
+                        }
+                    } else {
+                        HStack(spacing: 6) {
+                            Text(multiFile.multi.name.isEmpty ? "(unnamed)" : multiFile.multi.name)
+                                .font(.system(.title, design: .monospaced).bold())
+                                .textSelection(.enabled)
+                            Button { beginRename() } label: {
+                                Image(systemName: "pencil")
+                                    .font(.system(size: 14))
+                            }
+                            .buttonStyle(.borderless)
+                            .help("Rename multi")
+                        }
+                    }
+                    Text("Multi · \(activeParts == 0 ? "no parts assigned" : "\(activeParts) part\(activeParts == 1 ? "" : "s") assigned")")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                }
                 Spacer()
             }
             .padding()
 
-            GroupBox {
-                HStack(alignment: .top, spacing: 8) {
-                    Image(systemName: "checkmark.seal.fill").foregroundStyle(.green)
-                    Text("All 16 parts below are decoded from this file's real bytes and ARE saved back when you edit them (confirmed by real-hardware byte-diff testing, including the per-part stride). Two small gaps within each part's own record, and the multi-level header, aren't decoded and are left untouched.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-            }
-            .padding(.horizontal).padding(.top, 8)
+            Divider()
 
             if let saveError {
-                Text(saveError).font(.caption).foregroundStyle(.red).padding(.horizontal)
+                Text(saveError).font(.caption).foregroundStyle(.red).padding(.horizontal).padding(.top, 4)
             }
 
-            // Column headers, matching the real hardware screen exactly (same
-            // widths as MultiMixEditorView's so the look is consistent).
             HStack(spacing: 8) {
                 Text("Part").frame(width: 32, alignment: .leading)
                 Text("Program").frame(minWidth: 80, maxWidth: .infinity, alignment: .leading)
@@ -163,6 +191,28 @@ struct MultiPlaceholderView: View {
         .onAppear {
             parts = multiFile.multi.parts
         }
+    }
+
+    private func beginRename() {
+        editedName = multiFile.multi.name
+        isEditingName = true
+        diskImage.isEditingText = true
+        DispatchQueue.main.async { nameFieldFocused = true }
+    }
+
+    private func cancelRename() {
+        isEditingName = false
+        nameFieldFocused = false
+        diskImage.isEditingText = false
+    }
+
+    private func commitRename() {
+        let clean = AkaiDiskImage.sanitizeName(editedName)
+        guard !clean.trimmingCharacters(in: .whitespaces).isEmpty else {
+            cancelRename(); return
+        }
+        _ = try? diskImage.renameMulti(id: multiFile.id, to: clean)
+        cancelRename()
     }
 
     private func save(partIndex: Int) {
@@ -197,24 +247,6 @@ struct MultiMixEditorView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            // Preview banner -- see type doc comment for why this exists.
-            HStack(alignment: .top, spacing: 8) {
-                Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("Preview only -- not saved to disk")
-                        .font(.subheadline).fontWeight(.semibold)
-                    Text("This multi has no file on disk yet, so it can't be saved -- creating a brand-new multi file from scratch would need the multi-level header and per-part link pointers, which remain unconfirmed. Once you have a real multi file, opening it lets you edit and save all 16 parts for real.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-                Spacer()
-                if let onClose {
-                    Button("Close Preview") { onClose() }
-                }
-            }
-            .padding()
-            .background(Color.orange.opacity(0.12))
-
             HStack {
                 Text("MULTI:").foregroundStyle(.secondary)
                 TextField("Name", text: $multi.name)

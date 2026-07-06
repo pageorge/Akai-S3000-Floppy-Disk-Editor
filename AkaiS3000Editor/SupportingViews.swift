@@ -459,12 +459,14 @@ struct InfoCard<Content: View>: View {
 
     var body: some View {
         GroupBox {
-            content().padding(.top, 4)
+            content().padding(8)
         } label: {
             Text(title)
-                .font(.subheadline.weight(.semibold))
-                .foregroundStyle(.secondary)
+                .font(.headline.weight(.semibold))
+                .foregroundStyle(.primary)
+                .padding(.bottom, 2)
         }
+        .padding(4)
     }
 }
 
@@ -549,9 +551,10 @@ struct DiskMapView: View {
     private func color(for kind: AkaiDiskImage.DiskBlockKind) -> Color {
         switch kind {
         case .system:  return Color.secondary.opacity(0.55)
-        case .free:    return Color.black   // unused for drawing; background already black
+        case .free:    return Color.black
         case .sample:  return Color.red
         case .program: return Color.purple
+        case .multi:   return Color.orange
         }
     }
 
@@ -561,6 +564,7 @@ struct DiskMapView: View {
         case .free:           return "Free Space"
         case .sample(let n):  return n
         case .program(let n): return n
+        case .multi(let n):   return n
         }
     }
 
@@ -570,6 +574,7 @@ struct DiskMapView: View {
         case .free:    return "Free"
         case .sample:  return "Sample"
         case .program: return "Program"
+        case .multi:   return "Multi"
         }
     }
 
@@ -578,6 +583,7 @@ struct DiskMapView: View {
         case (.system, .system), (.free, .free): return true
         case (.sample(let n1), .sample(let n2)): return n1 == n2
         case (.program(let n1), .program(let n2)): return n1 == n2
+        case (.multi(let n1), .multi(let n2)): return n1 == n2
         default: return false
         }
     }
@@ -683,6 +689,7 @@ struct DiskMapView: View {
             HStack(spacing: 16) {
                 legendItem(color: .red, text: "Samples")
                 legendItem(color: .purple, text: "Programs")
+                legendItem(color: .orange, text: "Multis")
                 legendItem(color: Color.secondary.opacity(0.55), text: "Volume / System")
                 legendItem(color: .black, text: "Free")
             }
@@ -776,7 +783,8 @@ struct DiskInfoView: View {
                     InfoCard(title: "Contents") {
                         InfoRow(label: "Samples",     value: "\(diskImage.samples.count)")
                         InfoRow(label: "Programs",    value: "\(diskImage.programs.count)")
-                        InfoRow(label: "Total Files", value: "\(diskImage.samples.count + diskImage.programs.count)")
+                        InfoRow(label: "Multis",      value: "\(diskImage.multis.count)")
+                        InfoRow(label: "Total Files", value: "\(diskImage.samples.count + diskImage.programs.count + diskImage.multis.count)")
                     }
                     InfoCard(title: "Storage") {
                         InfoRow(label: "Total Blocks", value: "\(diskImage.totalBlocks)")

@@ -8,12 +8,6 @@ struct ContentView: View {
     @State private var selectedSampleID: UUID? = nil
     @State private var selectedProgramID: UUID? = nil
     @State private var selectedMultiID: UUID? = nil
-    /// The in-memory "preview" multi created by MultiListView's "New Multi"
-    /// button — see AkaiMultiFile's doc comment for why this never touches the
-    /// disk image. Fixed sentinel ID so selectedMultiID can point at it the same
-    /// way it points at a real AkaiMultiFile's id.
-    @State private var previewMulti: AkaiMulti? = nil
-    private let previewMultiID = UUID()
     @State private var showingAlert = false
     @State private var alertMessage = ""
 
@@ -45,7 +39,8 @@ struct ContentView: View {
                 greaseweazle: greaseweazle,
                 selectedTab: $selectedTab,
                 selectedSampleID: $selectedSampleID,
-                selectedProgramID: $selectedProgramID
+                selectedProgramID: $selectedProgramID,
+                selectedMultiID: $selectedMultiID
             )
             .navigationSplitViewColumnWidth(min: 220, ideal: 250)
         } detail: {
@@ -78,28 +73,16 @@ struct ContentView: View {
                                 ProgramListView(diskImage: diskImage, selectedProgramID: $selectedProgramID)
                             }
                         case .multis:
-                            if selectedMultiID == previewMultiID, previewMulti != nil {
-                                MultiMixEditorView(
-                                    multi: Binding(
-                                        get: { previewMulti ?? .blank() },
-                                        set: { previewMulti = $0 }
-                                    ),
-                                    availableProgramNames: diskImage.programs.map { $0.program.name },
-                                    onClose: { previewMulti = nil; selectedMultiID = nil }
-                                )
-                            } else if let id = selectedMultiID,
-                                      let real = diskImage.multis.first(where: { $0.id == id }) {
-                                MultiPlaceholderView(multiFile: real, diskImage: diskImage,
-                                                     onBack: { selectedMultiID = nil })
+                            if let id = selectedMultiID,
+                               let real = diskImage.multis.first(where: { $0.id == id }) {
+                                MultiPlaceholderView(multiFile: real, diskImage: diskImage)
+                                    .id(id)
                             } else {
-                                MultiListView(
-                                    diskImage: diskImage,
-                                    selectedMultiID: $selectedMultiID,
-                                    onCreatePreview: {
-                                        previewMulti = .blank()
-                                        selectedMultiID = previewMultiID
-                                    }
-                                )
+                                ContentUnavailableView("No Multi Selected",
+                                    systemImage: "square.stack.3d.up",
+                                    description: Text(diskImage.multis.isEmpty
+                                        ? "Right-click Multis in the sidebar to create one."
+                                        : "Select a multi from the sidebar."))
                             }
                         case .diskInfo:
                             DiskInfoView(diskImage: diskImage)
@@ -147,7 +130,6 @@ struct ContentView: View {
                     selectedSampleID = nil
                     selectedProgramID = nil
                     selectedMultiID = nil
-                    previewMulti = nil
                     greaseweazle.clearLog()   // dismiss log so the loaded disk shows
                     toast = ToastData(message: "Loaded \(url.lastPathComponent)")
                 } catch {
@@ -195,7 +177,6 @@ struct ContentView: View {
             selectedSampleID = nil
             selectedProgramID = nil
             selectedMultiID = nil
-            previewMulti = nil
             selectedTab = .samples
             greaseweazle.clearLog()
         }
@@ -248,7 +229,6 @@ struct ContentView: View {
                 selectedSampleID = nil
                 selectedProgramID = nil
                 selectedMultiID = nil
-                previewMulti = nil
                 toast = ToastData(message: "Created \(url.lastPathComponent)")
             } catch {
                 alertMessage = error.localizedDescription
@@ -272,7 +252,6 @@ struct ContentView: View {
                 selectedSampleID = nil
                 selectedProgramID = nil
                 selectedMultiID = nil
-                previewMulti = nil
             } catch {
                 alertMessage = error.localizedDescription
                 showingAlert = true
@@ -282,12 +261,14 @@ struct ContentView: View {
 
     private func importWAV() {
         let panel = NSOpenPanel()
-        panel.allowsMultipleSelection = false
+        panel.allowsMultipleSelection = true
         panel.allowedContentTypes = [.audio]
         panel.title = "Import WAV as Sample"
 
-        if panel.runModal() == .OK, let url = panel.url {
-            importSample(from: url)
+        if panel.runModal() == .OK {
+            for url in panel.urls {
+                importSample(from: url)
+            }
         }
     }
 
@@ -358,7 +339,6 @@ struct ContentView: View {
                 selectedSampleID = nil
                 selectedProgramID = nil
                 selectedMultiID = nil
-                previewMulti = nil
             } catch {
                 alertMessage = error.localizedDescription
                 showingAlert = true

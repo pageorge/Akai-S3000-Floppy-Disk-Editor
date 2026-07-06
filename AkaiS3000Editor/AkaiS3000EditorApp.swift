@@ -32,6 +32,7 @@ struct AkaiS3000EditorApp: App {
 extension Notification.Name {
     static let openDiskImage = Notification.Name("openDiskImage")
     static let createDiskImage = Notification.Name("createDiskImage")
+    static let beginMultiRename = Notification.Name("beginMultiRename")
 }
 
 // MARK: - Shared disk image holder

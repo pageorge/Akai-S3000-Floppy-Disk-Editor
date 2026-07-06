@@ -297,6 +297,25 @@ enum AkaiFilterModSource: UInt8, CaseIterable, Identifiable, Codable {
 
     var id: UInt8 { rawValue }
 
+    var helpText: String {
+        switch self {
+        case .noSource:       return "No modulation source assigned to this slot."
+        case .modwheel:       return "Moving the modwheel opens and closes the filter cutoff. Useful for phrasing brass parts or synth filter effects."
+        case .bend:           return "The pitchbend wheel opens and closes the filter. Effective when bending up into a note as the filter opens and sounds brighter."
+        case .pressure:       return "Aftertouch (key pressure) controls the filter. Good for expressive swells, particularly on brass sounds."
+        case .external:       return "External controller (footpedal, volume, or breath) controls the filter cutoff."
+        case .velocity:       return "Note velocity controls the filter — louder notes yield brighter sounds. Default mod source for tonal dynamics on acoustic instruments."
+        case .key:            return "Keyboard position modulates the filter, though this largely overlaps with the Key Follow parameter."
+        case .lfo1:           return "LFO 1 sweeps the filter. Small amounts emulate natural tremolo on flutes, woodwind, and brass. Large amounts give classic synth filter sweeps."
+        case .lfo2:           return "LFO 2 sweeps the filter. Default second mod source — useful for filter sweep effects."
+        case .env1:           return "Amplitude envelope (ENV1) also shapes the filter, matching tonal and amplitude dynamics without needing to copy the envelope."
+        case .env2:           return "Filter envelope (ENV2) shapes tonal dynamics and restores harmonic movement lost through looping. Default third mod source."
+        case .modwheelNoteOn: return "Modwheel position at the moment of note-on sets the filter opening. Has no effect if the modwheel moves after the note is pressed."
+        case .bendNoteOn:     return "Pitchbend position at note-on sets the filter opening. Has no effect if bend changes after the note is pressed."
+        case .externalNoteOn: return "External controller position at note-on sets the filter opening. Has no effect if the controller changes after the note is pressed."
+        }
+    }
+
     var displayName: String {
         switch self {
         case .noSource:       return "No Source"
@@ -1036,7 +1055,7 @@ class AkaiDiskImage: ObservableObject {
         file[0x10] = 0xFF                        // midich1 = OMNI
         file[0x13] = 24                         // keylo (matches hardware default)
         file[0x14] = 127                        // keyhi
-        file[0x15] = 0                          // oct
+        file[0x15] = 2                          // oct (bend range) — hardware default is 2 semitones
         file[0x16] = 0xFF                        // auxch1 = OFF
         file[0x17] = 99                         // stereo level (OUTPUT LEVELS page) — confirmed offset; 0 = silent!
         file[0x19] = 99                         // basic loudness (OUTPUT LEVELS page) — confirmed offset; real factory default is 80, but 99 matches "to 99 for both" request
@@ -1096,7 +1115,7 @@ class AkaiDiskImage: ObservableObject {
             startBlock: UInt16(startBlock), size: totalSize,
             rawEntry: entryBytes, diskOffset: dirSlot)
         let program = AkaiProgram(name: name, keyzones: [],
-            midiChannel: 0, polyphony: 16, bendRange: 0,
+            midiChannel: 0, polyphony: 16, bendRange: 2,
             stereoLevel: 99, basicLoudness: 99,
             filterModSource1: .velocity, filterModSource2: .lfo2, filterModSource3: .env2,
             rawData: file)
@@ -1256,17 +1275,25 @@ class AkaiDiskImage: ObservableObject {
         hdr[0x24] = UInt8((endMarker >> 16) & 0xFF)
         hdr[0x25] = UInt8((endMarker >> 24) & 0xFF)
 
-        // loop[0]: at[4] @ 0x26 = 0, len[4] @ 0x2C = numSamples-1 — i.e. a
-        // full-sample loop region, matching the in-memory model default
-        // (AkaiSampleHeader.loopEnd = numSamples-1) set by addImportedSample.
-        // pmode above stays NOLOOP, so this has no audible effect until the user
-        // actually enables looping — but it means the on-disk bytes already agree
-        // with the model from creation, instead of silently reading back as a
-        // zero-length loop (loopAt=0, loopLen=0) the next time this header is
+        // loop[0]: `at` is the loop's RIGHT-HAND boundary (return-to point),
+        // not the start — see parseSample's doc comment for the hardware
+        // cross-reference that corrected this. To default to "loop the whole
+        // sample" ([0, numSamples-1)), that means at=numSamples-1 (the end
+        // boundary) and len=numSamples-1 (so start = at-len = 0) — NOT at=0 as
+        // this used to say before the at/len direction was corrected. flen
+        // (fine length) stays 0; this app's sliders don't model sub-sample
+        // precision. pmode above stays NOLOOP, so this has no audible effect
+        // until the user actually enables looping — but it means the on-disk
+        // bytes already agree with the model from creation, instead of silently
+        // reading back as a zero-length loop the next time this header is
         // parsed (e.g. after Save + reload), which is what happened before this
         // fix: the model's "loop the whole sample" default never made it to disk
         // unless the user happened to touch a loop slider first.
-        hdr[0x26] = 0; hdr[0x27] = 0; hdr[0x28] = 0; hdr[0x29] = 0   // loop[0].at = 0
+        hdr[0x26] = UInt8(endMarker & 0xFF)
+        hdr[0x27] = UInt8((endMarker >> 8) & 0xFF)
+        hdr[0x28] = UInt8((endMarker >> 16) & 0xFF)
+        hdr[0x29] = UInt8((endMarker >> 24) & 0xFF)              // loop[0].at = numSamples-1 (end boundary)
+        hdr[0x2A] = 0; hdr[0x2B] = 0                              // loop[0].flen = 0 (no fine offset)
         hdr[0x2C] = UInt8(endMarker & 0xFF)
         hdr[0x2D] = UInt8((endMarker >> 8) & 0xFF)
         hdr[0x2E] = UInt8((endMarker >> 16) & 0xFF)
@@ -1380,6 +1407,7 @@ class AkaiDiskImage: ObservableObject {
         case free
         case sample(name: String)
         case program(name: String)
+        case multi(name: String)
     }
 
     /// Build a complete map of what owns every block on the disk, for the Disk
@@ -1408,6 +1436,12 @@ class AkaiDiskImage: ObservableObject {
             let name = prog.program.name.isEmpty ? prog.directoryEntry.name : prog.program.name
             let chain = fatChain(from: Int(prog.directoryEntry.startBlock), data: data)
             for b in chain where b >= 0 && b < map.count { map[b] = .program(name: name) }
+        }
+        for multiFile in multis {
+            guard let entry = multiFile.directoryEntry else { continue }
+            let name = multiFile.multi.name.isEmpty ? entry.name : multiFile.multi.name
+            let chain = fatChain(from: Int(entry.startBlock), data: data)
+            for b in chain where b >= 0 && b < map.count { map[b] = .multi(name: name) }
         }
         return map
     }
@@ -1465,8 +1499,16 @@ class AkaiDiskImage: ObservableObject {
     }
 
     private func parseWAV(_ data: Data) throws -> (Data, Int, Int, Int) {
-        guard data.count > 44, data[0..<4] == Data("RIFF".utf8), data[8..<12] == Data("WAVE".utf8) else {
-            throw AkaiError.dataError("Not a valid WAV file")
+        // Route by file magic: RIFF/WAVE → WAV, FORM/AIFF or FORM/AIFC → AIFF.
+        if data.count > 12,
+           data[0..<4] == Data("FORM".utf8),
+           (data[8..<12] == Data("AIFF".utf8) || data[8..<12] == Data("AIFC".utf8)) {
+            return try parseAIFF(data)
+        }
+        guard data.count > 44,
+              data[0..<4] == Data("RIFF".utf8),
+              data[8..<12] == Data("WAVE".utf8) else {
+            throw AkaiError.dataError("Not a valid WAV or AIFF file")
         }
         var offset = 12, sampleRate = 44100, numChannels = 1, bitsPerSample = 16
         var pcmData = Data()
@@ -1484,6 +1526,89 @@ class AkaiDiskImage: ObservableObject {
             offset += size + (size % 2)
         }
         guard !pcmData.isEmpty else { throw AkaiError.dataError("No audio data in WAV") }
+        return (pcmData, sampleRate, numChannels, bitsPerSample)
+    }
+
+    /// Parse an AIFF or AIFF-C file. Extracts raw 16-bit signed PCM.
+    /// AIFF stores audio big-endian; we byte-swap to little-endian for the Akai.
+    /// AIFF-C (AIFC) with 'sowt' (little-endian) compression needs no swap.
+    private func parseAIFF(_ data: Data) throws -> (Data, Int, Int, Int) {
+        // FORM chunk: bytes 0-3 = "FORM", 4-7 = size (BE), 8-11 = "AIFF"/"AIFC"
+        let isAIFC = data[8..<12] == Data("AIFC".utf8)
+        var offset = 12
+        var sampleRate = 44100
+        var numChannels = 1
+        var bitsPerSample = 16
+        var soundDataOffset = -1
+        var soundDataSize = 0
+        var offset2sound = 8   // AIFF SSND chunk has an 8-byte header before audio
+        var isSowt = false     // AIFC 'sowt' = already little-endian
+
+        // Read big-endian 32-bit int
+        func readBE32(at i: Int) -> Int {
+            guard i + 3 < data.count else { return 0 }
+            return Int(data[i]) << 24 | Int(data[i+1]) << 16 | Int(data[i+2]) << 8 | Int(data[i+3])
+        }
+        func readBE16(at i: Int) -> Int {
+            guard i + 1 < data.count else { return 0 }
+            return Int(data[i]) << 8 | Int(data[i+1])
+        }
+        // 80-bit IEEE 754 extended → Int (sample rate field in AIFF COMM chunk)
+        func readExtended(at i: Int) -> Int {
+            guard i + 9 < data.count else { return 44100 }
+            let exp = (Int(data[i] & 0x7F) << 8) | Int(data[i+1])
+            let mantHi = UInt32(data[i+2]) << 24 | UInt32(data[i+3]) << 16 |
+                         UInt32(data[i+4]) << 8  | UInt32(data[i+5])
+            let shift = 63 - exp
+            if shift < 0 || shift > 32 { return 44100 }
+            return Int(mantHi >> UInt32(shift))
+        }
+
+        while offset + 8 <= data.count {
+            let id = String(bytes: data[offset..<offset+4], encoding: .ascii) ?? ""
+            let size = readBE32(at: offset + 4)
+            offset += 8
+            switch id {
+            case "COMM":
+                numChannels   = readBE16(at: offset)
+                // numSampleFrames at offset+2 (4 bytes) — not needed
+                bitsPerSample = readBE16(at: offset + 6)
+                sampleRate    = readExtended(at: offset + 8)
+                if isAIFC, offset + 18 + 4 <= data.count {
+                    // compression type: 4-byte OSType at offset+18
+                    let comp = String(bytes: data[(offset+18)..<(offset+22)], encoding: .ascii) ?? ""
+                    isSowt = (comp == "sowt")   // little-endian PCM — no swap needed
+                }
+            case "SSND":
+                // SSND: offset(4) + blockSize(4) + audio data
+                offset2sound = readBE32(at: offset) + 8   // skip offset+blockSize fields
+                soundDataOffset = offset + offset2sound
+                soundDataSize   = max(0, size - offset2sound)
+            default:
+                break
+            }
+            offset += size + (size % 2)
+        }
+
+        guard soundDataOffset >= 0, soundDataOffset + soundDataSize <= data.count else {
+            throw AkaiError.dataError("No audio data found in AIFF file")
+        }
+
+        var pcmData = data.subdata(in: soundDataOffset..<soundDataOffset + soundDataSize)
+
+        // AIFF is big-endian 16-bit; swap bytes to little-endian for the Akai.
+        // AIFC 'sowt' is already little-endian — skip the swap.
+        if bitsPerSample == 16 && !isSowt {
+            pcmData.withUnsafeMutableBytes { (buf: UnsafeMutableRawBufferPointer) in
+                var i = 0
+                while i + 1 < buf.count {
+                    let hi = buf[i]; buf[i] = buf[i+1]; buf[i+1] = hi
+                    i += 2
+                }
+            }
+        }
+
+        guard !pcmData.isEmpty else { throw AkaiError.dataError("No audio data in AIFF file") }
         return (pcmData, sampleRate, numChannels, bitsPerSample)
     }
 
@@ -1618,6 +1743,193 @@ class AkaiDiskImage: ObservableObject {
         hasUnsavedChanges = true
     }
 
+    /// Generate a unique 12-char multi name, avoiding existing multi names on
+    /// disk — mirrors uniqueProgramName/uniqueSampleName.
+    private func uniqueMultiName(basedOn base: String) -> String {
+        let existing = Set(multis.map { $0.multi.name })
+        let cleanBase = Self.sanitizeName(base.isEmpty ? "NEW MULTI" : base)
+        if !existing.contains(cleanBase) { return cleanBase }
+        for n in 2...999 {
+            let suffix = " \(n)"
+            let candidate = Self.sanitizeName(String(cleanBase.prefix(12 - suffix.count)) + suffix)
+            if !existing.contains(candidate) { return candidate }
+        }
+        return cleanBase
+    }
+
+    /// Duplicate an existing REAL multi file into a new multi file on disk,
+    /// byte-for-byte (preserving the multi-level header and both per-part
+    /// unconfirmed gaps exactly, mirroring cloneProgram/cloneSample), then
+    /// patches only the DIRECTORY ENTRY's name — the multi-level header's own
+    /// internal name field, if any, is unconfirmed and left untouched (same
+    /// caveat as renameMulti). Does not write to disk immediately — persist via
+    /// Save. Returns the new multi file.
+    @discardableResult
+    func cloneMulti(id: UUID) throws -> AkaiMultiFile {
+        guard var data = imageData else { throw AkaiError.noImageLoaded }
+        guard let src = multis.first(where: { $0.id == id }) else {
+            throw AkaiError.dataError("Multi to clone not found")
+        }
+        guard let srcEntry = src.directoryEntry else {
+            throw AkaiError.dataError("This multi has no on-disk content to clone")
+        }
+        let newName = uniqueMultiName(basedOn: src.multi.name)
+        let nameBytes = akaiBytes(from: newName, length: 12)
+
+        // Read the source file's real bytes verbatim, then patch the internal
+        // name at +0x03 so the Akai shows the correct name when this clone is
+        // loaded — same fix as renameMulti, confirmed from leftfield-stab.img.
+        let chain = fatChain(from: Int(srcEntry.startBlock), data: data)
+        var fileData = readFromChain(chain, fileOffset: 0, length: Int(srcEntry.size), data: data)
+        if fileData.count >= 0x03 + 12 {
+            for (i, b) in nameBytes.enumerated() { fileData[0x03 + i] = b }
+        }
+
+        let bs = AkaiDiskFormat.blockSize
+        let blocksNeeded = (fileData.count + bs - 1) / bs
+        guard let blocks = findFreeBlocks(count: blocksNeeded, data: data) else {
+            throw AkaiError.diskFull("Not enough space on the disk to clone this multi.")
+        }
+        guard let dirSlot = findFreeDirectorySlot(data: data) else {
+            throw AkaiError.dataError("Disk directory is full")
+        }
+
+        for i in 0..<blocks.count {
+            let value: UInt16 = (i == blocks.count - 1) ? AkaiDiskFormat.fatEnd : UInt16(blocks[i + 1])
+            setFatValue(block: blocks[i], value: value, data: &data)
+        }
+        for (i, block) in blocks.enumerated() {
+            let srcStart = i * bs
+            let srcEnd = min(srcStart + bs, fileData.count)
+            let dstStart = block * bs
+            guard dstStart + bs <= data.count else { throw AkaiError.dataError("Block out of range") }
+            let chunk = fileData[srcStart..<srcEnd]
+            let padded = chunk + Data(repeating: 0, count: bs - (srcEnd - srcStart))
+            data.replaceSubrange(dstStart..<dstStart + bs, with: padded)
+        }
+
+        let startBlock = blocks[0]
+        let totalSize = UInt32(fileData.count)
+        var entryBytes = Data(repeating: 0, count: AkaiDiskFormat.dirEntrySize)
+        for (i, b) in nameBytes.enumerated() { entryBytes[i] = b }
+        entryBytes[16] = AkaiDiskFormat.ftypeMulti
+        entryBytes[17] = UInt8(totalSize & 0xFF)
+        entryBytes[18] = UInt8((totalSize >> 8) & 0xFF)
+        entryBytes[19] = UInt8((totalSize >> 16) & 0xFF)
+        entryBytes[20] = UInt8(startBlock & 0xFF)
+        entryBytes[21] = UInt8((startBlock >> 8) & 0xFF)
+        data.replaceSubrange(dirSlot..<dirSlot + AkaiDiskFormat.dirEntrySize, with: entryBytes)
+
+        imageData = data
+        freeBlocks = countFreeBlocks(data: data)
+
+        let dirEntry = AkaiDirectoryEntry(
+            name: newName, fileType: AkaiDiskFormat.ftypeMulti,
+            startBlock: UInt16(startBlock), size: totalSize,
+            rawEntry: entryBytes, diskOffset: dirSlot)
+
+        // Decode the cloned parts back from the fresh bytes — the name patch
+        // above only touched the directory entry, so these mirror the source
+        // multi's parts exactly.
+        var parts = [AkaiMultiPart](repeating: AkaiMultiPart(), count: 16)
+        for partIndex in 0..<16 {
+            guard fileData.count >= AkaiMultiFormat.minSizeForPart(partIndex) else { continue }
+            let base = AkaiMultiFormat.partBase(partIndex)
+            var p = AkaiMultiPart()
+            p.programName = akaiString(from: fileData, offset: base + AkaiMultiFormat.relNameOffset, length: 12)
+            p.channel = fileData[base + AkaiMultiFormat.relChannelOffset] &+ 1
+            p.level = fileData[base + AkaiMultiFormat.relLevelOffset]
+            p.pan = Int8(bitPattern: fileData[base + AkaiMultiFormat.relPanOffset])
+            p.fxBus = AkaiFxBus(byteValue: fileData[base + AkaiMultiFormat.relFxBusOffset])
+            p.fxSend = fileData[base + AkaiMultiFormat.relSendOffset]
+            parts[partIndex] = p
+        }
+
+        let cloned = AkaiMultiFile(directoryEntry: dirEntry,
+                                   multi: AkaiMulti(name: newName, parts: parts),
+                                   isContentReal: true)
+        multis.append(cloned)
+        hasUnsavedChanges = true
+        return cloned
+    }
+
+    // MARK: - Create Multi
+
+    /// Build and write a brand-new MULTI file to disk.
+    /// Structure confirmed by byte-diff: +0x000 preamble (3 bytes 0x00),
+    /// +0x003 name (12 bytes Akai-encoded), +0x00F..+0x3FF zeros,
+    /// then 16 × 0xC0 part records at +0x400. Total: 4096 bytes.
+    /// Sampler recalculates link pointers on load — we write zeros.
+    @discardableResult
+    func createMulti(name rawName: String = "NEW MULTI") throws -> AkaiMultiFile {
+        guard var data = imageData else { throw AkaiError.noImageLoaded }
+        let name = Self.sanitizeName(rawName.isEmpty ? "NEW MULTI" : rawName)
+        let fileSize = 0x1000
+        var file = Data(repeating: 0, count: fileSize)
+        let nameBytes = akaiBytes(from: name, length: 12)
+        for (i, b) in nameBytes.enumerated() { file[0x003 + i] = b }
+        let emptyName = [UInt8](repeating: 10, count: 12)
+        for partIndex in 0..<16 {
+            let base = AkaiMultiFormat.partBase(partIndex)
+            file[base + 0x00] = 0x01
+            for (i, b) in emptyName.enumerated() { file[base + AkaiMultiFormat.relNameOffset + i] = b }
+            file[base + AkaiMultiFormat.relChannelOffset] = UInt8(partIndex)
+            file[base + AkaiMultiFormat.relLevelOffset]   = 99
+            file[base + AkaiMultiFormat.relPanOffset]     = 0
+            file[base + AkaiMultiFormat.relFxBusOffset]   = AkaiFxBus.off.byteValue
+            file[base + AkaiMultiFormat.relSendOffset]    = 25
+        }
+        let bs = AkaiDiskFormat.blockSize
+        let blocksNeeded = (fileSize + bs - 1) / bs
+        guard let blocks = findFreeBlocks(count: blocksNeeded, data: data) else {
+            throw AkaiError.diskFull("Not enough space on the disk to create a multi.")
+        }
+        guard let dirSlot = findFreeDirectorySlot(data: data) else {
+            throw AkaiError.dataError("Disk directory is full")
+        }
+        for i in 0..<blocks.count {
+            let value: UInt16 = (i == blocks.count - 1) ? AkaiDiskFormat.fatEnd : UInt16(blocks[i + 1])
+            setFatValue(block: blocks[i], value: value, data: &data)
+        }
+        for (i, block) in blocks.enumerated() {
+            let srcStart = i * bs
+            let srcEnd   = min(srcStart + bs, file.count)
+            let dstStart = block * bs
+            guard dstStart + bs <= data.count else { throw AkaiError.dataError("Block out of range") }
+            let chunk = file[srcStart..<srcEnd]
+            data.replaceSubrange(dstStart..<dstStart + bs, with: chunk + Data(repeating: 0, count: bs - chunk.count))
+        }
+        let startBlock = blocks[0]
+        let totalSize  = UInt32(fileSize)
+        var entryBytes = Data(repeating: 0, count: AkaiDiskFormat.dirEntrySize)
+        for (i, b) in nameBytes.enumerated() { entryBytes[i] = b }
+        entryBytes[16] = AkaiDiskFormat.ftypeMulti
+        entryBytes[17] = UInt8(totalSize & 0xFF)
+        entryBytes[18] = UInt8((totalSize >> 8) & 0xFF)
+        entryBytes[19] = UInt8((totalSize >> 16) & 0xFF)
+        entryBytes[20] = UInt8(startBlock & 0xFF)
+        entryBytes[21] = UInt8((startBlock >> 8) & 0xFF)
+        data.replaceSubrange(dirSlot..<dirSlot + AkaiDiskFormat.dirEntrySize, with: entryBytes)
+        imageData = data
+        freeBlocks = countFreeBlocks(data: data)
+        let dirEntry = AkaiDirectoryEntry(
+            name: name, fileType: AkaiDiskFormat.ftypeMulti,
+            startBlock: UInt16(startBlock), size: totalSize,
+            rawEntry: entryBytes, diskOffset: dirSlot)
+        let parts: [AkaiMultiPart] = (0..<16).map { i in
+            var p = AkaiMultiPart()
+            p.channel = UInt8(i + 1); p.level = 99; p.pan = 0; p.fxBus = .off; p.fxSend = 25
+            return p
+        }
+        let multiFile = AkaiMultiFile(
+            directoryEntry: dirEntry,
+            multi: AkaiMulti(name: name, parts: parts),
+            isContentReal: true)
+        multis.append(multiFile)
+        hasUnsavedChanges = true
+        return multiFile
+    }
+
     /// Rename a real MULTI file's directory entry name. Does NOT touch the
     /// file's content (any internal "multi name" field, if one exists at a
     /// different offset, is left alone — we don't know where it'd be).
@@ -1635,6 +1947,30 @@ class AkaiDiskImage: ObservableObject {
             throw AkaiError.dataError("Name cannot be empty")
         }
         let nameBytes = akaiBytes(from: cleanName, length: 12)
+
+        // 1. Patch the internal name at +0x03 in the file content — confirmed
+        //    from leftfield-stab.img: both multis had 'NEW MULTI' at file+0x03
+        //    while the directory entry already showed 'LEFTFIELD'/'LEFTFIELD 2'.
+        //    The Akai reads the internal name once a multi is loaded into memory,
+        //    so without this patch it always showed 'New Multi' regardless of
+        //    which file was selected. Same offset/method as renameProgram.
+        let chain = fatChain(from: Int(entry.startBlock), data: data)
+        var fileData = readFromChain(chain, fileOffset: 0, length: Int(entry.size), data: data)
+        if fileData.count >= 0x03 + 12 {
+            for (i, b) in nameBytes.enumerated() { fileData[0x03 + i] = b }
+        }
+        let bs = AkaiDiskFormat.blockSize
+        for (i, block) in chain.enumerated() {
+            let srcStart = i * bs
+            guard srcStart < fileData.count else { break }
+            let srcEnd = min(srcStart + bs, fileData.count)
+            let dstStart = block * bs
+            guard dstStart + bs <= data.count else { break }
+            data.replaceSubrange(dstStart..<dstStart + bs,
+                with: fileData[srcStart..<srcEnd] + Data(repeating: 0, count: bs - (srcEnd - srcStart)))
+        }
+
+        // 2. Patch the directory entry name.
         if entry.diskOffset >= 0, entry.diskOffset + 12 <= data.count {
             for (i, b) in nameBytes.enumerated() { data[entry.diskOffset + i] = b }
         }
@@ -1792,9 +2128,17 @@ class AkaiDiskImage: ObservableObject {
         hdr[0x13] = sample.header.playbackMode.rawValue
         hdr[0x14] = UInt8(bitPattern: sample.header.fineTune)
         hdr[0x15] = UInt8(bitPattern: sample.header.semitoneTune)
-        let ls = sample.header.loopStart
-        hdr[0x26] = UInt8(ls & 0xFF); hdr[0x27] = UInt8((ls >> 8) & 0xFF)
-        hdr[0x28] = UInt8((ls >> 16) & 0xFF); hdr[0x29] = UInt8((ls >> 24) & 0xFF)
+        // loop[0]: `at` is the loop's RIGHT-HAND boundary (the return-to point),
+        // not the start — see the doc comment in parseSample for the hardware
+        // cross-reference that corrected this. So `at` = loopEnd, `len` =
+        // loopEnd-loopStart. flen (fine/sub-sample length) is written as 0 since
+        // this app's sliders only edit whole-sample positions — any fine offset
+        // that was on disk before is lost on save (same precision loss any
+        // whole-sample loop editor would have).
+        let le = sample.header.loopEnd
+        hdr[0x26] = UInt8(le & 0xFF); hdr[0x27] = UInt8((le >> 8) & 0xFF)
+        hdr[0x28] = UInt8((le >> 16) & 0xFF); hdr[0x29] = UInt8((le >> 24) & 0xFF)
+        hdr[AkaiDiskFormat.hdrLoopFineOffset] = 0; hdr[AkaiDiskFormat.hdrLoopFineOffset + 1] = 0
         let loopLen = sample.header.loopEnd > sample.header.loopStart
             ? sample.header.loopEnd - sample.header.loopStart : 0
         hdr[0x2C] = UInt8(loopLen & 0xFF); hdr[0x2D] = UInt8((loopLen >> 8) & 0xFF)
@@ -1845,12 +2189,18 @@ class AkaiDiskImage: ObservableObject {
         hdr[0x14] = UInt8(bitPattern: sample.header.fineTune)
         // Semitone tune (signed)
         hdr[0x15] = UInt8(bitPattern: sample.header.semitoneTune)
-        // Loop start (loop[0].at) — 32-bit LE at 0x26
-        let ls = sample.header.loopStart
-        hdr[0x26] = UInt8(ls & 0xFF)
-        hdr[0x27] = UInt8((ls >> 8) & 0xFF)
-        hdr[0x28] = UInt8((ls >> 16) & 0xFF)
-        hdr[0x29] = UInt8((ls >> 24) & 0xFF)
+        // Loop: `at` is the loop's RIGHT-HAND boundary (return-to point), not
+        // the start — see parseSample's doc comment for the hardware
+        // cross-reference that corrected this. at = loopEnd, len = end-start.
+        // flen (fine/sub-sample length) written as 0 — not modeled by this app's
+        // whole-sample sliders.
+        let le = sample.header.loopEnd
+        hdr[0x26] = UInt8(le & 0xFF)
+        hdr[0x27] = UInt8((le >> 8) & 0xFF)
+        hdr[0x28] = UInt8((le >> 16) & 0xFF)
+        hdr[0x29] = UInt8((le >> 24) & 0xFF)
+        hdr[AkaiDiskFormat.hdrLoopFineOffset] = 0
+        hdr[AkaiDiskFormat.hdrLoopFineOffset + 1] = 0
         // Loop length = end - start (loop[0].len) — 32-bit LE at 0x2C
         let loopLen = sample.header.loopEnd > sample.header.loopStart
             ? sample.header.loopEnd - sample.header.loopStart : 0

@@ -149,7 +149,7 @@ struct SampleDetailView: View {
                     .id(sample.id)   // force a fresh WaveformView (and @State) per sample,
                                      // so switching samples can never leave stale waveMin/
                                      // waveMax from a previous selection.
-                    .frame(height: 120)
+                    .frame(height: 180)
                     .clipShape(RoundedRectangle(cornerRadius: 8))
 
                 Divider()
@@ -199,21 +199,14 @@ struct SampleDetailView: View {
                 InfoCard(title: "Loop") {
                     VStack(alignment: .leading, spacing: 12) {
                         VStack(alignment: .leading, spacing: 6) {
-                            HStack {
-                                Text("Playback Mode").font(.subheadline).foregroundStyle(.secondary)
-                                Spacer()
-                                Picker("", selection: $editedPlaybackMode) {
-                                    ForEach(AkaiSamplePlaybackMode.allCases) { mode in
-                                        Text(mode.displayName).tag(mode)
-                                    }
+                            Text("Playback Mode").font(.subheadline).foregroundStyle(.secondary)
+                            Picker("", selection: $editedPlaybackMode) {
+                                ForEach(AkaiSamplePlaybackMode.allCases) { mode in
+                                    Text(mode.displayName).tag(mode)
                                 }
-                                .labelsHidden().frame(width: 160)
-                                // Changing mode must not touch loopStart/loopEnd —
-                                // only the mode itself, preserving whatever loop
-                                // points are already set (matches the keyzone
-                                // picker's behavior).
-                                .onChange(of: editedPlaybackMode) { _, _ in commitEditsToImage() }
                             }
+                            .labelsHidden().frame(width: 160)
+                            .onChange(of: editedPlaybackMode) { _, _ in commitEditsToImage() }
                             Text(editedPlaybackMode.explanation)
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
@@ -225,7 +218,7 @@ struct SampleDetailView: View {
                                 HStack {
                                     Text("Loop Start").font(.subheadline).foregroundStyle(.secondary)
                                     Spacer()
-                                    Text("\(Int(editedLoopStart))").font(.system(.caption, design: .monospaced))
+                                    Text("\(Int(editedLoopStart)) samples").font(.system(.caption, design: .monospaced))
                                 }
                                 Slider(value: $editedLoopStart, in: 0...max(maxSamples - 1, 1))
                                     .onChange(of: editedLoopStart) { _, _ in
@@ -237,7 +230,7 @@ struct SampleDetailView: View {
                                 HStack {
                                     Text("Loop End").font(.subheadline).foregroundStyle(.secondary)
                                     Spacer()
-                                    Text("\(Int(editedLoopEnd))").font(.system(.caption, design: .monospaced))
+                                    Text("\(Int(editedLoopEnd)) samples").font(.system(.caption, design: .monospaced))
                                 }
                                 Slider(value: $editedLoopEnd, in: 0...maxSamples)
                                     .onChange(of: editedLoopEnd) { _, _ in
@@ -245,6 +238,27 @@ struct SampleDetailView: View {
                                         commitEditsToImage()
                                     }
                             }
+                            // Hardware-style loop length display: the S3000XL's LOOP page shows
+                            // "lng: 168.562" where the integer part is len (whole samples) and
+                            // the decimal is flen/65536 (sub-sample fine length). We read flen
+                            // from the raw header so factory samples show their real fractional
+                            // value. flen is written back as 0 on save (whole-sample UI only),
+                            // so after a save-and-reload this will show a whole number.
+                            let rawHdr = sample.header.rawHeader
+                            let storedFlen: Double = rawHdr.count > AkaiDiskFormat.hdrLoopFineOffset + 1
+                                ? Double(UInt16(rawHdr[AkaiDiskFormat.hdrLoopFineOffset]) |
+                                         (UInt16(rawHdr[AkaiDiskFormat.hdrLoopFineOffset + 1]) << 8))
+                                : 0
+                            let loopLen = max(0, editedLoopEnd - editedLoopStart) + storedFlen / 65536.0
+                            HStack(spacing: 4) {
+                                Text("lng: \(String(format: "%.3f", loopLen))")
+                                    .font(.system(.caption, design: .monospaced))
+                                    .foregroundStyle(.secondary)
+                                Text("— loop length in samples, as shown on the S3000XL LOOP page")
+                                    .font(.caption2)
+                                    .foregroundStyle(.tertiary)
+                            }
+                            .padding(.top, 2)
                         }
                     }
                 }

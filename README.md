@@ -154,13 +154,17 @@ Starts at **block 5**, 510 × 24-byte entries, spans 12 blocks.
 | `0x15` | `stune` | Semitone tune, signed. |
 | `0x16`–`0x19` | `locat[4]` | Sampler-managed address. |
 | `0x1A`–`0x1D` | `slen[4]` | Number of samples. |
-| `0x1E`–`0x21` | `start[4]` | Start marker. |
-| `0x22`–`0x25` | `end[4]` | End marker. |
-| `0x26`–`0x85` | `loop[8]` | 8 × 12 bytes: `at[4]`, `flen[2]`, `len[4]`, `time[2]`. |
+| `0x1E`–`0x21` | `start[4]` | Trim start marker (the TRIM page's `start:`) — a real factory sample can start partway into the buffer; this app currently ignores this field entirely (always treats the buffer as starting at 0). |
+| `0x22`–`0x25` | `end[4]` | Trim end marker (the TRIM page's `end:`). Also currently ignored by this app. |
+| `0x26`–`0x85` | `loop[8]` | 8 × 12 bytes: `at[4]`, `flen[2]`, `len[4]`, `time[2]`. **`at` is the loop's RIGHT-HAND boundary (the return-to point), not the left/start** — CORRECTED after cross-referencing a real factory SAWTOOTH sample's actual bytes against its own LOOP/TRIM page readouts: `at=192, len=168, flen=36831` (displayed on hardware as `lng: 168.562`, confirming `len + flen/65536` is the real fractional length). The forward reading `[at, at+len)` gives `[192, 360.6)` — past the 256-frame buffer entirely, impossible. The correct reading `[at-len, at)` gives `≈[23.4, 192)`, matching the real TRIM `start=22` almost exactly. This app models the loop region as `[loopStart, loopEnd)` and maps `at = loopEnd`, `len = loopEnd - loopStart` on write; `flen` (sub-sample fine length) is read for rounding but always written back as 0, since the UI only edits whole-sample positions. |
 | `0x88`–`0x89` | `stpaira[2]` | Stereo-pair partner header address; `0xFFFF`=none. |
 | `0x8A`–`0x8B` | `srate[2]` | Sample rate, Hz, 16-bit LE. |
 | `0x8C` | `hltoff` | HOLD loop tune offset. |
 | `0xC0`+ | audio | 16-bit signed LE PCM, mono. |
+
+**Loop-point regression fix:** this app originally computed the loop region as `[at, at+len)`, assuming `at` was the loop's start. A real factory SAWTOOTH sample's bytes, cross-referenced against its own LOOP/TRIM page readouts on real hardware, proved this backwards — `at` is the loop's END (return-to point), and the real region is `[at-len, at)`. Also discovered along the way: `flen` (the loop's fine/sub-sample length, 1/65536ths) is real and was being silently ignored entirely — it's what produces the fractional `lng: 168.562`-style readout on the hardware screen. This app now reads `flen` (rounding to the nearest whole sample, since the UI only edits whole-sample positions) but always writes it back as `0`, accepting that small precision loss.
+
+**Still not modeled:** the `start`/`end` trim markers (the TRIM page) — a real factory sample can start partway into its buffer (e.g. the SAWTOOTH sample above: `slen=256` but `start=22`), and this app currently always treats sample 0 as the true start, ignoring `start`/`end` entirely on both read and write.
 
 ### Program header (`akai_program3000_s`) — 0xC0 bytes, keygroups follow
 

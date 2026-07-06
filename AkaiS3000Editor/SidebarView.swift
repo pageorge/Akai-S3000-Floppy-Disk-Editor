@@ -6,6 +6,7 @@ struct SidebarView: View {
     @Binding var selectedTab: ContentView.SidebarTab
     @Binding var selectedSampleID: UUID?
     @Binding var selectedProgramID: UUID?
+    @Binding var selectedMultiID: UUID?
 
     @State private var sampleToDelete: AkaiSample? = nil
     @State private var showDeleteConfirm = false
@@ -31,6 +32,9 @@ struct SidebarView: View {
     /// list), which has its own identical, focus-gated monitor.
     @State private var samplesExpanded: Bool = true
     @State private var programsExpanded: Bool = true
+    @State private var multisExpanded: Bool = true
+    @State private var multiToDelete: AkaiMultiFile? = nil
+    @State private var showDeleteMultiConfirm = false
     @FocusState private var sidebarFocused: Bool
     @State private var isEditingVolumeName = false
     @State private var editedVolumeName = ""
@@ -271,155 +275,11 @@ struct SidebarView: View {
         List {
             GreaseweazleSection(runner: greaseweazle, diskImage: diskImage)
             if diskImage.isLoaded {
-
-                Section {
-                    EmptyView()
-                } header: {
-                    HStack(spacing: 6) {
-                        Image(systemName: "internaldrive.fill")
-                            .foregroundStyle(.red)
-                            .font(.title2)
-                        if isEditingVolumeName {
-                            TextField("Volume name", text: $editedVolumeName)
-                                .textFieldStyle(.plain)
-                                .font(.title3.weight(.semibold))
-                                .focused($volumeNameFieldFocused)
-                                .onChange(of: editedVolumeName) { _, newValue in
-                                    let clean = AkaiDiskImage.sanitizeName(newValue)
-                                    if clean != newValue { editedVolumeName = clean }
-                                }
-                                .onSubmit { commitVolumeRename() }
-                                .onExitCommand { cancelVolumeRename() }
-                            // Tick (commit)
-                            Button { commitVolumeRename() } label: {
-                                Image(systemName: "checkmark")
-                                    .font(.system(size: 14, weight: .semibold))
-                                    .foregroundStyle(.green)
-                            }
-                            .buttonStyle(.plain)
-                            .help("Rename")
-                            // X (cancel)
-                            Button { cancelVolumeRename() } label: {
-                                Image(systemName: "xmark")
-                                    .font(.system(size: 14, weight: .semibold))
-                                    .foregroundStyle(.secondary)
-                            }
-                            .buttonStyle(.plain)
-                            .help("Cancel")
-                        } else {
-                            Text(diskImage.diskName.isEmpty ? "Akai Disk" : diskImage.diskName)
-                                .font(.title3.weight(.semibold))
-                                .lineLimit(1)
-                            Spacer()
-                            // Pen (begin edit)
-                            Button { beginVolumeRename() } label: {
-                                Image(systemName: "pencil")
-                                    .font(.system(size: 14))
-                                    .foregroundStyle(.secondary)
-                            }
-                            .buttonStyle(.plain)
-                            .help("Rename volume")
-                        }
-                    }
-                    .padding(.vertical, 6)
-                    .padding(.trailing, 12)   // align RHS pencil with the sample/program pill content edge (row inset 4 + internal h-padding 8)
-                }
-
-                Section {
-                    if samplesExpanded {
-                        ForEach(diskImage.samples) { sample in
-                            SidebarSampleRow(
-                                sample: sample,
-                                isSelected: selectedSampleIDs.contains(sample.id)
-                                    || (selectedSampleIDs.isEmpty && selectedSampleID == sample.id),
-                                selectedCount: selectedSampleIDs.count,
-                                onTap: { handleSampleTap(sample) },
-                                onDelete: {
-                                    if selectedSampleIDs.count > 1 && selectedSampleIDs.contains(sample.id) {
-                                        showBatchDeleteConfirm = true
-                                    } else {
-                                        sampleToDelete = sample; showDeleteConfirm = true
-                                    }
-                                },
-                                onClone: { cloneSample(sample) }
-                            )
-                        }
-                    }
-                } header: {
-                    HStack {
-                        Label("Samples (\(diskImage.samples.count))", systemImage: "waveform")
-                            .font(.subheadline.weight(.semibold))
-                            .foregroundStyle(.secondary)
-                        Spacer()
-                        Image(systemName: samplesExpanded ? "chevron.down" : "chevron.right")
-                            .font(.system(size: 10, weight: .semibold))
-                            .foregroundStyle(.secondary)
-                    }
-                    .contentShape(Rectangle())
-                    .onTapGesture {
-                        withAnimation(.easeInOut(duration: 0.2)) { samplesExpanded.toggle() }
-                        if samplesExpanded { selectedTab = .samples; selectedSampleID = nil; selectedSampleIDs.removeAll() }
-                    }
-                    .padding(.trailing, 12)
-                }
-
-                Section {
-                    if programsExpanded {
-                        ForEach(diskImage.programs) { prog in
-                            SidebarProgramRow(
-                                program: prog,
-                                isSelected: selectedProgramIDs.contains(prog.id)
-                                    || (selectedProgramIDs.isEmpty && selectedProgramID == prog.id),
-                                selectedCount: selectedProgramIDs.count,
-                                onTap: { handleProgramTap(prog) },
-                                onDelete: {
-                                    if selectedProgramIDs.count > 1 && selectedProgramIDs.contains(prog.id) {
-                                        showBatchDeleteProgramConfirm = true
-                                    } else {
-                                        programToDelete = prog; showDeleteProgramConfirm = true
-                                    }
-                                },
-                                onCreate: { createProgram() },
-                                onClone: { cloneProgram(prog) }
-                            )
-                        }
-                    }
-                } header: {
-                    HStack {
-                        Label("Programs (\(diskImage.programs.count))", systemImage: "pianokeys")
-                            .font(.subheadline.weight(.semibold))
-                            .foregroundStyle(.secondary)
-                        Spacer()
-                        Image(systemName: programsExpanded ? "chevron.down" : "chevron.right")
-                            .font(.system(size: 10, weight: .semibold))
-                            .foregroundStyle(.secondary)
-                    }
-                    .contentShape(Rectangle())
-                    .onTapGesture {
-                        withAnimation(.easeInOut(duration: 0.2)) { programsExpanded.toggle() }
-                        if programsExpanded { selectedTab = .programs; selectedProgramID = nil; selectedProgramIDs.removeAll() }
-                    }
-                    .padding(.trailing, 12)
-                    .contextMenu {
-                        Button { createProgram() } label: {
-                            Label("Create New Program", systemImage: "plus.square.on.square")
-                        }
-                    }
-                }
-
-                Section {
-                    Label("Disk Info", systemImage: "info.circle")
-                        .contentShape(Rectangle())
-                        .onTapGesture { selectedTab = .diskInfo }
-                }
-
-                Section {
-                    Label(diskImage.multis.isEmpty ? "Multis" : "Multis (\(diskImage.multis.count))",
-                          systemImage: "square.stack.3d.up")
-                        .contentShape(Rectangle())
-                        .onTapGesture { selectedTab = .multis }
-                }
-
+                diskNameSection
+                samplesSection
+                programsSection
+                multisSection
+                diskInfoSection
             } else {
                 VStack(alignment: .leading, spacing: 8) {
                     Label("No Disk Loaded", systemImage: "externaldrive.badge.questionmark")
@@ -437,24 +297,13 @@ struct SidebarView: View {
             deleteKeyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
                 guard self.sidebarFocused, !self.diskImage.isEditingText else { return event }
 
-                // Arrow keys: move the single selection within whichever list is
-                // active (126 = up, 125 = down), mirroring Finder/list navigation.
-                if event.keyCode == 126 {
-                    self.moveSelection(by: -1)
-                    return nil
-                }
-                if event.keyCode == 125 {
-                    self.moveSelection(by: 1)
-                    return nil
-                }
+                if event.keyCode == 126 { self.moveSelection(by: -1); return nil }
+                if event.keyCode == 125 { self.moveSelection(by:  1); return nil }
 
                 guard event.keyCode == 51 || event.keyCode == 117 else { return event }
-                // Multi-selection takes priority. Programs are checked first when
-                // the programs tab is active and has a selection, otherwise samples.
                 if self.selectedTab == .programs {
                     if self.selectedProgramIDs.count > 1 {
-                        self.showBatchDeleteProgramConfirm = true
-                        return nil
+                        self.showBatchDeleteProgramConfirm = true; return nil
                     }
                     if let id = self.selectedProgramID,
                        let prog = self.diskImage.programs.first(where: { $0.id == id }) {
@@ -464,8 +313,7 @@ struct SidebarView: View {
                     }
                 }
                 if self.selectedSampleIDs.count > 1 {
-                    self.showBatchDeleteConfirm = true
-                    return nil
+                    self.showBatchDeleteConfirm = true; return nil
                 }
                 if let id = self.selectedSampleID,
                    let sample = self.diskImage.samples.first(where: { $0.id == id }) {
@@ -479,11 +327,8 @@ struct SidebarView: View {
         .onDisappear {
             if let m = deleteKeyMonitor { NSEvent.removeMonitor(m); deleteKeyMonitor = nil }
         }
-        .confirmationDialog(
-            "Delete \"\(sampleToDeleteName)\"?",
-            isPresented: $showDeleteConfirm,
-            titleVisibility: .visible
-        ) {
+        .confirmationDialog("Delete \"\(sampleToDeleteName)\"?",
+            isPresented: $showDeleteConfirm, titleVisibility: .visible) {
             Button("Delete Sample", role: .destructive) {
                 if let sample = sampleToDelete {
                     diskImage.deleteSample(id: sample.id)
@@ -496,24 +341,16 @@ struct SidebarView: View {
         } message: {
             Text("This removes the sample from the list. The disk image file is not modified until you save.")
         }
-        .confirmationDialog(
-            "Delete \(selectedSampleIDs.count) samples?",
-            isPresented: $showBatchDeleteConfirm,
-            titleVisibility: .visible
-        ) {
-            Button("Delete \(selectedSampleIDs.count) Samples", role: .destructive) {
-                deleteSelection()
-            }
-            .keyboardShortcut(.defaultAction)
+        .confirmationDialog("Delete \(selectedSampleIDs.count) samples?",
+            isPresented: $showBatchDeleteConfirm, titleVisibility: .visible) {
+            Button("Delete \(selectedSampleIDs.count) Samples", role: .destructive) { deleteSelection() }
+                .keyboardShortcut(.defaultAction)
             Button("Cancel", role: .cancel) {}
         } message: {
             Text("This removes the selected samples from the list. The disk image file is not modified until you save.")
         }
-        .confirmationDialog(
-            "Delete \"\(programToDeleteName)\"?",
-            isPresented: $showDeleteProgramConfirm,
-            titleVisibility: .visible
-        ) {
+        .confirmationDialog("Delete \"\(programToDeleteName)\"?",
+            isPresented: $showDeleteProgramConfirm, titleVisibility: .visible) {
             Button("Delete Program", role: .destructive) {
                 if let prog = programToDelete {
                     diskImage.deleteProgram(id: prog.id)
@@ -526,23 +363,224 @@ struct SidebarView: View {
         } message: {
             Text("This removes the program from the list. The disk image file is not modified until you save.")
         }
-        .confirmationDialog(
-            "Delete \(selectedProgramIDs.count) programs?",
-            isPresented: $showBatchDeleteProgramConfirm,
-            titleVisibility: .visible
-        ) {
-            Button("Delete \(selectedProgramIDs.count) Programs", role: .destructive) {
-                deleteProgramSelection()
-            }
-            .keyboardShortcut(.defaultAction)
+        .confirmationDialog("Delete \(selectedProgramIDs.count) programs?",
+            isPresented: $showBatchDeleteProgramConfirm, titleVisibility: .visible) {
+            Button("Delete \(selectedProgramIDs.count) Programs", role: .destructive) { deleteProgramSelection() }
+                .keyboardShortcut(.defaultAction)
             Button("Cancel", role: .cancel) {}
         } message: {
             Text("This removes the selected programs from the list. The disk image file is not modified until you save.")
+        }
+        .confirmationDialog("Delete multi?",
+            isPresented: $showDeleteMultiConfirm, titleVisibility: .visible) {
+            Button("Delete Multi", role: .destructive) {
+                if let mf = multiToDelete {
+                    diskImage.deleteMulti(id: mf.id)
+                    if selectedMultiID == mf.id { selectedMultiID = nil }
+                    multiToDelete = nil
+                }
+            }
+            .keyboardShortcut(.defaultAction)
+            Button("Cancel", role: .cancel) { multiToDelete = nil }
+        } message: {
+            Text("This removes the multi file from the disk. The disk image file is not modified until you save.")
         }
         .alert("Couldn't complete", isPresented: $cloneSpaceAlert) {
             Button("OK", role: .cancel) {}
         } message: {
             Text(cloneSpaceMessage)
+        }
+    }
+
+    // MARK: - Sidebar sections (extracted to keep body type-checkable)
+
+    @ViewBuilder private var diskNameSection: some View {
+        Section {
+            EmptyView()
+        } header: {
+            HStack(spacing: 6) {
+                Image(systemName: "internaldrive.fill").foregroundStyle(.red).font(.title2)
+                if isEditingVolumeName {
+                    TextField("Volume name", text: $editedVolumeName)
+                        .textFieldStyle(.plain)
+                        .font(.title3.weight(.semibold))
+                        .focused($volumeNameFieldFocused)
+                        .onChange(of: editedVolumeName) { _, newValue in
+                            let clean = AkaiDiskImage.sanitizeName(newValue)
+                            if clean != newValue { editedVolumeName = clean }
+                        }
+                        .onSubmit { commitVolumeRename() }
+                        .onExitCommand { cancelVolumeRename() }
+                    Button { commitVolumeRename() } label: {
+                        Image(systemName: "checkmark").font(.system(size: 14, weight: .semibold)).foregroundStyle(.green)
+                    }.buttonStyle(.plain).help("Rename")
+                    Button { cancelVolumeRename() } label: {
+                        Image(systemName: "xmark").font(.system(size: 14, weight: .semibold)).foregroundStyle(.secondary)
+                    }.buttonStyle(.plain).help("Cancel")
+                } else {
+                    Text(diskImage.diskName.isEmpty ? "Akai Disk" : diskImage.diskName)
+                        .font(.title3.weight(.semibold)).lineLimit(1)
+                    Spacer()
+                    Button { beginVolumeRename() } label: {
+                        Image(systemName: "pencil").font(.system(size: 14)).foregroundStyle(.secondary)
+                    }.buttonStyle(.plain).help("Rename volume")
+                }
+            }
+            .padding(.vertical, 6)
+            .padding(.trailing, 12)
+        }
+    }
+
+    @ViewBuilder private var samplesSection: some View {
+        Section {
+            if samplesExpanded {
+                ForEach(diskImage.samples) { sample in
+                    SidebarSampleRow(
+                        sample: sample,
+                        isSelected: selectedSampleIDs.contains(sample.id)
+                            || (selectedSampleIDs.isEmpty && selectedSampleID == sample.id),
+                        selectedCount: selectedSampleIDs.count,
+                        onTap: { handleSampleTap(sample) },
+                        onDelete: {
+                            if selectedSampleIDs.count > 1 && selectedSampleIDs.contains(sample.id) {
+                                showBatchDeleteConfirm = true
+                            } else {
+                                sampleToDelete = sample; showDeleteConfirm = true
+                            }
+                        },
+                        onClone: { cloneSample(sample) }
+                    )
+                }
+            }
+        } header: {
+            HStack {
+                Label("Samples (\(diskImage.samples.count))", systemImage: "waveform")
+                    .font(.subheadline.weight(.semibold)).foregroundStyle(.secondary)
+                Spacer()
+                Image(systemName: samplesExpanded ? "chevron.down" : "chevron.right")
+                    .font(.system(size: 10, weight: .semibold)).foregroundStyle(.secondary)
+            }
+            .contentShape(Rectangle())
+            .onTapGesture {
+                withAnimation(.easeInOut(duration: 0.2)) { samplesExpanded.toggle() }
+                if samplesExpanded { selectedTab = .samples; selectedSampleID = nil; selectedSampleIDs.removeAll() }
+            }
+            .padding(.trailing, 12)
+        }
+    }
+
+    @ViewBuilder private var programsSection: some View {
+        Section {
+            if programsExpanded {
+                ForEach(diskImage.programs) { prog in
+                    SidebarProgramRow(
+                        program: prog,
+                        isSelected: selectedProgramIDs.contains(prog.id)
+                            || (selectedProgramIDs.isEmpty && selectedProgramID == prog.id),
+                        selectedCount: selectedProgramIDs.count,
+                        onTap: { handleProgramTap(prog) },
+                        onDelete: {
+                            if selectedProgramIDs.count > 1 && selectedProgramIDs.contains(prog.id) {
+                                showBatchDeleteProgramConfirm = true
+                            } else {
+                                programToDelete = prog; showDeleteProgramConfirm = true
+                            }
+                        },
+                        onCreate: { createProgram() },
+                        onClone: { cloneProgram(prog) }
+                    )
+                }
+            }
+        } header: {
+            HStack {
+                Label("Programs (\(diskImage.programs.count))", systemImage: "pianokeys")
+                    .font(.subheadline.weight(.semibold)).foregroundStyle(.secondary)
+                Spacer()
+                Image(systemName: programsExpanded ? "chevron.down" : "chevron.right")
+                    .font(.system(size: 10, weight: .semibold)).foregroundStyle(.secondary)
+            }
+            .contentShape(Rectangle())
+            .onTapGesture {
+                withAnimation(.easeInOut(duration: 0.2)) { programsExpanded.toggle() }
+                if programsExpanded { selectedTab = .programs; selectedProgramID = nil; selectedProgramIDs.removeAll() }
+            }
+            .padding(.trailing, 12)
+            .contextMenu {
+                Button { createProgram() } label: {
+                    Label("Create New Program", systemImage: "plus.square.on.square")
+                }
+            }
+        }
+    }
+
+    @ViewBuilder private var multisSection: some View {
+        Section {
+            if multisExpanded {
+                ForEach(diskImage.multis) { mf in
+                    SidebarMultiRow(
+                        multiFile: mf,
+                        isSelected: selectedMultiID == mf.id,
+                        onTap: { selectedTab = .multis; selectedMultiID = mf.id },
+                        onClone: {
+                            do {
+                                let cloned = try diskImage.cloneMulti(id: mf.id)
+                                selectedTab = .multis
+                                selectedMultiID = cloned.id
+                            } catch {
+                                cloneSpaceMessage = error.localizedDescription
+                                cloneSpaceAlert = true
+                            }
+                        },
+                        onCreate: {
+                            if let created = try? diskImage.createMulti() {
+                                selectedTab = .multis
+                                selectedMultiID = created.id
+                            }
+                        },
+                        onDelete: { multiToDelete = mf; showDeleteMultiConfirm = true },
+                        onRename: {
+                            selectedTab = .multis
+                            selectedMultiID = mf.id
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                                NotificationCenter.default.post(name: .beginMultiRename, object: mf.id)
+                            }
+                        }
+                    )
+                }
+            }
+        } header: {
+            let count = diskImage.multis.count
+            HStack {
+                Label(count == 0 ? "Multis" : "Multis (\(count))", systemImage: "square.stack.3d.up")
+                    .font(.subheadline.weight(.semibold)).foregroundStyle(.secondary)
+                Spacer()
+                Image(systemName: multisExpanded ? "chevron.down" : "chevron.right")
+                    .font(.system(size: 10, weight: .semibold)).foregroundStyle(.secondary)
+            }
+            .contentShape(Rectangle())
+            .onTapGesture {
+                withAnimation(.easeInOut(duration: 0.2)) { multisExpanded.toggle() }
+                if multisExpanded { selectedTab = .multis; selectedMultiID = nil }
+            }
+            .padding(.trailing, 12)
+            .contextMenu {
+                Button {
+                    if let created = try? diskImage.createMulti() {
+                        selectedTab = .multis
+                        selectedMultiID = created.id
+                    }
+                } label: {
+                    Label("Create New Multi", systemImage: "plus.square.on.square")
+                }
+            }
+        }
+    }
+
+    @ViewBuilder private var diskInfoSection: some View {
+        Section {
+            Label("Disk Info", systemImage: "info.circle")
+                .contentShape(Rectangle())
+                .onTapGesture { selectedTab = .diskInfo }
         }
     }
 }
@@ -656,6 +694,65 @@ struct SidebarProgramRow: View {
                 } else {
                     Label("Delete \"\(displayName)\"", systemImage: "trash")
                 }
+            }
+        }
+    }
+}
+
+struct SidebarMultiRow: View {
+    let multiFile: AkaiMultiFile
+    let isSelected: Bool
+    let onTap: () -> Void
+    var onClone: () -> Void = {}
+    var onCreate: () -> Void = {}
+    var onDelete: () -> Void = {}
+    var onRename: () -> Void = {}
+
+    private var displayName: String {
+        multiFile.multi.name.isEmpty ? "(unnamed)" : multiFile.multi.name
+    }
+
+    private var activeParts: Int {
+        multiFile.multi.parts.filter { !$0.programName.trimmingCharacters(in: .whitespaces).isEmpty }.count
+    }
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "square.stack.3d.up.fill")
+                .foregroundStyle(isSelected ? .white : .teal)
+                .font(.system(size: 14))
+            VStack(alignment: .leading, spacing: 1) {
+                Text(displayName)
+                    .font(.system(.body, design: .monospaced))
+                    .lineLimit(1)
+                    .foregroundStyle(isSelected ? .white : .primary)
+                Text(activeParts == 0 ? "no parts assigned" : "\(activeParts) part\(activeParts == 1 ? "" : "s")")
+                    .font(.caption2)
+                    .foregroundStyle(isSelected ? .white.opacity(0.8) : .secondary)
+            }
+        }
+        .padding(.vertical, 3)
+        .padding(.horizontal, 8)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(RoundedRectangle(cornerRadius: 6).fill(isSelected ? Color.teal : Color.clear))
+        .listRowInsets(EdgeInsets(top: 2, leading: 4, bottom: 2, trailing: 4))
+        .contentShape(Rectangle())
+        .onTapGesture { onTap() }
+        .contextMenu {
+            Button(action: onClone) {
+                Label("Clone", systemImage: "plus.square.on.square")
+            }
+            Divider()
+            Button(action: onCreate) {
+                Label("New Multi", systemImage: "plus.square.on.square")
+            }
+            Divider()
+            Button(action: onRename) {
+                Label("Rename", systemImage: "pencil")
+            }
+            Divider()
+            Button(role: .destructive, action: onDelete) {
+                Label("Delete \"\(displayName)\"", systemImage: "trash")
             }
         }
     }

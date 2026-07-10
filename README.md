@@ -58,8 +58,8 @@ My app is built with SwiftUI — no dependencies — so it should run on most mo
     </td>
   </tr>
   
-    <tr>
-<td     valign="top">
+  <tr>
+    <td valign="top">
       <h3>Floppy disk info and a map of where everything will be saved on disk</h3>
       <img src="screenshots/disk-info.png" width="100%">
     </td>

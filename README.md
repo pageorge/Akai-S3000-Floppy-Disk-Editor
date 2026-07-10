@@ -29,34 +29,42 @@ My app is built with SwiftUI — no dependencies — so it should run on most mo
 <table>
   <tr>
     <td valign="top">
+      <h3>Open last session, open an existing image or create a new image</h3>
       <img src="screenshots/home.png" width="100%">
-      <p align="center">Resume session, open image or create a new image</p>
     </td>
   </tr>
   <tr>
     <td valign="top">
+      <h3>Drag in multiple wav/aiff samples and setup loop points</h3>
       <img src="screenshots/looping.png" width="100%">
-      <p align="center">Easily drag in multiple files and setup loop points</p>
     </td>
   </tr>  
   <tr>    
     <td valign="top">
-      <img src="screenshots/keyrange-adsr.png" width="100%">
-      <p align="center">Easily create new or clone keyzones, create a drum program by dragging in multiple samples on to the drum drop zone. Set filter mods and ADSR graph</p>
-    </td>
-  </tr>
-  <tr>
-    <td valign="top">
-      <img src="screenshots/disk-info.png" width="100%">
-      <p align="center">Floppy disk info and a map of where everything will get saved to on the disk</p>
+      <h3>Create or clone keyzones, create a drum program by dragging in multiple drum samples at once. Set filter mods and ADSR graph</p>
+      <img src="screenshots/keyzones-filter-adsr.png" width="100%">
     </td>
   </tr>
   <tr>
     <td width="50%" valign="top">
-      <img src="screenshots/greaseweazle.png" width="100%">
-      <p align="center">Read / Write buttons call Greaseweazle commands and show log and progress writing to disk</p>
+      <h3>Create multis and assign programs</h3>
+      <img src="screenshots/multis.png" width="100%">
     </td>
   </tr>
+  <tr>
+    <td width="50%" valign="top">
+      <h3>Read / Write buttons call Greaseweazle commands and show log and progress writing to disk</h3>
+      <img src="screenshots/greaseweazle.png" width="100%">
+    </td>
+  </tr>
+  
+    <tr>
+<td     valign="top">
+      <h3>Floppy disk info and a map of where everything will be saved on disk</h3>
+      <img src="screenshots/disk-info.png" width="100%">
+    </td>
+  </tr>
+  
 </table>
 
 ---

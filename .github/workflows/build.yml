@@ -36,29 +36,30 @@ jobs:
             CODE_SIGNING_ALLOWED=NO \
             ONLY_ACTIVE_ARCH=NO
 
-      - name: Find app
+      - name: Find and zip app
         run: |
           APP_PATH=$(find build/ -name "AkaiS3000Editor.app" -type d | head -1)
           echo "Found app at: $APP_PATH"
           cp -R "$APP_PATH" AkaiS3000Editor.app
+          ditto -c -k --sequesterRsrc --keepParent AkaiS3000Editor.app AkaiS3000Editor.zip
 
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:
           name: AkaiS3000Editor
-          path: AkaiS3000Editor.app
+          path: AkaiS3000Editor.zip
           retention-days: 30
 
       - name: Create latest release
         if: github.ref == 'refs/heads/main' && github.event_name == 'push'
-        uses: softprops/action-gh-release@v3
+        uses: softprops/action-gh-release@v2
         with:
           tag_name: latest
           name: Latest Build
           body: |
             Auto-built from the latest commit on main.
-            Download AkaiS3000Editor.app, right-click and choose Open on first launch to bypass Gatekeeper.
-          files: AkaiS3000Editor.app
+            Download AkaiS3000Editor.zip, unzip, then right-click AkaiS3000Editor.app and choose Open on first launch to bypass Gatekeeper.
+          files: AkaiS3000Editor.zip
           make_latest: true
           prerelease: false
         env:

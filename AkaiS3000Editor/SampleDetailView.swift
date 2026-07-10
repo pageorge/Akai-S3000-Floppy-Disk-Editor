@@ -585,6 +585,7 @@ struct SampleDetailView: View {
 struct SampleListView: View {
     @ObservedObject var diskImage: AkaiDiskImage
     @Binding var selectedSampleID: UUID?
+    @State private var showingImport = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -596,8 +597,32 @@ struct SampleListView: View {
             .padding()
             Divider()
             if diskImage.samples.isEmpty {
-                ContentUnavailableView("No Samples", systemImage: "waveform",
-                    description: Text("Drag a sample on here to get started."))
+                VStack(spacing: 16) {
+                    ContentUnavailableView("No Samples", systemImage: "waveform",
+                        description: Text("Drag a WAV file here or browse to import."))
+                    Button {
+                        showingImport = true
+                    } label: {
+                        Label("Browse for Samples", systemImage: "square.and.arrow.down")
+                            .padding(.horizontal, 16)
+                            .padding(.vertical, 8)
+                    }
+                    .buttonStyle(.borderedProminent)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .fileImporter(isPresented: $showingImport,
+                              allowedContentTypes: [.audio],
+                              allowsMultipleSelection: true) { result in
+                    guard case .success(let urls) = result else { return }
+                    for url in urls {
+                        let accessing = url.startAccessingSecurityScopedResource()
+                        do {
+                            let s = try diskImage.importAndAddSample(from: url)
+                            selectedSampleID = s.id
+                        } catch {}
+                        if accessing { url.stopAccessingSecurityScopedResource() }
+                    }
+                }
             } else {
                 Table(diskImage.samples, selection: $selectedSampleID) {
                     TableColumn("Name") { s in

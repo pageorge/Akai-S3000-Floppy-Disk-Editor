@@ -15,6 +15,16 @@ struct ContentView: View {
     @State private var pendingOpenAction: (() -> Void)? = nil
     @State private var showingUnsavedChangesConfirm = false
 
+    @State private var isContentReady = true
+
+    private func scheduleContentReady() {
+        isContentReady = false
+        Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 60_000_000)
+            isContentReady = true
+        }
+    }
+
     enum SidebarTab: String, CaseIterable {
         case samples = "Samples"
         case programs = "Programs"
@@ -54,6 +64,11 @@ struct ContentView: View {
                         GreaseweazleLogView(runner: greaseweazle)
                     } else if !diskImage.isLoaded {
                         WelcomeView(diskImage: diskImage)
+                    } else if !isContentReady {
+                        ProgressView()
+                            .progressViewStyle(.circular)
+                            .scaleEffect(1.5)
+                            .frame(maxWidth: .infinity, maxHeight: .infinity)
                     } else {
                         switch selectedTab {
                         case .samples:
@@ -76,7 +91,6 @@ struct ContentView: View {
                             if let id = selectedMultiID,
                                let real = diskImage.multis.first(where: { $0.id == id }) {
                                 MultiPlaceholderView(multiFile: real, diskImage: diskImage)
-                                    .id(id)
                             } else {
                                 ContentUnavailableView("No Multi Selected",
                                     systemImage: "square.stack.3d.up",
@@ -97,7 +111,7 @@ struct ContentView: View {
                         Button {
                             saveAll()
                         } label: {
-                            Text("Save")
+                            Label("Save Image", systemImage: "square.and.arrow.down")
                         }
                         .help("Save all changes to disk image")
                         .keyboardShortcut("s", modifiers: .command)
@@ -122,15 +136,32 @@ struct ContentView: View {
         .onReceive(NotificationCenter.default.publisher(for: .createDiskImage)) { _ in
             createDiskImage()
         }
+        .onChange(of: selectedTab) { _, _ in
+            if !greaseweazle.isBusy { greaseweazle.clearLog() }
+            scheduleContentReady()
+        }
+        .onChange(of: selectedSampleID) { _, _ in
+            if !greaseweazle.isBusy { greaseweazle.clearLog() }
+            scheduleContentReady()
+        }
+        .onChange(of: selectedProgramID) { _, _ in
+            if !greaseweazle.isBusy { greaseweazle.clearLog() }
+            scheduleContentReady()
+        }
+        .onChange(of: selectedMultiID) { _, _ in
+            if !greaseweazle.isBusy { greaseweazle.clearLog() }
+            scheduleContentReady()
+        }
         .onAppear {
             // When a Greaseweazle read finishes, auto-load the freshly read .img.
             greaseweazle.onReadComplete = { url in
                 do {
                     try diskImage.load(from: url)
+                    UserDefaults.standard.set(url.path, forKey: "lastOpenedImagePath")
                     selectedSampleID = nil
                     selectedProgramID = nil
                     selectedMultiID = nil
-                    greaseweazle.clearLog()   // dismiss log so the loaded disk shows
+                    greaseweazle.clearLog()
                     toast = ToastData(message: "Loaded \(url.lastPathComponent)")
                 } catch {
                     toast = ToastData(message: "Read OK but couldn't load: \(error.localizedDescription)", isError: true)
@@ -249,6 +280,7 @@ struct ContentView: View {
         if panel.runModal() == .OK, let url = panel.url {
             do {
                 try diskImage.load(from: url)
+                UserDefaults.standard.set(url.path, forKey: "lastOpenedImagePath")
                 selectedSampleID = nil
                 selectedProgramID = nil
                 selectedMultiID = nil
@@ -336,6 +368,7 @@ struct ContentView: View {
             defer { release() }
             do {
                 try diskImage.load(from: url)
+                UserDefaults.standard.set(url.path, forKey: "lastOpenedImagePath")
                 selectedSampleID = nil
                 selectedProgramID = nil
                 selectedMultiID = nil

@@ -552,9 +552,9 @@ struct DiskMapView: View {
         switch kind {
         case .system:  return Color.secondary.opacity(0.55)
         case .free:    return Color.black
-        case .sample:  return Color.red
+        case .sample:  return Color(red: 0.91, green: 0, blue: 0.11)
         case .program: return Color.purple
-        case .multi:   return Color.orange
+        case .multi:   return Color.teal
         }
     }
 
@@ -687,9 +687,9 @@ struct DiskMapView: View {
 
             // Legend.
             HStack(spacing: 16) {
-                legendItem(color: .red, text: "Samples")
+                legendItem(color: Color(red: 0.91, green: 0, blue: 0.11), text: "Samples")
                 legendItem(color: .purple, text: "Programs")
-                legendItem(color: .orange, text: "Multis")
+                legendItem(color: .teal, text: "Multis")
                 legendItem(color: Color.secondary.opacity(0.55), text: "Volume / System")
                 legendItem(color: .black, text: "Free")
             }
@@ -753,7 +753,238 @@ struct DiskMapView: View {
     }
 }
 
-// MARK: - Disk Info View
+// MARK: - ADSR Envelope View
+
+struct AdsrView: View {
+    @Binding var attack: UInt8
+    @Binding var decay: UInt8
+    @Binding var sustain: UInt8
+    @Binding var release: UInt8
+
+    @State private var dragging: Handle? = nil
+
+    enum Handle { case attack, decay, sustain, release }
+
+    // Fixed layout constants — same approach as the JS reference implementation
+    private let pad: CGFloat = 0
+    private let yTopPad: CGFloat = 6
+    private let yBotPad: CGFloat = 0
+
+    private func calcPoints(size: CGSize) -> (p0: CGPoint, p1: CGPoint, p2: CGPoint, p3: CGPoint, p4: CGPoint) {
+        let w = size.width - pad * 2
+        let yBot = size.height - yBotPad
+        let yTop = yTopPad
+        let yRange = yBot - yTop
+
+        let aFrac = CGFloat(attack)  / 99.0
+        let dFrac = CGFloat(decay)   / 99.0
+        let sFrac = CGFloat(sustain) / 99.0
+        let rFrac = CGFloat(release) / 99.0
+
+        // Segment widths: A/D/R are time (proportional), S is fixed (it's a level)
+        let aW = aFrac * w * 0.25
+        let dW = (0.05 + dFrac * 0.20) * w
+        let sW = w * 0.25
+        let rW = rFrac * 0.25 * w
+
+        let x0 = pad
+        let x1 = x0 + aW
+        let x2 = x1 + dW
+        let x3 = x2 + sW
+        let x4 = x3 + rW
+
+        let ySus = yBot - sFrac * yRange
+
+        return (
+            CGPoint(x: x0, y: yBot),   // p0: start (silence)
+            CGPoint(x: x1, y: yTop),   // p1: attack peak (always full height)
+            CGPoint(x: x2, y: ySus),   // p2: decay end (always at sustain level)
+            CGPoint(x: x3, y: ySus),   // p3: sustain end
+            CGPoint(x: x4, y: yBot)    // p4: release end (silence)
+        )
+    }
+
+    // Map cursor x directly to a 0-99 value for each handle,
+    // using the same geometry as calcPoints so the handle tracks the cursor exactly.
+    private func xToVal(_ x: CGFloat, _ handle: Handle, _ pts: (p0: CGPoint, p1: CGPoint, p2: CGPoint, p3: CGPoint, p4: CGPoint), _ size: CGSize) -> UInt8 {
+        let w = size.width - pad * 2
+        let frac: CGFloat
+        switch handle {
+        case .attack:
+            frac = (x - pad) / (w * 0.25)
+        case .decay:
+            frac = (x - pts.p1.x - w * 0.05) / (w * 0.20)
+        case .sustain:
+            // x is actually y for sustain
+            let yBot = size.height - yBotPad
+            frac = (yBot - x) / (yBot - yTopPad)
+        case .release:
+            frac = (x - pts.p3.x) / (w * 0.25)
+        }
+        return UInt8(max(0, min(99, Int(frac * 99))))
+    }
+
+    var body: some View {
+        GeometryReader { geo in
+            let size = geo.size
+            let pts = calcPoints(size: size)
+            let sHandle = CGPoint(x: (pts.p2.x + pts.p3.x) / 2, y: pts.p2.y)
+
+            ZStack {
+                RoundedRectangle(cornerRadius: 6)
+                    .fill(Color.black.opacity(0.35))
+                    .allowsHitTesting(false)
+
+                Canvas { ctx, cs in
+                    let p = calcPoints(size: cs)
+
+                    // Grid
+                    for i in 1..<8 {
+                        var line = Path()
+                        let x = cs.width * CGFloat(i) / 8
+                        line.move(to: CGPoint(x: x, y: 0))
+                        line.addLine(to: CGPoint(x: x, y: cs.height))
+                        ctx.stroke(line, with: .color(.white.opacity(0.06)), lineWidth: 0.5)
+                    }
+                    for i in 1..<4 {
+                        var line = Path()
+                        let y = cs.height * CGFloat(i) / 4
+                        line.move(to: CGPoint(x: 0, y: y))
+                        line.addLine(to: CGPoint(x: cs.width, y: y))
+                        ctx.stroke(line, with: .color(.white.opacity(0.06)), lineWidth: 0.5)
+                    }
+
+                    // Vertical dividers between ADSR sections
+                    let dividerColor = GraphicsContext.Shading.color(Color.green.opacity(0.25))
+                    for x in [p.p1.x, p.p2.x, p.p3.x] {
+                        var div = Path()
+                        div.move(to: CGPoint(x: x, y: 0))
+                        div.addLine(to: CGPoint(x: x, y: cs.height))
+                        ctx.stroke(div, with: dividerColor, style: StrokeStyle(lineWidth: 1, dash: [3, 3]))
+                    }
+
+                    // Fill
+                    var fill = Path()
+                    fill.move(to: p.p0)
+                    fill.addLine(to: p.p1)
+                    fill.addLine(to: p.p2)
+                    fill.addLine(to: p.p3)
+                    fill.addLine(to: p.p4)
+                    fill.addLine(to: CGPoint(x: p.p4.x, y: p.p0.y))
+                    fill.closeSubpath()
+                    ctx.fill(fill, with: .color(.green.opacity(0.10)))
+
+                    // Envelope line
+                    var env = Path()
+                    env.move(to: p.p0)
+                    env.addLine(to: p.p1)
+                    env.addLine(to: p.p2)
+                    env.addLine(to: p.p3)
+                    env.addLine(to: p.p4)
+                    ctx.stroke(env, with: .color(.green), lineWidth: 2)
+                }
+                .allowsHitTesting(false)
+
+                // Segment labels with values
+                let aCenter = (pts.p0.x + pts.p1.x) / 2
+                let dCenter = (pts.p1.x + pts.p2.x) / 2
+                let sCenter = (pts.p2.x + pts.p3.x) / 2
+                let rCenter = (pts.p3.x + pts.p4.x) / 2
+                let labelY = size.height / 2
+
+                Group {
+                    adsrLabel(letter: "A", value: attack, x: max(5, aCenter), y: labelY)
+                    adsrLabel(letter: "D", value: decay,   x: dCenter,          y: labelY)
+                    adsrLabel(letter: "S", value: sustain, x: sCenter,          y: labelY)
+                    adsrLabel(letter: "R", value: release, x: release == 0 ? pts.p3.x - 5 : min(pts.p4.x - 5, rCenter), y: labelY)
+                }
+                .allowsHitTesting(false)
+
+                // Handles — white dots at exact node positions
+                dot(at: pts.p1,  handle: .attack,  size: size, pts: pts)
+                dot(at: pts.p2,  handle: .decay,   size: size, pts: pts)
+                dot(at: sHandle, handle: .sustain,  size: size, pts: pts)
+                dot(at: pts.p4,  handle: .release,  size: size, pts: pts)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func adsrLabel(letter: String, value: UInt8, x: CGFloat, y: CGFloat) -> some View {
+        VStack(spacing: 0) {
+            Text(letter)
+                .foregroundStyle(Color.white)
+            Text("\(value)")
+                .foregroundStyle(Color.yellow)
+        }
+        .font(.system(size: 11, weight: .regular, design: .monospaced))
+        .multilineTextAlignment(.center)
+        .position(x: x, y: y)
+    }
+
+    @ViewBuilder
+    private func dot(at point: CGPoint, handle: Handle, size: CGSize, pts: (p0: CGPoint, p1: CGPoint, p2: CGPoint, p3: CGPoint, p4: CGPoint)) -> some View {
+        Circle()
+            .fill(Color.white)
+            .overlay(Circle().strokeBorder(Color.green, lineWidth: 1.5))
+            .frame(width: 12, height: 12)
+            .position(point)
+            .gesture(
+                DragGesture(minimumDistance: 0)
+                    .onChanged { value in
+                        if dragging == nil { dragging = handle }
+                        guard dragging == handle else { return }
+                        // Map cursor position directly to value using same geometry
+                        let v: UInt8
+                        if handle == .sustain {
+                            v = xToVal(value.location.y, handle, pts, size)
+                        } else {
+                            v = xToVal(value.location.x, handle, pts, size)
+                        }
+                        switch handle {
+                        case .attack:  attack = v
+                        case .decay:   decay = v
+                        case .sustain: sustain = v
+                        case .release: release = v
+                        }
+                    }
+                    .onEnded { _ in dragging = nil }
+            )
+            .cursor(.pointingHand)
+    }
+}
+
+/// A compact slider row matching the existing keyzone editor style.
+struct EnvSlider: View {
+    let label: String
+    @Binding var value: UInt8
+    var caption: String = ""
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            HStack {
+                Text(label)
+                    .frame(width: 60, alignment: .leading)
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                Slider(value: Binding(
+                    get: { Double(value) },
+                    set: { value = UInt8($0) }
+                ), in: 0...99, step: 1)
+                Text("\(value)")
+                    .frame(width: 30)
+                    .font(.system(.body, design: .monospaced))
+            }
+            if !caption.isEmpty {
+                Text(caption)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .padding(.leading, 60)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+    }
+}
 
 struct DiskInfoView: View {
     @ObservedObject var diskImage: AkaiDiskImage

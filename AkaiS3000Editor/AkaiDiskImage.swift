@@ -266,6 +266,19 @@ struct AkaiProgramKeyzone {
     var playbackMode: AkaiPlaybackMode
     var velocityLow: UInt8
     var velocityHigh: UInt8
+    // ENV1 (amplitude envelope) — kg+0x0C/0x0D/0x0E/0x0F. Values 0–99.
+    // Offsets from SYSEX docs. A=0 = instant attack (correct for percussive sounds).
+    // The SYSEX doc lists hardware defaults as A=25,D=50,S=99,R=45 but real
+    // programs on disk show all zeros — blank keygroups default to 0 on hardware.
+    var env1Attack: UInt8 = 0
+    var env1Decay: UInt8 = 0
+    var env1Sustain: UInt8 = 99
+    var env1Release: UInt8 = 0
+    // ENV2 (filter envelope) — kg+0x14/0x15/0x16/0x17. Values 0–99.
+    var env2Attack: UInt8 = 0
+    var env2Decay: UInt8 = 0
+    var env2Sustain: UInt8 = 99
+    var env2Release: UInt8 = 0
 }
 
 /// The full set of modulation sources selectable for any of the 3 filter
@@ -1004,12 +1017,17 @@ class AkaiDiskImage: ObservableObject {
                 filterModDepth3: kgFilterModDepth3,
                 rightSampleName: rightName,
                 rightPan: rightPan,
-                // pmode — decode the full 5-state byte (see AkaiPlaybackMode).
-                // Fall back to .sample (the natural zero-value/inherit state) for
-                // any byte value not in the known range, rather than guessing.
                 playbackMode: AkaiPlaybackMode(rawValue: fileData[vz + 0x13]) ?? .sample,
                 velocityLow:  fileData[vz + 0x0C],
-                velocityHigh: fileData[vz + 0x0D]))
+                velocityHigh: fileData[vz + 0x0D],
+                env1Attack:   kg + 0x0C < fileData.count ? fileData[kg + 0x0C] : 25,
+                env1Decay:    kg + 0x0D < fileData.count ? fileData[kg + 0x0D] : 50,
+                env1Sustain:  kg + 0x0E < fileData.count ? fileData[kg + 0x0E] : 99,
+                env1Release:  kg + 0x0F < fileData.count ? fileData[kg + 0x0F] : 45,
+                env2Attack:   kg + 0x14 < fileData.count ? fileData[kg + 0x14] : 0,
+                env2Decay:    kg + 0x15 < fileData.count ? fileData[kg + 0x15] : 50,
+                env2Sustain:  kg + 0x16 < fileData.count ? fileData[kg + 0x16] : 99,
+                env2Release:  kg + 0x17 < fileData.count ? fileData[kg + 0x17] : 45))
         }
 
         let program = AkaiProgram(name: name, keyzones: keyzones,
@@ -1878,6 +1896,11 @@ class AkaiDiskImage: ObservableObject {
             file[base + AkaiMultiFormat.relPanOffset]     = 0
             file[base + AkaiMultiFormat.relFxBusOffset]   = AkaiFxBus.off.byteValue
             file[base + AkaiMultiFormat.relSendOffset]    = 25
+            // +0xBE/+0xBF: end link pointer — 0xFFFF = none (unassigned).
+            // Hardware writes 0xFFFF for empty parts; 0x0000 may be interpreted
+            // as a valid pointer, causing the Akai to always load the wrong multi.
+            file[base + 0xBE] = 0xFF
+            file[base + 0xBF] = 0xFF
         }
         let bs = AkaiDiskFormat.blockSize
         let blocksNeeded = (fileSize + bs - 1) / bs
@@ -2365,9 +2388,17 @@ class AkaiDiskImage: ObservableObject {
             let kz: AkaiProgramKeyzone? = kgi < keyzones.count ? keyzones[kgi] : nil
             file[kg + 0x03] = kz?.lowKey ?? 0
             file[kg + 0x04] = kz?.highKey ?? 127
-            file[kg + 0x07] = kz?.filterCutoff ?? 99   // Frequency, 0–99 — confirmed offset
-            file[kg + 0x08] = UInt8(bitPattern: kz?.filterKeyFollow ?? 0) // Key Follow — confirmed offset, true blank default
-            file[kg + 0x95] = kz?.filterResonance ?? 0   // Resonance, 0–15 — confirmed offset
+            file[kg + 0x07] = kz?.filterCutoff ?? 99
+            file[kg + 0x08] = UInt8(bitPattern: kz?.filterKeyFollow ?? 0)
+            file[kg + 0x0C] = kz?.env1Attack ?? 0    // ENV1 Attack
+            file[kg + 0x0D] = kz?.env1Decay ?? 0     // ENV1 Decay
+            file[kg + 0x0E] = kz?.env1Sustain ?? 99   // ENV1 Sustain
+            file[kg + 0x0F] = kz?.env1Release ?? 0   // ENV1 Release
+            file[kg + 0x14] = kz?.env2Attack ?? 0     // ENV2 Attack
+            file[kg + 0x15] = kz?.env2Decay ?? 0     // ENV2 Decay
+            file[kg + 0x16] = kz?.env2Sustain ?? 99   // ENV2 Sustain
+            file[kg + 0x17] = kz?.env2Release ?? 0   // ENV2 Release
+            file[kg + 0x95] = kz?.filterResonance ?? 0
             file[kg + 0x97] = UInt8(bitPattern: kz?.filterModDepth1 ?? 0)  // Mod depth #1 (Velocity→Freq) — confirmed offset
             file[kg + 0x98] = UInt8(bitPattern: kz?.filterModDepth2 ?? 0)  // Mod depth #2 (Lfo2→Freq) — confirmed offset
             file[kg + 0x99] = UInt8(bitPattern: kz?.filterModDepth3 ?? 0)  // Mod depth #3 (Env2→Freq) — confirmed offset

@@ -4,6 +4,7 @@ import UniformTypeIdentifiers
 struct WelcomeView: View {
     @ObservedObject var diskImage: AkaiDiskImage
     @State private var isDragging = false
+    @State private var lastPath: String? = UserDefaults.standard.string(forKey: "lastOpenedImagePath")
 
     /// The vivid Akai brand red, shared with the logo and the Greaseweazle Write
     /// button so the prominent action buttons match exactly. Using a flat fill +
@@ -13,7 +14,7 @@ struct WelcomeView: View {
     private let akaiRed = Color(red: 0.91, green: 0, blue: 0.11)
 
     /// Shared width for the two stacked action buttons so they match.
-    private let actionButtonWidth: CGFloat = 180
+    private let actionButtonWidth: CGFloat = 260
 
     var body: some View {
         ZStack {
@@ -30,7 +31,7 @@ struct WelcomeView: View {
                 ZStack {
                     RoundedRectangle(cornerRadius: 16)
                         .fill(isDragging ? Color.red.opacity(0.08) : Color.secondary.opacity(0.06))
-                        .frame(width: 380, height: 150)
+                        .frame(width: 420, height: 208)
                         .overlay(
                             RoundedRectangle(cornerRadius: 16)
                                 .strokeBorder(
@@ -39,10 +40,24 @@ struct WelcomeView: View {
                                 )
                         )
                     VStack(spacing: 6) {
+                        if let path = lastPath, FileManager.default.fileExists(atPath: path) {
+                            Button {
+                                try? diskImage.load(from: URL(fileURLWithPath: path))
+                            } label: {
+                                Label("Open Last Session", systemImage: "clock.arrow.circlepath")
+                                    .frame(width: actionButtonWidth)
+                                    .padding(.vertical, 10)
+                                    .foregroundStyle(.white)
+                                    .background(Color.accentColor)
+                                    .clipShape(RoundedRectangle(cornerRadius: 6))
+                            }
+                            .buttonStyle(.plain)
+                            .padding(.bottom, 12)
+                        }
                         Button {
                             NotificationCenter.default.post(name: .openDiskImage, object: nil)
                         } label: {
-                            Label("Open Disk Image...", systemImage: "folder")
+                            Label("Open Disk Image", systemImage: "folder")
                                 .frame(width: actionButtonWidth)
                                 .padding(.vertical, 10)
                                 .foregroundStyle(.white)
@@ -50,6 +65,7 @@ struct WelcomeView: View {
                                 .clipShape(RoundedRectangle(cornerRadius: 6))
                         }
                         .buttonStyle(.plain)
+                        .padding(.bottom, 6)
                         Text("or drag a .img file here")
                             .font(.caption).foregroundStyle(.tertiary)
                         Button {
@@ -71,10 +87,11 @@ struct WelcomeView: View {
                 }
                 .animation(.easeInOut(duration: 0.15), value: isDragging)
                 HStack(spacing: 28) {
-                    FeaturePill(icon: "waveform",              text: "Read Samples")
-                    FeaturePill(icon: "square.and.arrow.up",   text: "Export WAV")
-                    FeaturePill(icon: "square.and.arrow.down", text: "Import WAV")
-                    FeaturePill(icon: "pianokeys",             text: "Edit Keymaps")
+                    FeaturePill(icon: "waveform",             text: "Import Samples",  color: Color(red: 0.91, green: 0, blue: 0.11))
+                    FeaturePill(icon: "pianokeys",             text: "Create Programs", color: .purple)
+                    FeaturePill(icon: "square.stack.3d.up",   text: "Create Multis",   color: .teal)
+                    FeaturePill(icon: "opticaldiscdrive.fill", text: "Import & Export", color: greaseweazlePurple)
+                    FeaturePill(icon: "internaldrive",         text: "Disk Info",        color: .white)
                 }
             }
             .padding(60)
@@ -182,11 +199,12 @@ struct WaveformLogoView: View {
 struct FeaturePill: View {
     let icon: String
     let text: String
+    var color: Color = Color(red: 0.91, green: 0, blue: 0.11)
     var body: some View {
         VStack(spacing: 6) {
             Image(systemName: icon)
                 .font(.title3)
-                .foregroundStyle(Color(red: 0.91, green: 0, blue: 0.11))
+                .foregroundStyle(color)
             Text(text)
                 .font(.caption).foregroundStyle(.secondary)
         }

@@ -91,7 +91,7 @@ struct MultiPlaceholderView: View {
     let multiFile: AkaiMultiFile
     @ObservedObject var diskImage: AkaiDiskImage
 
-    @State private var parts: [AkaiMultiPart] = Array(repeating: AkaiMultiPart(), count: 16)
+    @State private var parts: [AkaiMultiPart] = []
     @State private var saveError: String? = nil
     @State private var isEditingName = false
     @State private var editedName = ""
@@ -165,31 +165,41 @@ struct MultiPlaceholderView: View {
             }
 
             HStack(spacing: 8) {
-                Text("Part").frame(width: 32, alignment: .leading)
-                Text("Program").frame(minWidth: 80, maxWidth: .infinity, alignment: .leading)
-                Text("Ch").frame(width: 50, alignment: .center)
-                Text("Lev").frame(minWidth: 90, maxWidth: .infinity, alignment: .leading)
-                Text("Pan").frame(minWidth: 90, maxWidth: .infinity, alignment: .leading)
-                Text("Fx").frame(width: 60, alignment: .center)
-                Text("Send").frame(minWidth: 90, maxWidth: .infinity, alignment: .leading)
+                Text("Part").frame(width: 36, alignment: .leading)
+                Text("Program").frame(minWidth: 120, maxWidth: .infinity, alignment: .leading)
+                Text("Ch").frame(width: 60, alignment: .center)
+                Text("Lev").frame(minWidth: 110, maxWidth: .infinity, alignment: .leading)
+                Text("Pan").frame(minWidth: 110, maxWidth: .infinity, alignment: .leading)
+                Text("Fx").frame(width: 70, alignment: .center)
+                Text("Send").frame(minWidth: 110, maxWidth: .infinity, alignment: .leading)
             }
             .font(.caption).foregroundStyle(.secondary)
             .padding(.horizontal).padding(.top, 12)
             Divider()
 
-            List {
-                ForEach(Array(parts.enumerated()), id: \.offset) { idx, _ in
-                    MultiPartRow(
-                        part: $parts[idx], partNumber: idx + 1,
-                        availableProgramNames: diskImage.programs.map { $0.program.name },
-                        onChange: { save(partIndex: idx) }
-                    )
+            let programNames = diskImage.programs.map { $0.program.name }
+            ScrollView {
+                LazyVStack(spacing: 0) {
+                    ForEach(Array(parts.enumerated()), id: \.offset) { idx, _ in
+                        MultiPartRow(
+                            part: $parts[idx], partNumber: idx + 1,
+                            availableProgramNames: programNames,
+                            onChange: { save(partIndex: idx) }
+                        )
+                        Divider().padding(.horizontal)
+                    }
                 }
+                .frame(maxWidth: .infinity)
             }
-            .listStyle(.inset)
+            .frame(maxWidth: .infinity)
         }
         .onAppear {
             parts = multiFile.multi.parts
+        }
+        .onChange(of: multiFile.id) { _, _ in
+            parts = multiFile.multi.parts
+            isEditingName = false
+            saveError = nil
         }
     }
 
@@ -297,7 +307,7 @@ private struct MultiPartRow: View {
 
     var body: some View {
         HStack(spacing: 8) {
-            Text("\(partNumber)").frame(width: 32, alignment: .leading)
+            Text("\(partNumber)").frame(width: 36, alignment: .leading)
                 .font(.system(.body, design: .monospaced))
 
             Picker("", selection: $part.programName) {
@@ -307,7 +317,8 @@ private struct MultiPartRow: View {
                 }
             }
             .labelsHidden()
-            .frame(minWidth: 80, maxWidth: .infinity)
+            .pickerStyle(.menu)
+            .frame(minWidth: 120, maxWidth: .infinity, alignment: .leading)
             .onChange(of: part.programName) { _, _ in onChange?() }
 
             Picker("", selection: $part.channel) {
@@ -316,7 +327,8 @@ private struct MultiPartRow: View {
                 }
             }
             .labelsHidden()
-            .frame(width: 50)
+            .pickerStyle(.menu)
+            .frame(width: 60)
             .onChange(of: part.channel) { _, _ in onChange?() }
 
             HStack(spacing: 4) {
@@ -325,7 +337,7 @@ private struct MultiPartRow: View {
                     .font(.system(.caption2, design: .monospaced))
                     .frame(width: 24, alignment: .trailing)
             }
-            .frame(minWidth: 90, maxWidth: .infinity)
+            .frame(minWidth: 110, maxWidth: .infinity)
 
             HStack(spacing: 4) {
                 Slider(value: .init(get: { Double(part.pan) }, set: { part.pan = Int8($0); onChange?() }), in: -50...50, step: 1)
@@ -333,7 +345,7 @@ private struct MultiPartRow: View {
                     .font(.system(.caption2, design: .monospaced))
                     .frame(width: 32, alignment: .trailing)
             }
-            .frame(minWidth: 90, maxWidth: .infinity)
+            .frame(minWidth: 110, maxWidth: .infinity)
 
             Picker("", selection: $part.fxBus) {
                 ForEach(AkaiFxBus.allCases) { bus in
@@ -341,7 +353,8 @@ private struct MultiPartRow: View {
                 }
             }
             .labelsHidden()
-            .frame(width: 60)
+            .pickerStyle(.menu)
+            .frame(width: 70)
             .onChange(of: part.fxBus) { _, _ in onChange?() }
 
             HStack(spacing: 4) {
@@ -350,7 +363,7 @@ private struct MultiPartRow: View {
                     .font(.system(.caption2, design: .monospaced))
                     .frame(width: 24, alignment: .trailing)
             }
-            .frame(minWidth: 90, maxWidth: .infinity)
+            .frame(minWidth: 110, maxWidth: .infinity)
         }
         .padding(.vertical, 2)
         .padding(.horizontal)

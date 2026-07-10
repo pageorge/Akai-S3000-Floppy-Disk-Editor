@@ -124,6 +124,24 @@ struct ProgramDetailView: View {
                         }
                         .help("Pitchbend wheel/lever range, 0–24 semitones. Default is 2. The S3000XL supports separate up/down ranges — this app sets both to the same value.")
                         HStack {
+                            Text("loudness").frame(width: 100, alignment: .leading).font(.subheadline).foregroundStyle(.secondary)
+                            Slider(value: .init(get: { Double(editedProgram.stereoLevel) },
+                                               set: { editedProgram.stereoLevel = UInt8($0); commitProgramEdits() }), in: 0...99, step: 1)
+                            Text("\(editedProgram.stereoLevel)").frame(width: 30).font(.system(.body, design: .monospaced))
+                        }
+                        .help("Sets the overall loudness for the program. Affects main L/R outputs, individual outputs and effects send. 0 = silent.")
+                        HStack {
+                            Text("vel > loud").frame(width: 100, alignment: .leading).font(.subheadline).foregroundStyle(.secondary)
+                            Slider(value: .init(get: { Double(editedProgram.basicLoudness) },
+                                               set: { editedProgram.basicLoudness = UInt8($0); commitProgramEdits() }), in: 0...99, step: 1)
+                            Text("\(editedProgram.basicLoudness)").frame(width: 30).font(.system(.body, design: .monospaced))
+                        }
+                        .help("Velocity sensitivity. At loudness=99 this has no effect — maximum level, no velocity response.")
+                        Text("Filter modulation inputs")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .padding(.top, 4)
+                        HStack {
                             Text("Mod 1").frame(width: 100, alignment: .leading).font(.subheadline).foregroundStyle(.secondary)
                             Picker("", selection: $editedProgram.filterModSource1) {
                                 ForEach(AkaiFilterModSource.allCases) { src in Text(src.displayName).tag(src) }
@@ -150,20 +168,6 @@ struct ProgramDetailView: View {
                             .onChange(of: editedProgram.filterModSource3) { _, _ in commitProgramEdits() }
                         }
                         .help(editedProgram.filterModSource3.helpText)
-                        HStack {
-                            Text("loudness").frame(width: 100, alignment: .leading).font(.subheadline).foregroundStyle(.secondary)
-                            Slider(value: .init(get: { Double(editedProgram.stereoLevel) },
-                                               set: { editedProgram.stereoLevel = UInt8($0); commitProgramEdits() }), in: 0...99, step: 1)
-                            Text("\(editedProgram.stereoLevel)").frame(width: 30).font(.system(.body, design: .monospaced))
-                        }
-                        .help("Sets the overall loudness for the program. Affects main L/R outputs, individual outputs and effects send. 0 = silent.")
-                        HStack {
-                            Text("vel>loud").frame(width: 100, alignment: .leading).font(.subheadline).foregroundStyle(.secondary)
-                            Slider(value: .init(get: { Double(editedProgram.basicLoudness) },
-                                               set: { editedProgram.basicLoudness = UInt8($0); commitProgramEdits() }), in: 0...99, step: 1)
-                            Text("\(editedProgram.basicLoudness)").frame(width: 30).font(.system(.body, design: .monospaced))
-                        }
-                        .help("Velocity sensitivity. At loudness=99 this has no effect — maximum level, no velocity response.")
                         } // end VStack inside Program Settings InfoCard
                     } // end InfoCard Program Settings
                     } // VStack
@@ -583,6 +587,14 @@ struct ProgramDetailView: View {
             if old.playbackMode != newValue.playbackMode { kz.playbackMode = newValue.playbackMode }
             if old.velocityLow != newValue.velocityLow { kz.velocityLow = newValue.velocityLow }
             if old.velocityHigh != newValue.velocityHigh { kz.velocityHigh = newValue.velocityHigh }
+            if old.env1Attack != newValue.env1Attack { kz.env1Attack = newValue.env1Attack }
+            if old.env1Decay != newValue.env1Decay { kz.env1Decay = newValue.env1Decay }
+            if old.env1Sustain != newValue.env1Sustain { kz.env1Sustain = newValue.env1Sustain }
+            if old.env1Release != newValue.env1Release { kz.env1Release = newValue.env1Release }
+            if old.env2Attack != newValue.env2Attack { kz.env2Attack = newValue.env2Attack }
+            if old.env2Decay != newValue.env2Decay { kz.env2Decay = newValue.env2Decay }
+            if old.env2Sustain != newValue.env2Sustain { kz.env2Sustain = newValue.env2Sustain }
+            if old.env2Release != newValue.env2Release { kz.env2Release = newValue.env2Release }
             // sampleName / rightSampleName / rightPan: intentionally not copied
             // — see doc comment above. A stereo pairing is specific to one
             // keygroup's two samples; broadcasting it to other selected
@@ -776,7 +788,7 @@ struct DrumPresetDropZone: View {
                         Button {
                             openSamples()
                         } label: {
-                            Label("Browse for samples...", systemImage: "square.and.arrow.down.on.square")
+                            Label("Browse for Drum Samples", systemImage: "square.and.arrow.down.on.square")
                                 .frame(width: 200)
                                 .padding(.vertical, 10)
                                 .foregroundStyle(.white)
@@ -1024,23 +1036,6 @@ struct KeyzoneEditorView: View {
                     }
                 }
 
-                InfoCard(title: "Velocity") {
-                    VStack(alignment: .leading, spacing: 10) {
-                        HStack {
-                            Text("Low Velocity").frame(width: 100, alignment: .leading).font(.subheadline).foregroundStyle(.secondary)
-                            Slider(value: .init(get: { Double(keyzone.velocityLow) },
-                                               set: { keyzone.velocityLow = UInt8($0); onChange() }), in: 0...127, step: 1)
-                            Text("\(keyzone.velocityLow)").frame(width: 30).font(.system(.body, design: .monospaced))
-                        }
-                        HStack {
-                            Text("High Velocity").frame(width: 100, alignment: .leading).font(.subheadline).foregroundStyle(.secondary)
-                            Slider(value: .init(get: { Double(keyzone.velocityHigh) },
-                                               set: { keyzone.velocityHigh = UInt8($0); onChange() }), in: 0...127, step: 1)
-                            Text("\(keyzone.velocityHigh)").frame(width: 30).font(.system(.body, design: .monospaced))
-                        }
-                    }
-                }
-
                 InfoCard(title: "Playback") {
                     VStack(alignment: .leading, spacing: 6) {
                         HStack {
@@ -1063,16 +1058,122 @@ struct KeyzoneEditorView: View {
                     }
                 }
 
+                InfoCard(title: "Tune") {
+                    VStack(alignment: .leading, spacing: 10) {
+                        HStack {
+                            Text("Tune (st)").frame(width: 100, alignment: .leading).font(.subheadline).foregroundStyle(.secondary)
+                            Stepper("\(keyzone.tuneOffset)", value: $keyzone.tuneOffset, in: -24...24)
+                                .onChange(of: keyzone.tuneOffset) { _, _ in onChange() }
+                        }
+                        HStack {
+                            Text("Fine (¢)").frame(width: 100, alignment: .leading).font(.subheadline).foregroundStyle(.secondary)
+                            Slider(value: .init(get: { Double(keyzone.fineTune) },
+                                               set: { keyzone.fineTune = Int8($0); onChange() }), in: -50...50, step: 1)
+                            Text("\(keyzone.fineTune)¢").frame(width: 35).font(.system(.caption, design: .monospaced))
+                        }
+                        HStack {
+                            Text("Volume").frame(width: 100, alignment: .leading).font(.subheadline).foregroundStyle(.secondary)
+                            Slider(value: .init(get: { Double(keyzone.volume) },
+                                               set: { keyzone.volume = UInt8($0); onChange() }), in: 0...99, step: 1)
+                            Text("\(keyzone.volume)").frame(width: 30).font(.system(.body, design: .monospaced))
+                        }
+                        HStack {
+                            Text("Pan").frame(width: 100, alignment: .leading).font(.subheadline).foregroundStyle(.secondary)
+                            Slider(value: .init(get: { Double(keyzone.pan) },
+                                               set: { keyzone.pan = Int8($0); onChange() }), in: -50...50, step: 1)
+                            Text(keyzone.pan == 0 ? "C" : keyzone.pan > 0 ? "R\(keyzone.pan)" : "L\(abs(keyzone.pan))")
+                                .frame(width: 35).font(.system(.caption, design: .monospaced))
+                        }
+                        if !keyzone.rightSampleName.trimmingCharacters(in: .whitespaces).isEmpty {
+                            VStack(alignment: .leading, spacing: 2) {
+                                HStack {
+                                    Text("Right Pan").frame(width: 100, alignment: .leading).font(.subheadline).foregroundStyle(.secondary)
+                                    Slider(value: .init(get: { Double(keyzone.rightPan) },
+                                                       set: { keyzone.rightPan = Int8($0); onChange() }), in: -50...50, step: 1)
+                                    Text(keyzone.rightPan == 0 ? "C" : keyzone.rightPan > 0 ? "R\(keyzone.rightPan)" : "L\(abs(keyzone.rightPan))")
+                                        .frame(width: 35).font(.system(.caption, design: .monospaced))
+                                }
+                                Text("Pan for the stereo right channel (zone 2: \(keyzone.rightSampleName.trimmingCharacters(in: .whitespaces))). Real hardware convention is hard left/right (-50/+50).")
+                                    .font(.caption2).foregroundStyle(.secondary).padding(.leading, 100)
+                            }
+                        }
+                    }
+                }
+
+                InfoCard(title: "Velocity") {
+                    VStack(alignment: .leading, spacing: 10) {
+                        HStack {
+                            Text("Low Velocity").frame(width: 100, alignment: .leading).font(.subheadline).foregroundStyle(.secondary)
+                            Slider(value: .init(get: { Double(keyzone.velocityLow) },
+                                               set: { keyzone.velocityLow = UInt8($0); onChange() }), in: 0...127, step: 1)
+                            Text("\(keyzone.velocityLow)").frame(width: 30).font(.system(.body, design: .monospaced))
+                        }
+                        HStack {
+                            Text("High Velocity").frame(width: 100, alignment: .leading).font(.subheadline).foregroundStyle(.secondary)
+                            Slider(value: .init(get: { Double(keyzone.velocityHigh) },
+                                               set: { keyzone.velocityHigh = UInt8($0); onChange() }), in: 0...127, step: 1)
+                            Text("\(keyzone.velocityHigh)").frame(width: 30).font(.system(.body, design: .monospaced))
+                        }
+                    }
+                }
+
+                InfoCard(title: "ENV1 — Shaping Amplitude") {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("Controls the volume shape of each note over time. Attack sets how quickly the sound reaches full volume; Decay how quickly it falls to the Sustain level; Sustain the held level while the key is held; Release how quickly it fades after key release. (Manual p.105)")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                        HStack {
+                            Button {
+                                keyzone.env1Attack = 0
+                                keyzone.env1Decay = 99
+                                keyzone.env1Sustain = 99
+                                keyzone.env1Release = 0
+                                onChange()
+                            } label: {
+                                Label("Reset", systemImage: "arrow.counterclockwise")
+                                    .font(.system(size: 11))
+                            }
+                            .buttonStyle(.bordered)
+                            .controlSize(.small)
+                            .tint(.blue)
+                            .help("Reset ENV1 to defaults: A=0 D=99 S=99 R=0")
+                            Spacer()
+                        }
+                        .zIndex(1)
+                        HStack(alignment: .center, spacing: 12) {
+                            AdsrView(
+                                attack: Binding(get: { keyzone.env1Attack }, set: { keyzone.env1Attack = $0; onChange() }),
+                                decay: Binding(get: { keyzone.env1Decay }, set: { keyzone.env1Decay = $0; onChange() }),
+                                sustain: Binding(get: { keyzone.env1Sustain }, set: { keyzone.env1Sustain = $0; onChange() }),
+                                release: Binding(get: { keyzone.env1Release }, set: { keyzone.env1Release = $0; onChange() })
+                            )
+                            .frame(maxWidth: .infinity, maxHeight: .infinity)
+                            VStack(alignment: .leading, spacing: 8) {
+                                EnvSlider(label: "Attack", value: Binding(get: { keyzone.env1Attack }, set: { keyzone.env1Attack = $0; onChange() }),
+                                          caption: "How quickly the sound reaches full volume on note-on. 0 = instant, 99 = slow fade in.")
+                                EnvSlider(label: "Decay", value: Binding(get: { keyzone.env1Decay }, set: { keyzone.env1Decay = $0; onChange() }),
+                                          caption: "How quickly the volume falls from the attack peak to the Sustain level.")
+                                EnvSlider(label: "Sustain", value: Binding(get: { keyzone.env1Sustain }, set: { keyzone.env1Sustain = $0; onChange() }),
+                                          caption: "Volume level held while the key is down. 0 = silent, 99 = full level.")
+                                EnvSlider(label: "Release", value: Binding(get: { keyzone.env1Release }, set: { keyzone.env1Release = $0; onChange() }),
+                                          caption: "How quickly the sound fades after key release. 0 = instant cutoff, 99 = long fade.")
+                            }
+                            .frame(maxWidth: .infinity)
+                        }
+                    }
+                }
+
                 InfoCard(title: "Filter") {
                     VStack(alignment: .leading, spacing: 16) {
                         VStack(alignment: .leading, spacing: 6) {
                             HStack {
-                                Text("Cutoff").frame(width: 100, alignment: .leading).font(.subheadline).foregroundStyle(.secondary)
+                                Text("Frequency").frame(width: 100, alignment: .leading).font(.subheadline).foregroundStyle(.secondary)
                                 Slider(value: .init(get: { Double(keyzone.filterCutoff) },
                                                    set: { keyzone.filterCutoff = UInt8($0); onChange() }), in: 0...99, step: 1)
                                 Text("\(keyzone.filterCutoff)").frame(width: 30).font(.system(.body, design: .monospaced))
                             }
-                            Text("This keygroup's main filter (0–99). Lower = softer/darker tone.")
+                            Text("Cutoff frequency of the 12dB/octave resonant lowpass filter. 99 = fully open (no filtering); lower values progressively remove high frequencies, darkening the tone.")
                                 .font(.caption2).foregroundStyle(.secondary).padding(.top, 2).padding(.leading, 100)
                         }
                         VStack(alignment: .leading, spacing: 6) {
@@ -1081,7 +1182,7 @@ struct KeyzoneEditorView: View {
                                 Stepper("\(keyzone.filterKeyFollow)", value: $keyzone.filterKeyFollow, in: -24...24)
                                     .onChange(of: keyzone.filterKeyFollow) { _, _ in onChange() }
                             }
-                            Text("How much the cutoff tracks keyboard position. Default is 0 (no tracking); +12 gives octave-for-octave tracking.")
+                            Text("How much the cutoff tracks keyboard position. 0 = no tracking; +12 = filter opens one octave for every octave played up the keyboard.")
                                 .font(.caption2).foregroundStyle(.secondary).padding(.top, 2).padding(.leading, 100)
                         }
                         VStack(alignment: .leading, spacing: 6) {
@@ -1091,7 +1192,7 @@ struct KeyzoneEditorView: View {
                                                    set: { keyzone.filterResonance = UInt8($0); onChange() }), in: 0...15, step: 1)
                                 Text("\(keyzone.filterResonance)").frame(width: 30).font(.system(.body, design: .monospaced))
                             }
-                            Text("Boosts harmonics around the cutoff (0–15). High settings give the classic synth \"weeow\" sound.")
+                            Text("Narrows the filter's response slope, emphasising harmonics around the cutoff frequency. High settings produce a resonant 'weeow' character. Watch for distortion at high settings — use the -6dB pad or reduce program output level if needed.")
                                 .font(.caption2).foregroundStyle(.secondary).padding(.top, 2).padding(.leading, 100)
                         }
                         VStack(alignment: .leading, spacing: 6) {
@@ -1137,46 +1238,50 @@ struct KeyzoneEditorView: View {
                     }
                 }
 
-                InfoCard(title: "Tuning & Mix") {
+                InfoCard(title: "ENV2 — Shaping The Filter") {
                     VStack(alignment: .leading, spacing: 10) {
+                        Text("Controls how the filter cutoff changes over time, adding tonal movement to the sound. Works together with the filter mod depth settings above. A positive ENV2 depth on the filter opens the filter during the attack and closes it over time. (Manual p.107)")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
                         HStack {
-                            Text("Tune (st)").frame(width: 100, alignment: .leading).font(.subheadline).foregroundStyle(.secondary)
-                            Stepper("\(keyzone.tuneOffset)", value: $keyzone.tuneOffset, in: -24...24)
-                                .onChange(of: keyzone.tuneOffset) { _, _ in onChange() }
-                        }
-                        HStack {
-                            Text("Fine (¢)").frame(width: 100, alignment: .leading).font(.subheadline).foregroundStyle(.secondary)
-                            Slider(value: .init(get: { Double(keyzone.fineTune) },
-                                               set: { keyzone.fineTune = Int8($0); onChange() }), in: -50...50, step: 1)
-                            Text("\(keyzone.fineTune)¢").frame(width: 35).font(.system(.caption, design: .monospaced))
-                        }
-                        HStack {
-                            Text("Volume").frame(width: 100, alignment: .leading).font(.subheadline).foregroundStyle(.secondary)
-                            Slider(value: .init(get: { Double(keyzone.volume) },
-                                               set: { keyzone.volume = UInt8($0); onChange() }), in: 0...99, step: 1)
-                            Text("\(keyzone.volume)").frame(width: 30).font(.system(.body, design: .monospaced))
-                        }
-                        HStack {
-                            Text("Pan").frame(width: 100, alignment: .leading).font(.subheadline).foregroundStyle(.secondary)
-                            Slider(value: .init(get: { Double(keyzone.pan) },
-                                               set: { keyzone.pan = Int8($0); onChange() }), in: -50...50, step: 1)
-                            Text(keyzone.pan == 0 ? "C" : keyzone.pan > 0 ? "R\(keyzone.pan)" : "L\(abs(keyzone.pan))")
-                                .frame(width: 35).font(.system(.caption, design: .monospaced))
-                        }
-                        if !keyzone.rightSampleName.trimmingCharacters(in: .whitespaces).isEmpty {
-                            VStack(alignment: .leading, spacing: 2) {
-                                HStack {
-                                    Text("Right Pan").frame(width: 100, alignment: .leading).font(.subheadline).foregroundStyle(.secondary)
-                                    Slider(value: .init(get: { Double(keyzone.rightPan) },
-                                                       set: { keyzone.rightPan = Int8($0); onChange() }), in: -50...50, step: 1)
-                                    Text(keyzone.rightPan == 0 ? "C" : keyzone.rightPan > 0 ? "R\(keyzone.rightPan)" : "L\(abs(keyzone.rightPan))")
-                                        .frame(width: 35).font(.system(.caption, design: .monospaced))
-                                }
-                                Text("Pan for the stereo right channel (zone 2: \(keyzone.rightSampleName.trimmingCharacters(in: .whitespaces))). Real hardware convention is hard left/right (−50/+50).")
-                                    .font(.caption2).foregroundStyle(.secondary).padding(.leading, 100)
+                            Button {
+                                keyzone.env2Attack = 0
+                                keyzone.env2Decay = 99
+                                keyzone.env2Sustain = 99
+                                keyzone.env2Release = 0
+                                onChange()
+                            } label: {
+                                Label("Reset", systemImage: "arrow.counterclockwise")
+                                    .font(.system(size: 11))
                             }
+                            .buttonStyle(.bordered)
+                            .controlSize(.small)
+                            .tint(.blue)
+                            .help("Reset ENV2 to defaults: A=0 D=99 S=99 R=0")
+                            Spacer()
                         }
-
+                        .zIndex(1)
+                        HStack(alignment: .center, spacing: 12) {
+                            AdsrView(
+                                attack: Binding(get: { keyzone.env2Attack }, set: { keyzone.env2Attack = $0; onChange() }),
+                                decay: Binding(get: { keyzone.env2Decay }, set: { keyzone.env2Decay = $0; onChange() }),
+                                sustain: Binding(get: { keyzone.env2Sustain }, set: { keyzone.env2Sustain = $0; onChange() }),
+                                release: Binding(get: { keyzone.env2Release }, set: { keyzone.env2Release = $0; onChange() })
+                            )
+                            .frame(maxWidth: .infinity, maxHeight: .infinity)
+                            VStack(alignment: .leading, spacing: 8) {
+                                EnvSlider(label: "Attack", value: Binding(get: { keyzone.env2Attack }, set: { keyzone.env2Attack = $0; onChange() }),
+                                          caption: "How quickly the filter opens on note-on. High values + positive Env2 depth create a slow filter sweep.")
+                                EnvSlider(label: "Decay", value: Binding(get: { keyzone.env2Decay }, set: { keyzone.env2Decay = $0; onChange() }),
+                                          caption: "How quickly the filter falls from the attack peak to the Sustain level.")
+                                EnvSlider(label: "Sustain", value: Binding(get: { keyzone.env2Sustain }, set: { keyzone.env2Sustain = $0; onChange() }),
+                                          caption: "Filter envelope level held while the key is pressed. Lower values give a darker sustained tone.")
+                                EnvSlider(label: "Release", value: Binding(get: { keyzone.env2Release }, set: { keyzone.env2Release = $0; onChange() }),
+                                          caption: "How quickly the filter closes after key release. 0 = instant, 99 = long slow close.")
+                            }
+                            .frame(maxWidth: .infinity)
+                        }
                     }
                 }
             }

@@ -54,6 +54,9 @@ struct SidebarView: View {
     private func handleSampleTap(_ sample: AkaiSample) {
         let mods = NSEvent.modifierFlags
         selectedTab = .samples
+        selectedProgramID = nil
+        selectedProgramIDs.removeAll()
+        selectedMultiID = nil
         if mods.contains(.command) {
             // Toggle this row in/out of the multi-selection.
             if selectedSampleIDs.contains(sample.id) {
@@ -92,6 +95,9 @@ struct SidebarView: View {
     private func handleProgramTap(_ program: AkaiProgramFile) {
         let mods = NSEvent.modifierFlags
         selectedTab = .programs
+        selectedSampleID = nil
+        selectedSampleIDs.removeAll()
+        selectedMultiID = nil
         if mods.contains(.command) {
             if selectedProgramIDs.contains(program.id) {
                 selectedProgramIDs.remove(program.id)
@@ -295,12 +301,30 @@ struct SidebarView: View {
         .navigationTitle("S3000 Editor")
         .onAppear {
             deleteKeyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
-                guard self.sidebarFocused, !self.diskImage.isEditingText else { return event }
+                guard !self.diskImage.isEditingText else { return event }
+                // Only handle arrow/delete if the sidebar actually has something
+                // selected — if the keyzone list is focused it has its own monitor
+                // and will handle the event first (returning nil), so we won't
+                // reach here for those keys anyway.
+                let hasSidebarSelection = self.selectedSampleID != nil
+                    || !self.selectedSampleIDs.isEmpty
+                    || self.selectedProgramID != nil
+                    || !self.selectedProgramIDs.isEmpty
+                    || self.selectedMultiID != nil
+                guard hasSidebarSelection else { return event }
 
                 if event.keyCode == 126 { self.moveSelection(by: -1); return nil }
                 if event.keyCode == 125 { self.moveSelection(by:  1); return nil }
 
                 guard event.keyCode == 51 || event.keyCode == 117 else { return event }
+                if self.selectedTab == .multis {
+                    if let id = self.selectedMultiID,
+                       let mf = self.diskImage.multis.first(where: { $0.id == id }) {
+                        self.multiToDelete = mf
+                        self.showDeleteMultiConfirm = true
+                        return nil
+                    }
+                }
                 if self.selectedTab == .programs {
                     if self.selectedProgramIDs.count > 1 {
                         self.showBatchDeleteProgramConfirm = true; return nil
@@ -399,7 +423,7 @@ struct SidebarView: View {
             EmptyView()
         } header: {
             HStack(spacing: 6) {
-                Image(systemName: "internaldrive.fill").foregroundStyle(.red).font(.title2)
+                Image(systemName: "internaldrive.fill").foregroundStyle(akaiRed).font(.title2)
                 if isEditingVolumeName {
                     TextField("Volume name", text: $editedVolumeName)
                         .textFieldStyle(.plain)
@@ -520,7 +544,16 @@ struct SidebarView: View {
                     SidebarMultiRow(
                         multiFile: mf,
                         isSelected: selectedMultiID == mf.id,
-                        onTap: { selectedTab = .multis; selectedMultiID = mf.id },
+                        onTap: {
+                            selectedTab = .multis
+                            selectedMultiID = mf.id
+                            selectedSampleID = nil
+                            selectedSampleIDs.removeAll()
+                            selectionAnchorID = nil
+                            selectedProgramID = nil
+                            selectedProgramIDs.removeAll()
+                            programSelectionAnchorID = nil
+                        },
                         onClone: {
                             do {
                                 let cloned = try diskImage.cloneMulti(id: mf.id)
@@ -580,10 +613,25 @@ struct SidebarView: View {
         Section {
             Label("Disk Info", systemImage: "info.circle")
                 .contentShape(Rectangle())
-                .onTapGesture { selectedTab = .diskInfo }
+                .onTapGesture {
+                    selectedTab = .diskInfo
+                    selectedSampleID = nil
+                    selectedSampleIDs.removeAll()
+                    selectionAnchorID = nil
+                    selectedProgramID = nil
+                    selectedProgramIDs.removeAll()
+                    programSelectionAnchorID = nil
+                    selectedMultiID = nil
+                }
         }
     }
 }
+
+// Greaseweazle brand purple — sampled directly from the opticaldiscdrive.fill
+// SF Symbol as rendered on macOS dark mode. Shared with the welcome screen pill.
+internal let greaseweazlePurple = Color(red: 0.55, green: 0.50, blue: 0.80)
+
+private let akaiRed = Color(red: 0.91, green: 0, blue: 0.11)
 
 struct SidebarSampleRow: View {
     let sample: AkaiSample
@@ -600,7 +648,7 @@ struct SidebarSampleRow: View {
     var body: some View {
         HStack(spacing: 8) {
             Image(systemName: "waveform.circle.fill")
-                .foregroundStyle(isSelected ? .white : .red)
+                .foregroundStyle(isSelected ? .white : akaiRed)
                 .font(.system(size: 14))
             VStack(alignment: .leading, spacing: 1) {
                 Text(displayName)
@@ -615,7 +663,7 @@ struct SidebarSampleRow: View {
         .padding(.vertical, 3)
         .padding(.horizontal, 8)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(RoundedRectangle(cornerRadius: 6).fill(isSelected ? Color.red : Color.clear))
+        .background(RoundedRectangle(cornerRadius: 6).fill(isSelected ? akaiRed : Color.clear))
         .listRowInsets(EdgeInsets(top: 2, leading: 4, bottom: 2, trailing: 4))
         .contentShape(Rectangle())
         .onTapGesture { onTap() }
@@ -765,6 +813,7 @@ struct GreaseweazleSection: View {
     @ObservedObject var diskImage: AkaiDiskImage
     @State private var saveErrorAlert = false
     @State private var saveErrorMessage = ""
+    @State private var showSaveBeforeWriteConfirm = false
 
     /// The vivid Akai red used across the app's branding (logo, welcome screen).
     /// Using this exact RGB for the Write button fill guarantees it matches the
@@ -844,19 +893,37 @@ struct GreaseweazleSection: View {
             .padding(.vertical, 4)
         } header: {
             HStack {
-                Image(systemName: "opticaldiscdrive.fill").foregroundStyle(.indigo)
-                Text("Greaseweazle").font(.headline)
+                Image(systemName: "opticaldiscdrive.fill").foregroundStyle(greaseweazlePurple).font(.title2)
+                Text("Greaseweazle").font(.title3.weight(.semibold))
                 if runner.isBusy {
                     Spacer()
                     ProgressView().controlSize(.small)
                 }
             }
-            .padding(.vertical, 4)
+            .padding(.vertical, 6)
+            .padding(.trailing, 12)
         }
         .alert("Couldn't save before writing", isPresented: $saveErrorAlert) {
             Button("OK", role: .cancel) {}
         } message: {
             Text(saveErrorMessage)
+        }
+        .confirmationDialog("Save changes before writing to floppy?",
+            isPresented: $showSaveBeforeWriteConfirm, titleVisibility: .visible) {
+            Button("Save and Write") {
+                guard let url = diskImage.imageURL else { return }
+                do {
+                    try diskImage.saveImageToDisk()
+                    runner.write(from: url)
+                } catch {
+                    saveErrorMessage = "Couldn't save: \(error.localizedDescription)"
+                    saveErrorAlert = true
+                }
+            }
+            .keyboardShortcut(.defaultAction)
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("Your disk image has unsaved changes. Save now so the floppy gets the latest version.")
         }
     }
 
@@ -885,26 +952,14 @@ struct GreaseweazleSection: View {
     }
 
     private func writeDisk() {
-        // If a disk image is currently open in the app, write THAT file — after
-        // auto-saving any pending edits — instead of asking the user to pick a
-        // .img separately. Editing a sample only updates the in-memory buffer
-        // (commitEditsToImage / applySampleEdits never touch the file on disk),
-        // so writing the stale on-disk file silently skipped unsaved changes.
-        // Auto-saving here closes that gap.
         if diskImage.isLoaded, let url = diskImage.imageURL {
             if diskImage.hasUnsavedChanges {
-                do {
-                    try diskImage.saveImageToDisk()
-                } catch {
-                    saveErrorMessage = "Your edits couldn't be saved, so the floppy would be written with stale data: \(error.localizedDescription)"
-                    saveErrorAlert = true
-                    return
-                }
+                showSaveBeforeWriteConfirm = true
+                return
             }
             runner.write(from: url)
             return
         }
-        // No disk image open — fall back to picking a .img file directly.
         guard let url = targetURL(forWriting: true) else { return }
         runner.write(from: url)
     }

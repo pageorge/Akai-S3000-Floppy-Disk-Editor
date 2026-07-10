@@ -33,6 +33,7 @@ extension Notification.Name {
     static let openDiskImage = Notification.Name("openDiskImage")
     static let createDiskImage = Notification.Name("createDiskImage")
     static let beginMultiRename = Notification.Name("beginMultiRename")
+    static let openLastSession = Notification.Name("openLastSession")
 }
 
 // MARK: - Shared disk image holder

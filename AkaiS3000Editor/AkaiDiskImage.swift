@@ -425,11 +425,37 @@ enum AkaiPlaybackMode: UInt8, CaseIterable, Identifiable {
     }
 }
 
+/// Voice priority when polyphony limit is reached — hdr+0x12.
+/// LOW=0, NORM=1, HIGH=2. Hardware-confirmed by byte-diff.
+enum AkaiProgramPriority: UInt8, CaseIterable, Identifiable {
+    case low  = 0
+    case norm = 1
+    case high = 2
+    case hold = 3
+    var id: UInt8 { rawValue }
+    var displayName: String {
+        switch self { case .low: return "LOW"; case .norm: return "NORM"; case .high: return "HIGH"; case .hold: return "HOLD" }
+    }
+}
+
+/// Voice reassignment mode when all voices are in use — hdr+0x3D.
+/// OLDEST=0, QUIETEST=1. Hardware-confirmed by byte-diff.
+enum AkaiProgramReassignment: UInt8, CaseIterable, Identifiable {
+    case oldest   = 0
+    case quietest = 1
+    var id: UInt8 { rawValue }
+    var displayName: String {
+        switch self { case .oldest: return "OLDEST"; case .quietest: return "QUIETEST" }
+    }
+}
+
 struct AkaiProgram {
     var name: String
     var keyzones: [AkaiProgramKeyzone]
     var midiChannel: UInt8
-    var polyphony: UInt8
+    var polyphony: UInt8          // hdr+0x11, 0-indexed (value = voices - 1), range 0–31
+    var priority: AkaiProgramPriority       // hdr+0x12, hardware-confirmed
+    var reassignment: AkaiProgramReassignment   // hdr+0x3D, hardware-confirmed
     var bendRange: UInt8
     /// Master "stereo level" — program header offset `0x17`, 0–99. The OUTPUT
     /// LEVELS page's level of the program at the main L/R stereo outs (manual,
@@ -982,6 +1008,13 @@ class AkaiDiskImage: ObservableObject {
         let midiChannel: UInt8 = rawMidi == 0xff ? 0 : rawMidi &+ 1
         let keygroupCount = fileData.count > 0x2A ? fileData[0x2A] : 0
         let octave = fileData.count > 0x15 ? fileData[0x15] : 0
+        // Polyphony @ hdr+0x11: 0-indexed (0=1 voice, 31=32 voices). Default 32 voices.
+        let rawPoly = fileData.count > 0x11 ? fileData[0x11] : 31
+        let polyphony: UInt8 = rawPoly &+ 1
+        // Priority @ hdr+0x12: LOW=0, NORM=1, HIGH=2. Hardware-confirmed.
+        let priority = fileData.count > 0x12 ? (AkaiProgramPriority(rawValue: fileData[0x12]) ?? .norm) : .norm
+        // Reassignment @ hdr+0x3D: OLDEST=0, QUIETEST=1. Hardware-confirmed.
+        let reassignment = fileData.count > 0x3D ? (AkaiProgramReassignment(rawValue: fileData[0x3D]) ?? .oldest) : .oldest
         // Master output level and base loudness — confirmed offsets, see
         // AkaiProgram.stereoLevel/basicLoudness. Default to 99 (not 0) when the
         // file is too short to contain them, matching real factory defaults
@@ -1064,7 +1097,9 @@ class AkaiDiskImage: ObservableObject {
         }
 
         let program = AkaiProgram(name: name, keyzones: keyzones,
-                                  midiChannel: midiChannel, polyphony: 16, bendRange: octave,
+                                  midiChannel: midiChannel, polyphony: polyphony,
+                                  priority: priority, reassignment: reassignment,
+                                  bendRange: octave,
                                   stereoLevel: stereoLevel, basicLoudness: basicLoudness,
                                   filterModSource1: modSource1, filterModSource2: modSource2, filterModSource3: modSource3,
                                   rawData: fileData)
@@ -1166,7 +1201,8 @@ class AkaiDiskImage: ObservableObject {
             startBlock: UInt16(startBlock), size: totalSize,
             rawEntry: entryBytes, diskOffset: dirSlot)
         let program = AkaiProgram(name: name, keyzones: [],
-            midiChannel: 0, polyphony: 16, bendRange: 2,
+            midiChannel: 0, polyphony: 32, priority: .norm, reassignment: .oldest,
+            bendRange: 2,
             stereoLevel: 99, basicLoudness: 99,
             filterModSource1: .velocity, filterModSource2: .lfo2, filterModSource3: .env2,
             rawData: file)
@@ -2389,6 +2425,7 @@ class AkaiDiskImage: ObservableObject {
     /// rebuilds the whole file rather than patching bytes in place.
     private func buildProgramFileData(name: String, midiChannel: UInt8, bendRange: UInt8,
                                       stereoLevel: UInt8, basicLoudness: UInt8,
+                                      polyphony: UInt8, priority: AkaiProgramPriority, reassignment: AkaiProgramReassignment,
                                       filterModSource1: AkaiFilterModSource, filterModSource2: AkaiFilterModSource, filterModSource3: AkaiFilterModSource,
                                       keyzones: [AkaiProgramKeyzone]) -> Data {
         let kgCount = keyzones.count
@@ -2401,6 +2438,10 @@ class AkaiDiskImage: ObservableObject {
         // midich1 @ 0x10: on-disk 0xFF = Omni, 0...15 = channel (0-indexed).
         // UI is 0 = Omni, 1...16 = channel (1-indexed) — translate, don't store raw.
         file[0x10] = midiChannel == 0 ? 0xFF : midiChannel - 1
+        // Polyphony @ 0x11: 0-indexed (0=1 voice, 31=32 voices). Hardware-confirmed.
+        file[0x11] = polyphony > 0 ? polyphony - 1 : 31
+        // Priority @ 0x12: LOW=0, NORM=1, HIGH=2. Hardware-confirmed.
+        file[0x12] = priority.rawValue
         file[0x13] = 0                            // program-level keylo
         file[0x14] = 127                          // program-level keyhi
         file[0x15] = bendRange                    // oct
@@ -2412,6 +2453,8 @@ class AkaiDiskImage: ObservableObject {
         file[0x56] = filterModSource3.rawValue     // filter mod source #3 — confirmed program-level offset (shared by all keygroups)
         file[0x29] = 0                            // kgxf
         file[0x2A] = UInt8(min(255, kgCount))     // kgnum — MUST match real keygroup count
+        // Reassignment @ 0x3D: OLDEST=0, QUIETEST=1. Hardware-confirmed.
+        file[0x3D] = reassignment.rawValue
 
         let kgBase = 0xC0
         let emptyName = akaiBytes(from: "", length: 12)
@@ -2500,6 +2543,9 @@ class AkaiDiskImage: ObservableObject {
             bendRange: programFile.program.bendRange,
             stereoLevel: programFile.program.stereoLevel,
             basicLoudness: programFile.program.basicLoudness,
+            polyphony: programFile.program.polyphony,
+            priority: programFile.program.priority,
+            reassignment: programFile.program.reassignment,
             filterModSource1: programFile.program.filterModSource1,
             filterModSource2: programFile.program.filterModSource2,
             filterModSource3: programFile.program.filterModSource3,

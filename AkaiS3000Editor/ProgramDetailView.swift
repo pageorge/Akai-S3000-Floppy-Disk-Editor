@@ -113,10 +113,28 @@ struct ProgramDetailView: View {
                             : "Program responds only to MIDI channel \(editedProgram.midiChannel).")
                         HStack {
                             Text("Polyphony").frame(width: 100, alignment: .leading).font(.subheadline).foregroundStyle(.secondary)
-                            Stepper("\(editedProgram.polyphony)", value: $editedProgram.polyphony, in: 1...16)
+                            Stepper("\(editedProgram.polyphony)", value: $editedProgram.polyphony, in: 1...32)
                                 .onChange(of: editedProgram.polyphony) { _, _ in commitProgramEdits() }
                         }
-                        .help("Maximum simultaneous voices for this program (1–16).")
+                        .help("Maximum simultaneous voices (1–32). For stereo programs this must be at least 2 — one voice per zone. Default: 32.")
+                        HStack {
+                            Text("Priority").frame(width: 100, alignment: .leading).font(.subheadline).foregroundStyle(.secondary)
+                            Picker("", selection: $editedProgram.priority) {
+                                ForEach(AkaiProgramPriority.allCases) { p in Text(p.displayName).tag(p) }
+                            }
+                            .labelsHidden()
+                            .onChange(of: editedProgram.priority) { _, _ in commitProgramEdits() }
+                        }
+                        .help("Voice priority when the sampler is pushed to its polyphony limit. LOW = stolen first; HIGH = stolen last; HOLD = notes only stolen by the same program.")
+                        HStack {
+                            Text("Reassignment").frame(width: 100, alignment: .leading).font(.subheadline).foregroundStyle(.secondary)
+                            Picker("", selection: $editedProgram.reassignment) {
+                                ForEach(AkaiProgramReassignment.allCases) { r in Text(r.displayName).tag(r) }
+                            }
+                            .labelsHidden()
+                            .onChange(of: editedProgram.reassignment) { _, _ in commitProgramEdits() }
+                        }
+                        .help("Which voice is stolen when all voices are in use. OLDEST = the longest-playing note; QUIETEST = the quietest note.")
                         HStack {
                             Text("Bend Range").frame(width: 100, alignment: .leading).font(.subheadline).foregroundStyle(.secondary)
                             Stepper("\(editedProgram.bendRange) semitones", value: $editedProgram.bendRange, in: 0...24)
@@ -168,6 +186,29 @@ struct ProgramDetailView: View {
                             .onChange(of: editedProgram.filterModSource3) { _, _ in commitProgramEdits() }
                         }
                         .help(editedProgram.filterModSource3.helpText)
+                        HStack {
+                            Button {
+                                editedProgram.midiChannel = 0
+                                editedProgram.polyphony = 32
+                                editedProgram.priority = .norm
+                                editedProgram.reassignment = .oldest
+                                editedProgram.bendRange = 2
+                                editedProgram.stereoLevel = 99
+                                editedProgram.basicLoudness = 99
+                                editedProgram.filterModSource1 = .velocity
+                                editedProgram.filterModSource2 = .lfo2
+                                editedProgram.filterModSource3 = .env2
+                                commitProgramEdits()
+                            } label: {
+                                Label("Reset", systemImage: "arrow.counterclockwise")
+                                    .font(.system(size: 11))
+                            }
+                            .buttonStyle(.bordered)
+                            .controlSize(.small)
+                            .tint(.blue)
+                            .help("Reset all program settings to hardware defaults")
+                            Spacer()
+                        }
                         } // end VStack inside Program Settings InfoCard
                     } // end InfoCard Program Settings
                     } // VStack
@@ -1127,24 +1168,6 @@ struct KeyzoneEditorView: View {
                             .font(.caption)
                             .foregroundStyle(.secondary)
                             .fixedSize(horizontal: false, vertical: true)
-                        HStack {
-                            Button {
-                                keyzone.env1Attack = AkaiKeyzoneDefaults.env1Attack
-                                keyzone.env1Decay = AkaiKeyzoneDefaults.env1Decay
-                                keyzone.env1Sustain = AkaiKeyzoneDefaults.env1Sustain
-                                keyzone.env1Release = AkaiKeyzoneDefaults.env1Release
-                                onChange()
-                            } label: {
-                                Label("Reset", systemImage: "arrow.counterclockwise")
-                                    .font(.system(size: 11))
-                            }
-                            .buttonStyle(.bordered)
-                            .controlSize(.small)
-                            .tint(.blue)
-                            .help("Reset ENV1 to hardware defaults: A=\(AkaiKeyzoneDefaults.env1Attack) D=\(AkaiKeyzoneDefaults.env1Decay) S=\(AkaiKeyzoneDefaults.env1Sustain) R=\(AkaiKeyzoneDefaults.env1Release)")
-                            Spacer()
-                        }
-                        .zIndex(1)
                         HStack(alignment: .center, spacing: 12) {
                             AdsrView(
                                 attack: Binding(get: { keyzone.env1Attack }, set: { keyzone.env1Attack = $0; onChange() }),
@@ -1164,6 +1187,23 @@ struct KeyzoneEditorView: View {
                                           caption: "How quickly the sound fades after key release. 0 = instant cutoff, 99 = long fade.")
                             }
                             .frame(maxWidth: .infinity)
+                        }
+                        HStack {
+                            Button {
+                                keyzone.env1Attack = AkaiKeyzoneDefaults.env1Attack
+                                keyzone.env1Decay = AkaiKeyzoneDefaults.env1Decay
+                                keyzone.env1Sustain = AkaiKeyzoneDefaults.env1Sustain
+                                keyzone.env1Release = AkaiKeyzoneDefaults.env1Release
+                                onChange()
+                            } label: {
+                                Label("Reset", systemImage: "arrow.counterclockwise")
+                                    .font(.system(size: 11))
+                            }
+                            .buttonStyle(.bordered)
+                            .controlSize(.small)
+                            .tint(.blue)
+                            .help("Reset ENV1 to hardware defaults: A=\(AkaiKeyzoneDefaults.env1Attack) D=\(AkaiKeyzoneDefaults.env1Decay) S=\(AkaiKeyzoneDefaults.env1Sustain) R=\(AkaiKeyzoneDefaults.env1Release)")
+                            Spacer()
                         }
                     }
                 }
@@ -1248,28 +1288,6 @@ struct KeyzoneEditorView: View {
                             .font(.caption)
                             .foregroundStyle(.secondary)
                             .fixedSize(horizontal: false, vertical: true)
-                        HStack {
-                            Button {
-                                keyzone.env2R1 = AkaiKeyzoneDefaults.env2R1
-                                keyzone.env2L1 = AkaiKeyzoneDefaults.env2L1
-                                keyzone.env2R2 = AkaiKeyzoneDefaults.env2R2
-                                keyzone.env2L2 = AkaiKeyzoneDefaults.env2L2
-                                keyzone.env2R3 = AkaiKeyzoneDefaults.env2R3
-                                keyzone.env2L3 = AkaiKeyzoneDefaults.env2L3
-                                keyzone.env2R4 = AkaiKeyzoneDefaults.env2R4
-                                keyzone.env2L4 = AkaiKeyzoneDefaults.env2L4
-                                onChange()
-                            } label: {
-                                Label("Reset", systemImage: "arrow.counterclockwise")
-                                    .font(.system(size: 11))
-                            }
-                            .buttonStyle(.bordered)
-                            .controlSize(.small)
-                            .tint(.blue)
-                            .help("Reset ENV2 to hardware defaults: R1=\(AkaiKeyzoneDefaults.env2R1) L1=\(AkaiKeyzoneDefaults.env2L1) R2=\(AkaiKeyzoneDefaults.env2R2) L2=\(AkaiKeyzoneDefaults.env2L2) R3=\(AkaiKeyzoneDefaults.env2R3) L3=\(AkaiKeyzoneDefaults.env2L3) R4=\(AkaiKeyzoneDefaults.env2R4) L4=\(AkaiKeyzoneDefaults.env2L4)")
-                            Spacer()
-                        }
-                        .zIndex(1)
                         HStack(alignment: .center, spacing: 12) {
                             AdsrView(
                                 attack: Binding(get: { keyzone.env2R1 }, set: { keyzone.env2R1 = $0; onChange() }),
@@ -1298,6 +1316,27 @@ struct KeyzoneEditorView: View {
                                           caption: "Level 4: final level after release.")
                             }
                             .frame(maxWidth: .infinity)
+                        }
+                        HStack {
+                            Button {
+                                keyzone.env2R1 = AkaiKeyzoneDefaults.env2R1
+                                keyzone.env2L1 = AkaiKeyzoneDefaults.env2L1
+                                keyzone.env2R2 = AkaiKeyzoneDefaults.env2R2
+                                keyzone.env2L2 = AkaiKeyzoneDefaults.env2L2
+                                keyzone.env2R3 = AkaiKeyzoneDefaults.env2R3
+                                keyzone.env2L3 = AkaiKeyzoneDefaults.env2L3
+                                keyzone.env2R4 = AkaiKeyzoneDefaults.env2R4
+                                keyzone.env2L4 = AkaiKeyzoneDefaults.env2L4
+                                onChange()
+                            } label: {
+                                Label("Reset", systemImage: "arrow.counterclockwise")
+                                    .font(.system(size: 11))
+                            }
+                            .buttonStyle(.bordered)
+                            .controlSize(.small)
+                            .tint(.blue)
+                            .help("Reset ENV2 to hardware defaults: R1=\(AkaiKeyzoneDefaults.env2R1) L1=\(AkaiKeyzoneDefaults.env2L1) R2=\(AkaiKeyzoneDefaults.env2R2) L2=\(AkaiKeyzoneDefaults.env2L2) R3=\(AkaiKeyzoneDefaults.env2R3) L3=\(AkaiKeyzoneDefaults.env2L3) R4=\(AkaiKeyzoneDefaults.env2R4) L4=\(AkaiKeyzoneDefaults.env2L4)")
+                            Spacer()
                         }
                     }
                 }

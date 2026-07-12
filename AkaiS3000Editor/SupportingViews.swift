@@ -760,6 +760,7 @@ struct AdsrView: View {
     @Binding var decay: UInt8
     @Binding var sustain: UInt8
     @Binding var release: UInt8
+    var color: Color = .green
 
     @State private var dragging: Handle? = nil
 
@@ -855,7 +856,7 @@ struct AdsrView: View {
                     }
 
                     // Vertical dividers between ADSR sections
-                    let dividerColor = GraphicsContext.Shading.color(Color.green.opacity(0.25))
+                    let dividerColor = GraphicsContext.Shading.color(color.opacity(0.25))
                     for x in [p.p1.x, p.p2.x, p.p3.x] {
                         var div = Path()
                         div.move(to: CGPoint(x: x, y: 0))
@@ -872,7 +873,7 @@ struct AdsrView: View {
                     fill.addLine(to: p.p4)
                     fill.addLine(to: CGPoint(x: p.p4.x, y: p.p0.y))
                     fill.closeSubpath()
-                    ctx.fill(fill, with: .color(.green.opacity(0.10)))
+                    ctx.fill(fill, with: .color(color.opacity(0.10)))
 
                     // Envelope line
                     var env = Path()
@@ -881,7 +882,7 @@ struct AdsrView: View {
                     env.addLine(to: p.p2)
                     env.addLine(to: p.p3)
                     env.addLine(to: p.p4)
-                    ctx.stroke(env, with: .color(.green), lineWidth: 2)
+                    ctx.stroke(env, with: .color(color), lineWidth: 2)
                 }
                 .allowsHitTesting(false)
 
@@ -925,8 +926,8 @@ struct AdsrView: View {
     @ViewBuilder
     private func dot(at point: CGPoint, handle: Handle, size: CGSize, pts: (p0: CGPoint, p1: CGPoint, p2: CGPoint, p3: CGPoint, p4: CGPoint)) -> some View {
         Circle()
-            .fill(Color.white)
-            .overlay(Circle().strokeBorder(Color.green, lineWidth: 1.5))
+        .fill(Color.white)
+        .overlay(Circle().strokeBorder(color, lineWidth: 1.5))
             .frame(width: 12, height: 12)
             .position(point)
             .gesture(

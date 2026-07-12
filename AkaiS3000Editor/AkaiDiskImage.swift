@@ -48,6 +48,27 @@ import Foundation
 //   then dummy4[9] → 0x96, then 42 pad → 0xC0
 //   0xC0 audio data begins
 
+/// Hardware-confirmed default values for a freshly created keygroup on a real
+/// S3000XL, established by byte-diff testing against TEST PROGRAM captures.
+/// Use these everywhere defaults are needed: new keyzones, reset buttons,
+/// fallback values in parseProgram.
+struct AkaiKeyzoneDefaults {
+    // ENV1 — confirmed from saw-sine-example.img (TEST PROGRAM on real hardware)
+    static let env1Attack:  UInt8 = 25
+    static let env1Decay:   UInt8 = 50
+    static let env1Sustain: UInt8 = 99
+    static let env1Release: UInt8 = 45
+    // ENV2 — confirmed from env2-r1-99.img et al. (11 byte-diff captures)
+    static let env2R1: UInt8 = 0
+    static let env2L1: UInt8 = 99
+    static let env2R2: UInt8 = 50
+    static let env2L2: UInt8 = 99
+    static let env2R3: UInt8 = 50
+    static let env2L3: UInt8 = 99
+    static let env2R4: UInt8 = 45
+    static let env2L4: UInt8 = 0
+}
+
 struct AkaiDiskFormat {
     static let blockSize            = 1024
     static let blocksPerTrack       = 10
@@ -266,19 +287,27 @@ struct AkaiProgramKeyzone {
     var playbackMode: AkaiPlaybackMode
     var velocityLow: UInt8
     var velocityHigh: UInt8
-    // ENV1 (amplitude envelope) — kg+0x0C/0x0D/0x0E/0x0F. Values 0–99.
-    // Offsets from SYSEX docs. A=0 = instant attack (correct for percussive sounds).
-    // The SYSEX doc lists hardware defaults as A=25,D=50,S=99,R=45 but real
-    // programs on disk show all zeros — blank keygroups default to 0 on hardware.
-    var env1Attack: UInt8 = 0
-    var env1Decay: UInt8 = 0
-    var env1Sustain: UInt8 = 99
-    var env1Release: UInt8 = 0
-    // ENV2 (filter envelope) — kg+0x14/0x15/0x16/0x17. Values 0–99.
-    var env2Attack: UInt8 = 0
-    var env2Decay: UInt8 = 0
-    var env2Sustain: UInt8 = 99
-    var env2Release: UInt8 = 0
+    // ENV1 (amplitude envelope) — confirmed by real hardware byte-diff.
+    // Simple ADSR: A=0 = instant attack, D=50, S=99, R=45 are hardware defaults.
+    // kg+0x0C = Attack, kg+0x0D = Decay, kg+0x0E = Sustain, kg+0x0F = Release.
+    var env1Attack: UInt8 = AkaiKeyzoneDefaults.env1Attack
+    var env1Decay: UInt8 = AkaiKeyzoneDefaults.env1Decay
+    var env1Sustain: UInt8 = AkaiKeyzoneDefaults.env1Sustain
+    var env1Release: UInt8 = AkaiKeyzoneDefaults.env1Release
+    // ENV2 (filter envelope) — 4-stage Rate/Level envelope. Confirmed by real
+    // hardware byte-diff (11 captures). Layout is NON-LINEAR — rates and levels
+    // are split across two separate regions:
+    //   Rates:  kg+0x14=R1, kg+0x15=R3, kg+0x16=L3(sustain level), kg+0x17=R4
+    //   Levels: kg+0x9C=L1, kg+0x9D=R2, kg+0x9E=L2, kg+0x9F=L4
+    // Hardware defaults: R1=0, R2=50, R3=50, R4=45, L1=99, L2=99, L3=99, L4=0
+    var env2R1: UInt8 = AkaiKeyzoneDefaults.env2R1
+    var env2L1: UInt8 = AkaiKeyzoneDefaults.env2L1
+    var env2R2: UInt8 = AkaiKeyzoneDefaults.env2R2
+    var env2L2: UInt8 = AkaiKeyzoneDefaults.env2L2
+    var env2R3: UInt8 = AkaiKeyzoneDefaults.env2R3
+    var env2L3: UInt8 = AkaiKeyzoneDefaults.env2L3
+    var env2R4: UInt8 = AkaiKeyzoneDefaults.env2R4
+    var env2L4: UInt8 = AkaiKeyzoneDefaults.env2L4
 }
 
 /// The full set of modulation sources selectable for any of the 3 filter
@@ -1020,14 +1049,18 @@ class AkaiDiskImage: ObservableObject {
                 playbackMode: AkaiPlaybackMode(rawValue: fileData[vz + 0x13]) ?? .sample,
                 velocityLow:  fileData[vz + 0x0C],
                 velocityHigh: fileData[vz + 0x0D],
-                env1Attack:   kg + 0x0C < fileData.count ? fileData[kg + 0x0C] : 25,
-                env1Decay:    kg + 0x0D < fileData.count ? fileData[kg + 0x0D] : 50,
-                env1Sustain:  kg + 0x0E < fileData.count ? fileData[kg + 0x0E] : 99,
-                env1Release:  kg + 0x0F < fileData.count ? fileData[kg + 0x0F] : 45,
-                env2Attack:   kg + 0x14 < fileData.count ? fileData[kg + 0x14] : 0,
-                env2Decay:    kg + 0x15 < fileData.count ? fileData[kg + 0x15] : 50,
-                env2Sustain:  kg + 0x16 < fileData.count ? fileData[kg + 0x16] : 99,
-                env2Release:  kg + 0x17 < fileData.count ? fileData[kg + 0x17] : 45))
+                env1Attack:   kg + 0x0C < fileData.count ? fileData[kg + 0x0C] : AkaiKeyzoneDefaults.env1Attack,
+                env1Decay:    kg + 0x0D < fileData.count ? fileData[kg + 0x0D] : AkaiKeyzoneDefaults.env1Decay,
+                env1Sustain:  kg + 0x0E < fileData.count ? fileData[kg + 0x0E] : AkaiKeyzoneDefaults.env1Sustain,
+                env1Release:  kg + 0x0F < fileData.count ? fileData[kg + 0x0F] : AkaiKeyzoneDefaults.env1Release,
+                env2R1:       kg + 0x14 < fileData.count ? fileData[kg + 0x14] : AkaiKeyzoneDefaults.env2R1,
+                env2L1:       kg + 0x9C < fileData.count ? fileData[kg + 0x9C] : AkaiKeyzoneDefaults.env2L1,
+                env2R2:       kg + 0x9D < fileData.count ? fileData[kg + 0x9D] : AkaiKeyzoneDefaults.env2R2,
+                env2L2:       kg + 0x9E < fileData.count ? fileData[kg + 0x9E] : AkaiKeyzoneDefaults.env2L2,
+                env2R3:       kg + 0x15 < fileData.count ? fileData[kg + 0x15] : AkaiKeyzoneDefaults.env2R3,
+                env2L3:       kg + 0x16 < fileData.count ? fileData[kg + 0x16] : AkaiKeyzoneDefaults.env2L3,
+                env2R4:       kg + 0x17 < fileData.count ? fileData[kg + 0x17] : AkaiKeyzoneDefaults.env2R4,
+                env2L4:       kg + 0x9F < fileData.count ? fileData[kg + 0x9F] : AkaiKeyzoneDefaults.env2L4))
         }
 
         let program = AkaiProgram(name: name, keyzones: keyzones,
@@ -2390,19 +2423,26 @@ class AkaiDiskImage: ObservableObject {
             file[kg + 0x04] = kz?.highKey ?? 127
             file[kg + 0x07] = kz?.filterCutoff ?? 99
             file[kg + 0x08] = UInt8(bitPattern: kz?.filterKeyFollow ?? 0)
-            file[kg + 0x0C] = kz?.env1Attack ?? 0    // ENV1 Attack
-            file[kg + 0x0D] = kz?.env1Decay ?? 0     // ENV1 Decay
-            file[kg + 0x0E] = kz?.env1Sustain ?? 99   // ENV1 Sustain
-            file[kg + 0x0F] = kz?.env1Release ?? 0   // ENV1 Release
-            file[kg + 0x14] = kz?.env2Attack ?? 0     // ENV2 Attack
-            file[kg + 0x15] = kz?.env2Decay ?? 0     // ENV2 Decay
-            file[kg + 0x16] = kz?.env2Sustain ?? 99   // ENV2 Sustain
-            file[kg + 0x17] = kz?.env2Release ?? 0   // ENV2 Release
+            file[kg + 0x0C] = kz?.env1Attack ?? 0    // ENV1 Attack   — hardware-confirmed kg+0x0C
+            file[kg + 0x0D] = kz?.env1Decay ?? 0     // ENV1 Decay    — hardware-confirmed kg+0x0D
+            file[kg + 0x0E] = kz?.env1Sustain ?? 99   // ENV1 Sustain  — hardware-confirmed kg+0x0E
+            file[kg + 0x0F] = kz?.env1Release ?? 0   // ENV1 Release  — hardware-confirmed kg+0x0F
+            file[kg + 0x14] = kz?.env2R1 ?? 0         // ENV2 Rate 1   — hardware-confirmed kg+0x14
+            file[kg + 0x15] = kz?.env2R3 ?? 50        // ENV2 Rate 3   — hardware-confirmed kg+0x15
+            file[kg + 0x16] = kz?.env2L3 ?? 99        // ENV2 Level 3  — hardware-confirmed kg+0x16
+            file[kg + 0x17] = kz?.env2R4 ?? 45        // ENV2 Rate 4   — hardware-confirmed kg+0x17
+            file[kg + 0x9C] = kz?.env2L1 ?? 99        // ENV2 Level 1  — hardware-confirmed kg+0x9C
+            file[kg + 0x9D] = kz?.env2R2 ?? 50        // ENV2 Rate 2   — hardware-confirmed kg+0x9D
+            file[kg + 0x9E] = kz?.env2L2 ?? 99        // ENV2 Level 2  — hardware-confirmed kg+0x9E
+            file[kg + 0x9F] = kz?.env2L4 ?? 0         // ENV2 Level 4  — hardware-confirmed kg+0x9F
             file[kg + 0x95] = kz?.filterResonance ?? 0
             file[kg + 0x97] = UInt8(bitPattern: kz?.filterModDepth1 ?? 0)  // Mod depth #1 (Velocity→Freq) — confirmed offset
             file[kg + 0x98] = UInt8(bitPattern: kz?.filterModDepth2 ?? 0)  // Mod depth #2 (Lfo2→Freq) — confirmed offset
             file[kg + 0x99] = UInt8(bitPattern: kz?.filterModDepth3 ?? 0)  // Mod depth #3 (Env2→Freq) — confirmed offset
 
+            // kg+0x20/0x21: shdra of the implicit zone-0 slot — hardware expects
+            // 0xFFFF here (confirmed from working programs on real hardware).
+            file[kg + 0x20] = 0xFF; file[kg + 0x21] = 0xFF
             for z in 0..<4 {
                 let vz = kg + 0x22 + z * 0x18
                 if z == 0, let kz = kz {

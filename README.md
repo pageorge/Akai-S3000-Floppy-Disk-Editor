@@ -210,10 +210,23 @@ Starts at **block 5**, 510 × 24-byte entries, spans 12 blocks.
 | `0x04` | `keyhi` | High MIDI key. |
 | `0x07` | Frequency (filter cutoff) | 0–99. **Hardware-confirmed.** |
 | `0x08` | Key Follow | Signed. Factory default is 0 (not the manual's stated +12). **Hardware-confirmed.** |
+| `0x0C` | ENV1 Attack | 0–99. **Hardware-confirmed** kg+0x0C. |
+| `0x0D` | ENV1 Decay | 0–99. **Hardware-confirmed** kg+0x0D. |
+| `0x0E` | ENV1 Sustain | 0–99. **Hardware-confirmed** kg+0x0E. |
+| `0x0F` | ENV1 Release | 0–99. **Hardware-confirmed** kg+0x0F. |
+| `0x14` | ENV2 Rate 1 | 0–99. Default 0. **Hardware-confirmed.** |
+| `0x15` | ENV2 Rate 3 | 0–99. Default 50. **Hardware-confirmed.** |
+| `0x16` | ENV2 Level 3 (sustain) | 0–99. Default 99. **Hardware-confirmed.** |
+| `0x17` | ENV2 Rate 4 (release) | 0–99. Default 45. **Hardware-confirmed.** |
+| `0x20`–`0x21` | `dummy2[1]/[2]` | Must be `0xFFFF`. These are the last 2 bytes of akaiutil's `dummy2[3]` field (at kg+0x1F–0x21, just before the velocity zones at 0x22). **Hardware-confirmed by byte-diff against working real programs** — programs written with `0x0000` here caused zone 1 to be silent (the hardware reads the zone 1 sample name starting 2 bytes late, missing it entirely). Always write `0xFFFF`. |
 | `0x95` | Resonance | 0–15. **Hardware-confirmed.** Outside akaiutil's documented struct. |
 | `0x97` | Filter mod depth #1 (Velocity→Freq) | ±50, signed. **Hardware-confirmed.** |
 | `0x98` | Filter mod depth #2 (Lfo2→Freq) | ±50, signed. **Hardware-confirmed.** |
 | `0x99` | Filter mod depth #3 (Env2→Freq) | ±50, signed. **Hardware-confirmed.** |
+| `0x9C` | ENV2 Level 1 | 0–99. Default 99. **Hardware-confirmed.** |
+| `0x9D` | ENV2 Rate 2 | 0–99. Default 50. **Hardware-confirmed.** |
+| `0x9E` | ENV2 Level 2 | 0–99. Default 99. **Hardware-confirmed.** |
+| `0x9F` | ENV2 Level 4 | 0–99. Default 0. **Hardware-confirmed.** |
 | `0x22`, `+0x18`, `+0x30`, `+0x48` | 4 × velocity zones | 0x18 bytes each. |
 
 ### Velocity zone — 0x18 bytes
@@ -241,7 +254,7 @@ Zone 1 = primary sample. Zone 2 = stereo right channel (same keygroup — manual
 
 Sources at `0x54`/`0x55`/`0x56` are program-wide despite appearing per-keygroup on the FILT page. Only depth amounts (`0x97`/`0x98`/`0x99`) are per-keygroup.
 
-**Not confirmed:** ENV2 envelope byte offsets (4-stage rate/level).
+**All ENV1 and ENV2 offsets are now hardware byte-diff confirmed.** ENV2 has a non-linear layout — rates and levels are split across two regions (`0x14`–`0x17` and `0x9C`–`0x9F`). Stereo zone setup (zones 1+2 in one keygroup, panned L50/R50) confirmed working on real hardware.
 
 ### Akai character encoding
 

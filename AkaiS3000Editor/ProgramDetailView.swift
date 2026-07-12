@@ -591,10 +591,14 @@ struct ProgramDetailView: View {
             if old.env1Decay != newValue.env1Decay { kz.env1Decay = newValue.env1Decay }
             if old.env1Sustain != newValue.env1Sustain { kz.env1Sustain = newValue.env1Sustain }
             if old.env1Release != newValue.env1Release { kz.env1Release = newValue.env1Release }
-            if old.env2Attack != newValue.env2Attack { kz.env2Attack = newValue.env2Attack }
-            if old.env2Decay != newValue.env2Decay { kz.env2Decay = newValue.env2Decay }
-            if old.env2Sustain != newValue.env2Sustain { kz.env2Sustain = newValue.env2Sustain }
-            if old.env2Release != newValue.env2Release { kz.env2Release = newValue.env2Release }
+            if old.env2R1 != newValue.env2R1 { kz.env2R1 = newValue.env2R1 }
+            if old.env2L1 != newValue.env2L1 { kz.env2L1 = newValue.env2L1 }
+            if old.env2R2 != newValue.env2R2 { kz.env2R2 = newValue.env2R2 }
+            if old.env2L2 != newValue.env2L2 { kz.env2L2 = newValue.env2L2 }
+            if old.env2R3 != newValue.env2R3 { kz.env2R3 = newValue.env2R3 }
+            if old.env2L3 != newValue.env2L3 { kz.env2L3 = newValue.env2L3 }
+            if old.env2R4 != newValue.env2R4 { kz.env2R4 = newValue.env2R4 }
+            if old.env2L4 != newValue.env2L4 { kz.env2L4 = newValue.env2L4 }
             // sampleName / rightSampleName / rightPan: intentionally not copied
             // — see doc comment above. A stereo pairing is specific to one
             // keygroup's two samples; broadcasting it to other selected
@@ -1125,10 +1129,10 @@ struct KeyzoneEditorView: View {
                             .fixedSize(horizontal: false, vertical: true)
                         HStack {
                             Button {
-                                keyzone.env1Attack = 0
-                                keyzone.env1Decay = 99
-                                keyzone.env1Sustain = 99
-                                keyzone.env1Release = 0
+                                keyzone.env1Attack = AkaiKeyzoneDefaults.env1Attack
+                                keyzone.env1Decay = AkaiKeyzoneDefaults.env1Decay
+                                keyzone.env1Sustain = AkaiKeyzoneDefaults.env1Sustain
+                                keyzone.env1Release = AkaiKeyzoneDefaults.env1Release
                                 onChange()
                             } label: {
                                 Label("Reset", systemImage: "arrow.counterclockwise")
@@ -1137,7 +1141,7 @@ struct KeyzoneEditorView: View {
                             .buttonStyle(.bordered)
                             .controlSize(.small)
                             .tint(.blue)
-                            .help("Reset ENV1 to defaults: A=0 D=99 S=99 R=0")
+                            .help("Reset ENV1 to hardware defaults: A=\(AkaiKeyzoneDefaults.env1Attack) D=\(AkaiKeyzoneDefaults.env1Decay) S=\(AkaiKeyzoneDefaults.env1Sustain) R=\(AkaiKeyzoneDefaults.env1Release)")
                             Spacer()
                         }
                         .zIndex(1)
@@ -1240,16 +1244,20 @@ struct KeyzoneEditorView: View {
 
                 InfoCard(title: "ENV2 — Shaping The Filter") {
                     VStack(alignment: .leading, spacing: 10) {
-                        Text("Controls how the filter cutoff changes over time, adding tonal movement to the sound. Works together with the filter mod depth settings above. A positive ENV2 depth on the filter opens the filter during the attack and closes it over time. (Manual p.107)")
+                        Text("Controls how the filter cutoff changes over time. ENV2 is a 4-stage Rate/Level envelope: R1→L1, R2→L2, R3→L3 (sustain), R4→L4. Works with the filter mod depth above. (Manual p.107)")
                             .font(.caption)
                             .foregroundStyle(.secondary)
                             .fixedSize(horizontal: false, vertical: true)
                         HStack {
                             Button {
-                                keyzone.env2Attack = 0
-                                keyzone.env2Decay = 99
-                                keyzone.env2Sustain = 99
-                                keyzone.env2Release = 0
+                                keyzone.env2R1 = AkaiKeyzoneDefaults.env2R1
+                                keyzone.env2L1 = AkaiKeyzoneDefaults.env2L1
+                                keyzone.env2R2 = AkaiKeyzoneDefaults.env2R2
+                                keyzone.env2L2 = AkaiKeyzoneDefaults.env2L2
+                                keyzone.env2R3 = AkaiKeyzoneDefaults.env2R3
+                                keyzone.env2L3 = AkaiKeyzoneDefaults.env2L3
+                                keyzone.env2R4 = AkaiKeyzoneDefaults.env2R4
+                                keyzone.env2L4 = AkaiKeyzoneDefaults.env2L4
                                 onChange()
                             } label: {
                                 Label("Reset", systemImage: "arrow.counterclockwise")
@@ -1258,27 +1266,36 @@ struct KeyzoneEditorView: View {
                             .buttonStyle(.bordered)
                             .controlSize(.small)
                             .tint(.blue)
-                            .help("Reset ENV2 to defaults: A=0 D=99 S=99 R=0")
+                            .help("Reset ENV2 to hardware defaults: R1=\(AkaiKeyzoneDefaults.env2R1) L1=\(AkaiKeyzoneDefaults.env2L1) R2=\(AkaiKeyzoneDefaults.env2R2) L2=\(AkaiKeyzoneDefaults.env2L2) R3=\(AkaiKeyzoneDefaults.env2R3) L3=\(AkaiKeyzoneDefaults.env2L3) R4=\(AkaiKeyzoneDefaults.env2R4) L4=\(AkaiKeyzoneDefaults.env2L4)")
                             Spacer()
                         }
                         .zIndex(1)
                         HStack(alignment: .center, spacing: 12) {
                             AdsrView(
-                                attack: Binding(get: { keyzone.env2Attack }, set: { keyzone.env2Attack = $0; onChange() }),
-                                decay: Binding(get: { keyzone.env2Decay }, set: { keyzone.env2Decay = $0; onChange() }),
-                                sustain: Binding(get: { keyzone.env2Sustain }, set: { keyzone.env2Sustain = $0; onChange() }),
-                                release: Binding(get: { keyzone.env2Release }, set: { keyzone.env2Release = $0; onChange() })
+                                attack: Binding(get: { keyzone.env2R1 }, set: { keyzone.env2R1 = $0; onChange() }),
+                                decay: Binding(get: { keyzone.env2R2 }, set: { keyzone.env2R2 = $0; onChange() }),
+                                sustain: Binding(get: { keyzone.env2L3 }, set: { keyzone.env2L3 = $0; onChange() }),
+                                release: Binding(get: { keyzone.env2R4 }, set: { keyzone.env2R4 = $0; onChange() }),
+                                color: .orange
                             )
                             .frame(maxWidth: .infinity, maxHeight: .infinity)
                             VStack(alignment: .leading, spacing: 8) {
-                                EnvSlider(label: "Attack", value: Binding(get: { keyzone.env2Attack }, set: { keyzone.env2Attack = $0; onChange() }),
-                                          caption: "How quickly the filter opens on note-on. High values + positive Env2 depth create a slow filter sweep.")
-                                EnvSlider(label: "Decay", value: Binding(get: { keyzone.env2Decay }, set: { keyzone.env2Decay = $0; onChange() }),
-                                          caption: "How quickly the filter falls from the attack peak to the Sustain level.")
-                                EnvSlider(label: "Sustain", value: Binding(get: { keyzone.env2Sustain }, set: { keyzone.env2Sustain = $0; onChange() }),
-                                          caption: "Filter envelope level held while the key is pressed. Lower values give a darker sustained tone.")
-                                EnvSlider(label: "Release", value: Binding(get: { keyzone.env2Release }, set: { keyzone.env2Release = $0; onChange() }),
-                                          caption: "How quickly the filter closes after key release. 0 = instant, 99 = long slow close.")
+                                EnvSlider(label: "R1", value: Binding(get: { keyzone.env2R1 }, set: { keyzone.env2R1 = $0; onChange() }),
+                                          caption: "Rate 1: how quickly the filter opens on note-on.")
+                                EnvSlider(label: "L1", value: Binding(get: { keyzone.env2L1 }, set: { keyzone.env2L1 = $0; onChange() }),
+                                          caption: "Level 1: the peak level reached after Rate 1.")
+                                EnvSlider(label: "R2", value: Binding(get: { keyzone.env2R2 }, set: { keyzone.env2R2 = $0; onChange() }),
+                                          caption: "Rate 2: how quickly it falls from L1 to L2.")
+                                EnvSlider(label: "L2", value: Binding(get: { keyzone.env2L2 }, set: { keyzone.env2L2 = $0; onChange() }),
+                                          caption: "Level 2: intermediate level.")
+                                EnvSlider(label: "R3", value: Binding(get: { keyzone.env2R3 }, set: { keyzone.env2R3 = $0; onChange() }),
+                                          caption: "Rate 3: how quickly it moves from L2 to L3.")
+                                EnvSlider(label: "L3", value: Binding(get: { keyzone.env2L3 }, set: { keyzone.env2L3 = $0; onChange() }),
+                                          caption: "Level 3: sustain level held while key is pressed.")
+                                EnvSlider(label: "R4", value: Binding(get: { keyzone.env2R4 }, set: { keyzone.env2R4 = $0; onChange() }),
+                                          caption: "Rate 4: how quickly the filter closes after key release.")
+                                EnvSlider(label: "L4", value: Binding(get: { keyzone.env2L4 }, set: { keyzone.env2L4 = $0; onChange() }),
+                                          caption: "Level 4: final level after release.")
                             }
                             .frame(maxWidth: .infinity)
                         }

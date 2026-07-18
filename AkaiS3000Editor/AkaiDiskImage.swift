@@ -2444,7 +2444,10 @@ class AkaiDiskImage: ObservableObject {
         file[0x12] = priority.rawValue
         file[0x13] = 0                            // program-level keylo
         file[0x14] = 127                          // program-level keyhi
-        file[0x15] = bendRange                    // oct
+        // Bend range — up @ hdr+0x27, down @ hdr+0x15. Hardware-confirmed.
+        // Single UI control writes both simultaneously.
+        file[0x15] = bendRange   // bend down
+        file[0x27] = bendRange   // bend up
         file[0x16] = 0xFF                          // auxch1 = OFF
         file[0x17] = stereoLevel                  // OUTPUT LEVELS "stereo level" — confirmed offset; 0 = total silence on main outs
         file[0x19] = basicLoudness                 // OUTPUT LEVELS "basic loudness" — confirmed offset; 0 = total silence regardless of velocity

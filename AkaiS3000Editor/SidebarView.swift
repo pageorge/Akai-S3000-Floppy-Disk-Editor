@@ -667,6 +667,9 @@ struct SidebarSampleRow: View {
         .listRowInsets(EdgeInsets(top: 2, leading: 4, bottom: 2, trailing: 4))
         .contentShape(Rectangle())
         .onTapGesture { onTap() }
+        .onDrag {
+            NSItemProvider(object: displayName as NSString)
+        }
         .contextMenu {
             Button(action: onClone) {
                 if selectedCount > 1 && isSelected {

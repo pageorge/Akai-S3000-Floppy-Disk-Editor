@@ -191,12 +191,16 @@ Starts at **block 5**, 510 × 24-byte entries, spans 12 blocks.
 | `0x10` | `midich1` | `0xFF`=Omni, else 0-indexed channel. |
 | `0x13` | `keylo` | Program-level low key. |
 | `0x14` | `keyhi` | Program-level high key. |
-| `0x15` | `oct` | Bend range (semitones). |
+| `0x15` | Bend Range Down | 0–24 semitones. **Hardware-confirmed.** Written together with `0x27`. |
 | `0x16` | `auxch1` | `0xFF`=off. |
 | `0x17` | Stereo Level | 0–99. Main L/R output level. `0x00` = silent on main outs. Default 99. **Hardware-confirmed.** |
 | `0x19` | Basic Loudness | 0–99. Base loudness before velocity sensitivity. `0x00` = silent. Default 99. **Hardware-confirmed.** |
+| `0x27` | Bend Range Up | 0–24 semitones. **Hardware-confirmed.** Written together with `0x15`. |
+| `0x28` | Pressure Bend | −12 to +12, signed byte (`0xF4`=-12). Default 0. **Hardware-confirmed.** |
 | `0x29` | `kgxf` | Keygroup crossfade enable. |
 | `0x2A` | `kgnum` | Number of keygroups — must match actual count in file. |
+| `0x49` | Unknown | Default 2. Not yet isolated — possibly pressure bend direction or a related field. |
+| `0x4A` | Bend Mode | NORMAL=0, HELD=1. **Hardware-confirmed.** |
 | `0x54` | Filter mod source #1 | Index 0–13. Default 5 (Velocity). Program-wide. **Hardware-confirmed.** |
 | `0x55` | Filter mod source #2 | Default 8 (Lfo2). Program-wide. **Hardware-confirmed.** |
 | `0x56` | Filter mod source #3 | Default 10 (Env2). Program-wide. **Hardware-confirmed.** |

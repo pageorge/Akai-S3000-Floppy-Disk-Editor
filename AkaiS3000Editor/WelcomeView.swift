@@ -1,9 +1,7 @@
 import SwiftUI
-import UniformTypeIdentifiers
 
 struct WelcomeView: View {
     @ObservedObject var diskImage: AkaiDiskImage
-    @State private var isDragging = false
     @State private var lastPath: String? = UserDefaults.standard.string(forKey: "lastOpenedImagePath")
 
     /// The vivid Akai brand red, shared with the logo and the Greaseweazle Write
@@ -30,21 +28,22 @@ struct WelcomeView: View {
                 }
                 ZStack {
                     RoundedRectangle(cornerRadius: 16)
-                        .fill(isDragging ? Color.red.opacity(0.08) : Color.secondary.opacity(0.06))
+                        .fill(Color.secondary.opacity(0.06))
                         .frame(width: 420, height: 208)
                         .overlay(
                             RoundedRectangle(cornerRadius: 16)
                                 .strokeBorder(
-                                    isDragging ? Color.red.opacity(0.6) : Color.secondary.opacity(0.2),
-                                    style: StrokeStyle(lineWidth: isDragging ? 2 : 1, dash: [6])
+                                    Color.secondary.opacity(0.2),
+                                    style: StrokeStyle(lineWidth: 1, dash: [6])
                                 )
                         )
                     VStack(spacing: 6) {
                         if let path = lastPath, FileManager.default.fileExists(atPath: path) {
+                            let filename = URL(fileURLWithPath: path).lastPathComponent
                             Button {
                                 try? diskImage.load(from: URL(fileURLWithPath: path))
                             } label: {
-                                Label("Open Last Session", systemImage: "clock.arrow.circlepath")
+                                Label(filename, systemImage: "clock.arrow.circlepath")
                                     .frame(width: actionButtonWidth)
                                     .padding(.vertical, 10)
                                     .foregroundStyle(.white)
@@ -65,9 +64,7 @@ struct WelcomeView: View {
                                 .clipShape(RoundedRectangle(cornerRadius: 6))
                         }
                         .buttonStyle(.plain)
-                        .padding(.bottom, 6)
-                        Text("or drag a .img file here")
-                            .font(.caption).foregroundStyle(.tertiary)
+                        .padding(.bottom, 4)
                         Button {
                             NotificationCenter.default.post(name: .createDiskImage, object: nil)
                         } label: {
@@ -85,7 +82,6 @@ struct WelcomeView: View {
                         .padding(.top, 4)
                     }
                 }
-                .animation(.easeInOut(duration: 0.15), value: isDragging)
                 HStack(spacing: 28) {
                     FeaturePill(icon: "waveform",             text: "Import Samples",  color: Color(red: 0.91, green: 0, blue: 0.11))
                     FeaturePill(icon: "pianokeys",             text: "Create Programs", color: .purple)
@@ -95,19 +91,6 @@ struct WelcomeView: View {
                 }
             }
             .padding(60)
-        }
-        .onDrop(of: [.fileURL], isTargeted: $isDragging) { providers in
-            providers.first?.loadItem(forTypeIdentifier: UTType.fileURL.identifier) { item, _ in
-                guard let data = item as? Data,
-                      let url = URL(dataRepresentation: data, relativeTo: nil) else { return }
-                // Must start security-scoped access so we can write back to the file later
-                let accessing = url.startAccessingSecurityScopedResource()
-                DispatchQueue.main.async {
-                    try? diskImage.load(from: url)
-                    if !accessing { _ = url.startAccessingSecurityScopedResource() }
-                }
-            }
-            return true
         }
     }
 }

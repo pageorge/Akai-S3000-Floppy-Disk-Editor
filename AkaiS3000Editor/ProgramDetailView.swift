@@ -213,7 +213,7 @@ struct ProgramDetailView: View {
                                 }
                                 .contextMenu {
                                     Button { addKeyzone() } label: {
-                                        Label("New Keyzone", systemImage: "plus.square.on.square")
+                                        Label("Create Keyzone", systemImage: "plus.square.on.square")
                                     }
                                     Button { cloneKeyzone(at: idx) } label: {
                                         Label("Clone", systemImage: "plus.square.on.square")
@@ -240,7 +240,15 @@ struct ProgramDetailView: View {
                     .listStyle(.plain)
                     .frame(maxHeight: .infinity)
                     .focused($keyzoneListFocused)
+                    .onChange(of: selectedKeyzoneIndices) { _, newValue in
+                        // Mirrors the shared diskImage.isEditingText flag — lets
+                        // SidebarView's own key monitor know to yield arrow/delete
+                        // keys to THIS list instead of the sidebar's own selection.
+                        // See AkaiDiskImage.keyzoneEditorActive's doc comment.
+                        diskImage.keyzoneEditorActive = !newValue.isEmpty
+                    }
                     .onAppear {
+                        diskImage.keyzoneEditorActive = !selectedKeyzoneIndices.isEmpty
                         keyzoneKeyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
                             guard !diskImage.isEditingText else { return event }
                             let hasKeyzoneContext = self.keyzoneListFocused || !self.selectedKeyzoneIndices.isEmpty
@@ -262,6 +270,7 @@ struct ProgramDetailView: View {
                     }
                     .onDisappear {
                         if let m = keyzoneKeyMonitor { NSEvent.removeMonitor(m); keyzoneKeyMonitor = nil }
+                        diskImage.keyzoneEditorActive = false
                     }
                         } // VStack inside InfoCard
                     } // InfoCard Keyzones
@@ -593,7 +602,7 @@ struct PresetDropZone: View {
                         ProgressView("Importing...").padding()
                     } else {
                         Button { openSamples() } label: {
-                            Label("Browse Samples", systemImage: "square.and.arrow.down.on.square")
+                            Label("Browse Samples", systemImage: "square.on.square")
                                 .lineLimit(1)
                                 .frame(maxWidth: .infinity).padding(.vertical, 8)
                                 .foregroundStyle(.white).background(Color.blue)

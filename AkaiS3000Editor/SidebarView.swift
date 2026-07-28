@@ -19,6 +19,8 @@ struct SidebarView: View {
     @State private var showBatchDeleteConfirm = false
     @State private var cloneSpaceAlert = false
     @State private var cloneSpaceMessage = ""
+    @State private var drumPresetPartialAlert = false
+    @State private var drumPresetPartialMessage = ""
 
     @State private var programToDelete: AkaiProgramFile? = nil
     @State private var showDeleteProgramConfirm = false
@@ -233,6 +235,221 @@ struct SidebarView: View {
         }
     }
 
+    /// Open a file picker for a single WAV/AIFF, import it, and create a
+    /// program with one keyzone spanning the full keyboard (C0–G8).
+    private func createPresetFromSample() {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = false
+        panel.allowedContentTypes = [.audio]
+        panel.title = "Choose sample for preset"
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+
+        let rawName = url.deletingPathExtension().lastPathComponent
+            .replacingOccurrences(of: " ", with: "")
+        let programName = AkaiDiskImage.sanitizeName(String(rawName.prefix(12)))
+
+        let prog: AkaiProgramFile
+        do { prog = try diskImage.createProgram(name: programName) }
+        catch {
+            cloneSpaceMessage = error.localizedDescription
+            cloneSpaceAlert = true
+            return
+        }
+
+        DispatchQueue.global(qos: .userInitiated).async {
+            let accessing = url.startAccessingSecurityScopedResource()
+            defer { if accessing { url.stopAccessingSecurityScopedResource() } }
+            do {
+                let wavData = try Data(contentsOf: url)
+                let (pcmData, sampleRate, numChannels) = try Self.parseWAVMinimal(wavData)
+                let baseName = AkaiDiskImage.sanitizeName(
+                    url.deletingPathExtension().lastPathComponent
+                        .replacingOccurrences(of: " ", with: ""))
+                let monoData: Data; let monoName: String
+                if numChannels >= 2 {
+                    let (left, _) = AkaiDiskImage.deinterleaveStereo(pcmData, channels: numChannels)
+                    monoData = left
+                    monoName = String(baseName.prefix(10)) + "-L"
+                } else {
+                    monoData = pcmData
+                    monoName = String(baseName.prefix(12))
+                }
+                let sample = try diskImage.addImportedSample(
+                    name: monoName, sampleRate: UInt32(sampleRate),
+                    numChannels: 1, pcmData: monoData)
+                let kz = AkaiProgramKeyzone(
+                    sampleName: sample.header.name,
+                    lowKey: 24, highKey: 127, rootNote: 60,
+                    tuneOffset: 0, fineTune: 0, volume: 99, pan: 0,
+                    filterOffset: 0, filterCutoff: 99, filterKeyFollow: 0,
+                    filterResonance: 0, filterModDepth1: 0,
+                    filterModDepth2: 0, filterModDepth3: 0,
+                    rightSampleName: "", rightPan: 50,
+                    playbackMode: .sample, velocityLow: 0, velocityHigh: 127)
+                DispatchQueue.main.async {
+                    var updated = diskImage.programs.first(where: { $0.id == prog.id }) ?? prog
+                    updated.program.keyzones = [kz]
+                    diskImage.applyProgramEdits(updated)
+                    diskImage.hasUnsavedChanges = true
+                    selectedTab = .programs
+                    selectedProgramID = prog.id
+                    selectedProgramIDs = [prog.id]
+                    programSelectionAnchorID = prog.id
+                }
+            } catch {
+                DispatchQueue.main.async {
+                    cloneSpaceMessage = error.localizedDescription
+                    cloneSpaceAlert = true
+                }
+            }
+        }
+    }
+
+    /// Open a folder picker, then import all WAV/AIFF files alphabetically as
+    /// one-shot drum keyzones (each mapped to its own key starting at C0),
+    /// creating a new program named after the folder. Partial imports (disk full
+    /// mid-batch) are reported via an alert; the successfully-imported samples
+    /// and their keyzones are still committed.
+    private func createDrumPresetFromFolder() {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = false
+        panel.canChooseDirectories = true
+        panel.allowsMultipleSelection = false
+        panel.title = "Choose folder for drum preset"
+        guard panel.runModal() == .OK, let folderURL = panel.url else { return }
+
+        // Derive program name from folder name: strip spaces, sanitize to Akai
+        // charset, truncate to 12 chars.
+        let rawName = folderURL.lastPathComponent.replacingOccurrences(of: " ", with: "")
+        let programName = AkaiDiskImage.sanitizeName(String(rawName.prefix(12)))
+
+        // Collect audio files sorted alphabetically.
+        let audioExts: Set<String> = ["wav", "wave", "aif", "aiff", "aifc"]
+        let fm = FileManager.default
+        guard let contents = try? fm.contentsOfDirectory(
+            at: folderURL, includingPropertiesForKeys: [.isRegularFileKey],
+            options: [.skipsHiddenFiles]
+        ) else { return }
+        let audioURLs = contents
+            .filter { audioExts.contains($0.pathExtension.lowercased()) }
+            .sorted { $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedAscending }
+        guard !audioURLs.isEmpty else {
+            cloneSpaceMessage = "No audio files found in that folder."
+            cloneSpaceAlert = true
+            return
+        }
+
+        // Create the program first so it exists to add keyzones to.
+        let prog: AkaiProgramFile
+        do { prog = try diskImage.createProgram(name: programName) }
+        catch {
+            cloneSpaceMessage = error.localizedDescription
+            cloneSpaceAlert = true
+            return
+        }
+
+        // Import samples and build keyzones on a background thread.
+        DispatchQueue.global(qos: .userInitiated).async {
+            var keyzones: [AkaiProgramKeyzone] = []
+            var nextNote: Int = 24   // C0
+            var hitDiskLimit = false
+            var limitMessage = ""
+
+            for url in audioURLs {
+                let accessing = url.startAccessingSecurityScopedResource()
+                defer { if accessing { url.stopAccessingSecurityScopedResource() } }
+
+                do {
+                    let wavData = try Data(contentsOf: url)
+                    let (pcmData, sampleRate, numChannels) = try Self.parseWAVMinimal(wavData)
+                    let baseName = AkaiDiskImage.sanitizeName(
+                        url.deletingPathExtension().lastPathComponent
+                            .replacingOccurrences(of: " ", with: ""))
+                    let monoData: Data; let monoName: String
+                    if numChannels >= 2 {
+                        let (left, _) = AkaiDiskImage.deinterleaveStereo(pcmData, channels: numChannels)
+                        monoData = left
+                        monoName = String(baseName.prefix(10)) + "-L"
+                    } else {
+                        monoData = pcmData
+                        monoName = String(baseName.prefix(12))
+                    }
+                    let sample = try diskImage.addImportedSample(
+                        name: monoName, sampleRate: UInt32(sampleRate),
+                        numChannels: 1, pcmData: monoData)
+                    let note = UInt8(min(nextNote, 127))
+                    keyzones.append(AkaiProgramKeyzone(
+                        sampleName: sample.header.name,
+                        lowKey: note, highKey: note, rootNote: note,
+                        tuneOffset: 0, fineTune: 0, volume: 99, pan: 0,
+                        filterOffset: 0, filterCutoff: 99, filterKeyFollow: 0,
+                        filterResonance: 0, filterModDepth1: 0,
+                        filterModDepth2: 0, filterModDepth3: 0,
+                        rightSampleName: "", rightPan: 50,
+                        playbackMode: .noLoop, velocityLow: 0, velocityHigh: 127))
+                    nextNote += 1
+                } catch {
+                    // Disk full or directory full — stop importing.
+                    hitDiskLimit = true
+                    let imported = keyzones.count
+                    let total = audioURLs.count
+                    limitMessage = "Disk is full — only \(imported) of \(total) samples could be imported. The program has been created with those samples."
+                    break
+                }
+            }
+
+            // Apply all keyzones to the program in one shot.
+            DispatchQueue.main.async {
+                if !keyzones.isEmpty {
+                    var updated = diskImage.programs.first(where: { $0.id == prog.id }) ?? prog
+                    updated.program.keyzones = keyzones
+                    diskImage.applyProgramEdits(updated)
+                    diskImage.hasUnsavedChanges = true
+                }
+                selectedTab = .programs
+                selectedProgramID = prog.id
+                selectedProgramIDs = [prog.id]
+                programSelectionAnchorID = prog.id
+                if hitDiskLimit {
+                    drumPresetPartialMessage = limitMessage
+                    drumPresetPartialAlert = true
+                }
+            }
+        }
+    }
+
+    /// Minimal WAV/AIFF parser — extracts PCM data, sample rate, channel count.
+    /// Mirrors the per-struct parsers in the drop zones but lives here so
+    /// SidebarView can use it without depending on a struct that may not exist.
+    private static func parseWAVMinimal(_ data: Data) throws -> (Data, Int, Int) {
+        guard data.count > 44,
+              data[0..<4] == Data("RIFF".utf8),
+              data[8..<12] == Data("WAVE".utf8) else {
+            throw NSError(domain: "WAV", code: 0,
+                          userInfo: [NSLocalizedDescriptionKey: "Not a valid WAV file"])
+        }
+        var offset = 12, sampleRate = 44100, numChannels = 1
+        var pcmData = Data()
+        while offset + 8 <= data.count {
+            let id = String(bytes: data[offset..<offset+4], encoding: .ascii) ?? ""
+            let size = Int(data.readLE32(at: offset + 4)); offset += 8
+            if id == "fmt " {
+                numChannels = Int(data.readLE16(at: offset + 2))
+                sampleRate  = Int(data.readLE32(at: offset + 4))
+            } else if id == "data" {
+                pcmData = data.subdata(in: offset..<min(offset + size, data.count))
+            }
+            offset += size + (size % 2)
+        }
+        guard !pcmData.isEmpty else {
+            throw NSError(domain: "WAV", code: 1,
+                          userInfo: [NSLocalizedDescriptionKey: "No audio data"])
+        }
+        return (pcmData, sampleRate, numChannels)
+    }
+
     private func beginVolumeRename() {
         editedVolumeName = diskImage.diskName
         isEditingVolumeName = true
@@ -302,6 +519,14 @@ struct SidebarView: View {
         .onAppear {
             deleteKeyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
                 guard !self.diskImage.isEditingText else { return event }
+                // Bow out entirely while a program's keyzone list has an active
+                // selection. NSEvent local monitors fire in REGISTRATION order
+                // (oldest first) — this monitor is registered once at app launch,
+                // so without this guard it always intercepts arrow/delete keys
+                // before ProgramDetailView's own monitor (registered fresh each
+                // time a program is opened) ever sees them. See
+                // AkaiDiskImage.keyzoneEditorActive's doc comment for the full story.
+                guard !self.diskImage.keyzoneEditorActive else { return event }
                 // Only handle arrow/delete if the sidebar actually has something
                 // selected — if the keyzone list is focused it has its own monitor
                 // and will handle the event first (returning nil), so we won't
@@ -414,6 +639,11 @@ struct SidebarView: View {
         } message: {
             Text(cloneSpaceMessage)
         }
+        .alert("Partial import", isPresented: $drumPresetPartialAlert) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text(drumPresetPartialMessage)
+        }
     }
 
     // MARK: - Sidebar sections (extracted to keep body type-checkable)
@@ -511,7 +741,9 @@ struct SidebarView: View {
                             }
                         },
                         onCreate: { createProgram() },
-                        onClone: { cloneProgram(prog) }
+                        onClone: { cloneProgram(prog) },
+                        onCreatePreset: { createPresetFromSample() },
+                        onCreateDrumPreset: { createDrumPresetFromFolder() }
                     )
                 }
             }
@@ -531,7 +763,7 @@ struct SidebarView: View {
             .padding(.trailing, 12)
             .contextMenu {
                 Button { createProgram() } label: {
-                    Label("Create New Program", systemImage: "plus.square.on.square")
+                    Label("Create Program", systemImage: "plus.square.on.square")
                 }
             }
         }
@@ -603,7 +835,7 @@ struct SidebarView: View {
                         selectedMultiID = created.id
                     }
                 } label: {
-                    Label("Create New Multi", systemImage: "plus.square.on.square")
+                    Label("Create Multi", systemImage: "plus.square.on.square")
                 }
             }
         }
@@ -703,6 +935,8 @@ struct SidebarProgramRow: View {
     var onDelete: () -> Void = {}
     var onCreate: () -> Void = {}
     var onClone: () -> Void = {}
+    var onCreatePreset: () -> Void = {}
+    var onCreateDrumPreset: () -> Void = {}
 
     private var displayName: String {
         program.program.name.isEmpty ? program.directoryEntry.name : program.program.name
@@ -736,7 +970,13 @@ struct SidebarProgramRow: View {
             }
             Divider()
             Button(action: onCreate) {
-                Label("Create New Program", systemImage: "plus.square.on.square")
+                Label("Create Program", systemImage: "plus.square.on.square")
+            }
+            Button(action: onCreatePreset) {
+                Label("Create Preset from Sample", systemImage: "square.and.arrow.down.on.square")
+            }
+            Button(action: onCreateDrumPreset) {
+                Label("Create Drum Preset from Folder", systemImage: "folder.badge.plus")
             }
             Divider()
             Button(role: .destructive, action: onDelete) {
@@ -795,7 +1035,7 @@ struct SidebarMultiRow: View {
             }
             Divider()
             Button(action: onCreate) {
-                Label("New Multi", systemImage: "plus.square.on.square")
+                Label("Create Multi", systemImage: "plus.square.on.square")
             }
             Divider()
             Button(action: onRename) {

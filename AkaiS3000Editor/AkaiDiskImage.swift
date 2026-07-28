@@ -698,6 +698,22 @@ class AkaiDiskImage: ObservableObject {
     /// and bow out so keystrokes reach the field instead of triggering shortcuts.
     @Published var isEditingText = false
 
+    /// True whenever a Program's keyzone list has an active selection —
+    /// ProgramDetailView sets this true/false as selectedKeyzoneIndices changes.
+    /// SidebarView's own arrow/delete key monitor checks this and bows out,
+    /// since NSEvent local monitors fire in REGISTRATION order (oldest first):
+    /// SidebarView's monitor is registered once at app launch and would
+    /// otherwise always intercept arrow keys before ProgramDetailView's monitor
+    /// (registered fresh each time a program is opened) ever saw them — because
+    /// `selectedProgramID` in the sidebar is non-nil the whole time a program is
+    /// open, `hasSidebarSelection` was always true, so the sidebar silently
+    /// "stole" every arrow-key press meant for the keyzone list. A plain
+    /// @Published Bool (not @FocusState) is used deliberately: @FocusState on a
+    /// macOS List proved unreliable — it doesn't always flip true even when the
+    /// list visually has focus — so this flag is driven by selection state
+    /// instead, mirroring the reliable isEditingText pattern above.
+    @Published var keyzoneEditorActive = false
+
     var imageData: Data?
     var imageURL:  URL?
 

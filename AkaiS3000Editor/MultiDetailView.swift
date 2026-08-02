@@ -17,8 +17,11 @@ struct MultiListView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            HStack {
-                Text("Multis").font(.title2.bold())
+            HStack(spacing: 10) {
+                Image(systemName: "square.stack.3d.up")
+                    .font(.title)
+                    .foregroundStyle(.teal)
+                Text("Multis").font(.title.bold())
                 Spacer()
                 Text("\(diskImage.multis.count) files").foregroundStyle(.secondary)
             }
@@ -26,7 +29,8 @@ struct MultiListView: View {
             Divider()
             if diskImage.multis.isEmpty {
                 ContentUnavailableView("No Multis", systemImage: "square.stack.3d.up",
-                    description: Text("Use New Multi to create one, or load a disk that has MULTI files."))
+                    description: Text("Right-click Multis in the sidebar to create one."))
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
                 Table(diskImage.multis, selection: $selectedMultiID) {
                     TableColumn("Name") { mf in

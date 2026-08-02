@@ -1031,18 +1031,6 @@ struct DiskInfoView: View {
                         InfoRow(label: "Tracks",         value: "80 × 2")
                         InfoRow(label: "Total Capacity", value: "1.64 MB")
                     }
-                    InfoCard(title: "File Path") {
-                        if let url = diskImage.imageURL {
-                            VStack(alignment: .leading, spacing: 4) {
-                                Text(url.lastPathComponent)
-                                    .font(.system(.body, design: .monospaced))
-                                Text(url.deletingLastPathComponent().path)
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
-                                    .lineLimit(2)
-                            }
-                        }
-                    }
                 }
 
                 if !diskImage.samples.isEmpty {

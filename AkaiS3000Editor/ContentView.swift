@@ -25,6 +25,13 @@ struct ContentView: View {
         }
     }
 
+    @State private var duplicateSampleAlert = false
+    @State private var duplicateSampleMessage = ""
+    @State private var duplicateSampleCount = 0
+    @State private var duplicateSampleHasOtherFiles = false
+    @State private var pendingSampleImport: (() -> Void)? = nil
+    @AppStorage("lowQualityImport") private var lowQualityImport = false
+
     enum SidebarTab: String, CaseIterable {
         case samples = "Samples"
         case programs = "Programs"
@@ -36,7 +43,7 @@ struct ContentView: View {
             case .samples: return "waveform"
             case .programs: return "pianokeys"
             case .multis: return "square.stack.3d.up"
-            case .diskInfo: return "internaldrive"
+            case .diskInfo: return "externaldrive.badge.questionmark"
             }
         }
     }
@@ -92,11 +99,7 @@ struct ContentView: View {
                                let real = diskImage.multis.first(where: { $0.id == id }) {
                                 MultiPlaceholderView(multiFile: real, diskImage: diskImage)
                             } else {
-                                ContentUnavailableView("No Multi Selected",
-                                    systemImage: "square.stack.3d.up",
-                                    description: Text(diskImage.multis.isEmpty
-                                        ? "Right-click Multis in the sidebar to create one."
-                                        : "Select a multi from the sidebar."))
+                                MultiListView(diskImage: diskImage, selectedMultiID: $selectedMultiID)
                             }
                         case .diskInfo:
                             DiskInfoView(diskImage: diskImage)
@@ -174,6 +177,12 @@ struct ContentView: View {
             Text(alertMessage)
         }
         .toast($toast)
+        .alert(duplicateSampleCount == 1 ? "Sample already exists" : "Samples already exist", isPresented: $duplicateSampleAlert) {
+            Button("Import Anyway") { pendingSampleImport?(); pendingSampleImport = nil }
+            Button(duplicateSampleHasOtherFiles ? "Skip" : "Cancel", role: .cancel) { pendingSampleImport = nil }
+        } message: {
+            Text(duplicateSampleMessage)
+        }
         .confirmationDialog(
             "You have unsaved changes",
             isPresented: $showingUnsavedChangesConfirm,
@@ -257,6 +266,7 @@ struct ContentView: View {
                 // Use the file's base name (uppercased, Akai-clamped) as the volume label.
                 let vol = url.deletingPathExtension().lastPathComponent
                 try diskImage.createBlankImage(at: url, volumeName: vol)
+                UserDefaults.standard.set(url.path, forKey: "lastOpenedImagePath")
                 selectedSampleID = nil
                 selectedProgramID = nil
                 selectedMultiID = nil
@@ -307,19 +317,106 @@ struct ContentView: View {
     /// Import a single audio file at `url` as a new sample in the loaded disk.
     /// `release` (if provided) is called once the file read completes — used to
     /// drop security-scoped access for dropped files.
+    private func applyLoFi(pcm: Data, fromRate: Int) -> (Data, UInt32) {
+        AkaiDiskImage.applyLoFi(pcm: pcm, fromRate: fromRate)
+    }
+
     private func importSample(from url: URL, release: (() -> Void)? = nil) {
-        defer { release?() }
+        let loFi = lowQualityImport
+        DispatchQueue.global(qos: .userInitiated).async {
+            defer { release?() }
+            // Read file once.
+            guard let wavData = try? Data(contentsOf: url),
+                  wavData.count > 44,
+                  wavData[0..<4] == Data("RIFF".utf8),
+                  wavData[8..<12] == Data("WAVE".utf8) else {
+                // Not a WAV — try importAndAddSample which handles AIFF etc.
+                do {
+                    let s = try self.diskImage.importAndAddSample(from: url)
+                    DispatchQueue.main.async { self.selectedSampleID = s.id; self.selectedTab = .samples }
+                } catch {
+                    DispatchQueue.main.async { self.alertMessage = error.localizedDescription; self.showingAlert = true }
+                }
+                return
+            }
+            // Parse WAV once.
+            var offset = 12; var sampleRate = 44100; var numChannels = 1; var bitsPerSample = 16; var pcm = Data()
+            while offset + 8 <= wavData.count {
+                let id = String(bytes: wavData[offset..<offset+4], encoding: .ascii) ?? ""
+                let size = Int(wavData.readLE32(at: offset + 4)); offset += 8
+                if id == "fmt " { numChannels = Int(wavData.readLE16(at: offset+2)); sampleRate = Int(wavData.readLE32(at: offset+4)); bitsPerSample = Int(wavData.readLE16(at: offset+14)) }
+                else if id == "data" { pcm = wavData.subdata(in: offset..<min(offset+size, wavData.count)) }
+                offset += size + (size % 2)
+            }
+            guard !pcm.isEmpty else { return }
+            // Normalise to 16-bit LE mono.
+            let pcm16: Data
+            if bitsPerSample == 24 {
+                // 24-bit: 3 bytes per sample, take top 2 (bytes 1 and 2) for 16-bit.
+                let bytesPerFrame = (bitsPerSample / 8) * numChannels
+                var out = Data(); out.reserveCapacity((pcm.count / bytesPerFrame) * 2 * numChannels)
+                var i = 0
+                while i + bytesPerFrame <= pcm.count {
+                    for ch in 0..<numChannels {
+                        let base = i + ch * 3
+                        // 24-bit LE: bytes are [lo, mid, hi]. Top 16 = mid+hi.
+                        out.append(pcm[base + 1])
+                        out.append(pcm[base + 2])
+                    }
+                    i += bytesPerFrame
+                }
+                pcm16 = out
+            } else {
+                pcm16 = pcm
+            }
+            let left = numChannels >= 2 ? AkaiDiskImage.deinterleaveStereo(pcm16, channels: numChannels).0 : pcm16
+            let right = numChannels >= 2 ? AkaiDiskImage.deinterleaveStereo(pcm16, channels: numChannels).1 : nil
+            // Duplicate check on left channel.
+            let dupes = self.diskImage.duplicateSampleNames(forPCM: left)
+            if !dupes.isEmpty {
+                DispatchQueue.main.async {
+                    self.duplicateSampleCount = dupes.count
+                    self.duplicateSampleHasOtherFiles = false
+                    self.duplicateSampleMessage = "\(url.lastPathComponent) already exists on the disk. Import anyway?"
+                    self.pendingSampleImport = {
+                        DispatchQueue.global(qos: .userInitiated).async {
+                            self.doImport(url: url, left: left, right: right, sampleRate: sampleRate, numChannels: numChannels, loFi: loFi)
+                        }
+                    }
+                    self.duplicateSampleAlert = true
+                }
+                return
+            }
+            self.doImport(url: url, left: left, right: right, sampleRate: sampleRate, numChannels: numChannels, loFi: loFi)
+        }
+    }
+
+    private func doImport(url: URL, left: Data, right: Data?, sampleRate: Int, numChannels: Int, loFi: Bool) {
         do {
-            let newSample = try diskImage.importAndAddSample(from: url)
-            DispatchQueue.main.async {
-                selectedSampleID = newSample.id
-                selectedTab = .samples
+            let raw = url.deletingPathExtension().lastPathComponent
+            let stem = AkaiDiskImage.sanitizeName(raw)
+            let isStereo = numChannels >= 2
+            let stemL = isStereo ? AkaiDiskImage.sanitizeNamePreservingEnd(raw, maxLen: 10) + "-L" : stem
+            let stemR = AkaiDiskImage.sanitizeNamePreservingEnd(raw, maxLen: 10) + "-R"
+            if loFi {
+                let (loPCM, loRate) = applyLoFi(pcm: left, fromRate: sampleRate)
+                let newL = try diskImage.addImportedSample(name: stemL, sampleRate: loRate, numChannels: 1, pcmData: loPCM)
+                DispatchQueue.main.async { self.selectedSampleID = newL.id; self.selectedTab = .samples }
+                if isStereo, let r = right {
+                    let (roPCM, roRate) = applyLoFi(pcm: r, fromRate: sampleRate)
+                    let newR = try diskImage.addImportedSample(name: stemR, sampleRate: roRate, numChannels: 1, pcmData: roPCM)
+                    DispatchQueue.main.async { self.selectedSampleID = newR.id }
+                }
+            } else {
+                let newL = try diskImage.addImportedSample(name: stemL, sampleRate: UInt32(sampleRate), numChannels: 1, pcmData: left)
+                DispatchQueue.main.async { self.selectedSampleID = newL.id; self.selectedTab = .samples }
+                if isStereo, let r = right {
+                    let newR = try diskImage.addImportedSample(name: stemR, sampleRate: UInt32(sampleRate), numChannels: 1, pcmData: r)
+                    DispatchQueue.main.async { self.selectedSampleID = newR.id }
+                }
             }
         } catch {
-            DispatchQueue.main.async {
-                alertMessage = error.localizedDescription
-                showingAlert = true
-            }
+            DispatchQueue.main.async { self.alertMessage = error.localizedDescription; self.showingAlert = true }
         }
     }
 
@@ -343,7 +440,14 @@ struct ContentView: View {
                 let accessing = url.startAccessingSecurityScopedResource()
                 let release = { if accessing { url.stopAccessingSecurityScopedResource() } }
 
-                if diskExts.contains(ext) {
+                var isDir: ObjCBool = false
+                FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir)
+
+                if isDir.boolValue {
+                    // Folder dropped — import all audio files inside it as samples.
+                    guard diskImage.isLoaded else { release(); return }
+                    importFolder(url: url, release: release)
+                } else if diskExts.contains(ext) {
                     handleDroppedDisk(url: url, release: release)
                 } else if audioExts.contains(ext) {
                     guard diskImage.isLoaded else {
@@ -361,6 +465,79 @@ struct ContentView: View {
             }
         }
         return true
+    }
+
+    private func importFolder(url: URL, release: @escaping () -> Void) {
+        let audioExts: Set<String> = ["wav", "wave", "aif", "aiff", "aifc"]
+        guard let contents = try? FileManager.default.contentsOfDirectory(
+            at: url, includingPropertiesForKeys: [.isRegularFileKey],
+            options: [.skipsHiddenFiles]
+        ) else { release(); return }
+        let audioURLs = contents
+            .filter { audioExts.contains($0.pathExtension.lowercased()) }
+            .sorted { $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedAscending }
+        release() // folder access done; each file gets its own security scope
+        guard !audioURLs.isEmpty else { return }
+        DispatchQueue.global(qos: .userInitiated).async {
+            var clean: [URL] = []
+            var dupeURLs: [URL] = []
+            var dupeFileNames: [String] = []
+
+            for fileURL in audioURLs {
+                let accessing = fileURL.startAccessingSecurityScopedResource()
+                defer { if accessing { fileURL.stopAccessingSecurityScopedResource() } }
+                guard let wavData = try? Data(contentsOf: fileURL),
+                      wavData.count > 44,
+                      wavData[0..<4] == Data("RIFF".utf8),
+                      wavData[8..<12] == Data("WAVE".utf8) else { clean.append(fileURL); continue }
+                var offset = 12; var numChannels = 1; var pcm = Data()
+                while offset + 8 <= wavData.count {
+                    let id = String(bytes: wavData[offset..<offset+4], encoding: .ascii) ?? ""
+                    let size = Int(wavData.readLE32(at: offset + 4)); offset += 8
+                    if id == "fmt " { numChannels = Int(wavData.readLE16(at: offset+2)) }
+                    else if id == "data" { pcm = wavData.subdata(in: offset..<min(offset+size, wavData.count)) }
+                    offset += size + (size % 2)
+                }
+                guard !pcm.isEmpty else { clean.append(fileURL); continue }
+                let checkPCM = numChannels >= 2 ? AkaiDiskImage.deinterleaveStereo(pcm, channels: numChannels).0 : pcm
+                let dupes = diskImage.duplicateSampleNames(forPCM: checkPCM)
+                if dupes.isEmpty {
+                    clean.append(fileURL)
+                } else {
+                    dupeURLs.append(fileURL)
+                    dupeFileNames.append(fileURL.lastPathComponent)
+                }
+            }
+
+            // Import non-duplicate files immediately.
+            for fileURL in clean {
+                let accessing = fileURL.startAccessingSecurityScopedResource()
+                if let s = try? diskImage.importAndAddSample(from: fileURL) {
+                    DispatchQueue.main.async { selectedSampleID = s.id; selectedTab = .samples }
+                }
+                if accessing { fileURL.stopAccessingSecurityScopedResource() }
+            }
+
+            guard !dupeURLs.isEmpty else { return }
+
+            DispatchQueue.main.async {
+                duplicateSampleCount = dupeURLs.count
+                duplicateSampleHasOtherFiles = !clean.isEmpty
+                duplicateSampleMessage = "\(dupeFileNames.joined(separator: ", ")) already exist\(dupeURLs.count == 1 ? "s" : "") on the disk. Import anyway?"
+                pendingSampleImport = {
+                    DispatchQueue.global(qos: .userInitiated).async {
+                        for fileURL in dupeURLs {
+                            let accessing = fileURL.startAccessingSecurityScopedResource()
+                            if let s = try? diskImage.importAndAddSample(from: fileURL) {
+                                DispatchQueue.main.async { selectedSampleID = s.id; selectedTab = .samples }
+                            }
+                            if accessing { fileURL.stopAccessingSecurityScopedResource() }
+                        }
+                    }
+                }
+                duplicateSampleAlert = true
+            }
+        }
     }
 
     private func handleDroppedDisk(url: URL, release: @escaping () -> Void) {

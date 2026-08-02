@@ -41,6 +41,7 @@ struct SidebarView: View {
     @State private var isEditingVolumeName = false
     @State private var editedVolumeName = ""
     @FocusState private var volumeNameFieldFocused: Bool
+    @AppStorage("lowQualityImport") private var lowQualityImport = false
 
     private var sampleToDeleteName: String {
         guard let s = sampleToDelete else { return "" }
@@ -247,7 +248,6 @@ struct SidebarView: View {
         guard panel.runModal() == .OK, let url = panel.url else { return }
 
         let rawName = url.deletingPathExtension().lastPathComponent
-            .replacingOccurrences(of: " ", with: "")
         let programName = AkaiDiskImage.sanitizeName(String(rawName.prefix(12)))
 
         let prog: AkaiProgramFile
@@ -258,6 +258,7 @@ struct SidebarView: View {
             return
         }
 
+        let loFi = lowQualityImport
         DispatchQueue.global(qos: .userInitiated).async {
             let accessing = url.startAccessingSecurityScopedResource()
             defer { if accessing { url.stopAccessingSecurityScopedResource() } }
@@ -265,19 +266,25 @@ struct SidebarView: View {
                 let wavData = try Data(contentsOf: url)
                 let (pcmData, sampleRate, numChannels) = try Self.parseWAVMinimal(wavData)
                 let baseName = AkaiDiskImage.sanitizeName(
-                    url.deletingPathExtension().lastPathComponent
-                        .replacingOccurrences(of: " ", with: ""))
-                let monoData: Data; let monoName: String
+                    url.deletingPathExtension().lastPathComponent)
+                var monoData: Data; var monoName: String
                 if numChannels >= 2 {
-                    let (left, _) = AkaiDiskImage.deinterleaveStereo(pcmData, channels: numChannels)
-                    monoData = left
-                    monoName = String(baseName.prefix(10)) + "-L"
+                let (left, _) = AkaiDiskImage.deinterleaveStereo(pcmData, channels: numChannels)
+                monoData = left
+                monoName = AkaiDiskImage.sanitizeNamePreservingEnd(baseName, maxLen: 10) + "-L"
                 } else {
-                    monoData = pcmData
-                    monoName = String(baseName.prefix(12))
+                monoData = pcmData
+                monoName = String(baseName.prefix(12))
+                }
+                let finalRate: UInt32
+                if loFi {
+                    let (loPCM, loRate) = Self.applyLoFi(pcm: monoData, fromRate: sampleRate)
+                    monoData = loPCM; finalRate = loRate
+                } else {
+                    finalRate = UInt32(sampleRate)
                 }
                 let sample = try diskImage.addImportedSample(
-                    name: monoName, sampleRate: UInt32(sampleRate),
+                    name: monoName, sampleRate: finalRate,
                     numChannels: 1, pcmData: monoData)
                 let kz = AkaiProgramKeyzone(
                     sampleName: sample.header.name,
@@ -322,7 +329,7 @@ struct SidebarView: View {
 
         // Derive program name from folder name: strip spaces, sanitize to Akai
         // charset, truncate to 12 chars.
-        let rawName = folderURL.lastPathComponent.replacingOccurrences(of: " ", with: "")
+        let rawName = folderURL.lastPathComponent
         let programName = AkaiDiskImage.sanitizeName(String(rawName.prefix(12)))
 
         // Collect audio files sorted alphabetically.
@@ -350,10 +357,11 @@ struct SidebarView: View {
             return
         }
 
+        let loFi = lowQualityImport
         // Import samples and build keyzones on a background thread.
         DispatchQueue.global(qos: .userInitiated).async {
             var keyzones: [AkaiProgramKeyzone] = []
-            var nextNote: Int = 24   // C0
+            var nextNote: Int = 36   // C1
             var hitDiskLimit = false
             var limitMessage = ""
 
@@ -365,21 +373,32 @@ struct SidebarView: View {
                     let wavData = try Data(contentsOf: url)
                     let (pcmData, sampleRate, numChannels) = try Self.parseWAVMinimal(wavData)
                     let baseName = AkaiDiskImage.sanitizeName(
-                        url.deletingPathExtension().lastPathComponent
-                            .replacingOccurrences(of: " ", with: ""))
-                    let monoData: Data; let monoName: String
+                        url.deletingPathExtension().lastPathComponent)
+                    var monoData: Data; var monoName: String
                     if numChannels >= 2 {
                         let (left, _) = AkaiDiskImage.deinterleaveStereo(pcmData, channels: numChannels)
                         monoData = left
-                        monoName = String(baseName.prefix(10)) + "-L"
+                        monoName = AkaiDiskImage.sanitizeNamePreservingEnd(baseName, maxLen: 10) + "-L"
                     } else {
                         monoData = pcmData
                         monoName = String(baseName.prefix(12))
                     }
+                    let finalRate: UInt32
+                    if loFi {
+                        let (loPCM, loRate) = Self.applyLoFi(pcm: monoData, fromRate: sampleRate)
+                        monoData = loPCM; finalRate = loRate
+                    } else {
+                        finalRate = UInt32(sampleRate)
+                    }
                     let sample = try diskImage.addImportedSample(
-                        name: monoName, sampleRate: UInt32(sampleRate),
+                        name: monoName, sampleRate: finalRate,
                         numChannels: 1, pcmData: monoData)
                     let note = UInt8(min(nextNote, 127))
+                    // Patch the sample's root note to match the trigger key so
+                    // the S3000 plays it at unity pitch with no transposition.
+                    var patchedSample = sample
+                    patchedSample.header.midiRootNote = note
+                    diskImage.applySampleEdits(patchedSample)
                     keyzones.append(AkaiProgramKeyzone(
                         sampleName: sample.header.name,
                         lowKey: note, highKey: note, rootNote: note,
@@ -423,6 +442,10 @@ struct SidebarView: View {
     /// Minimal WAV/AIFF parser — extracts PCM data, sample rate, channel count.
     /// Mirrors the per-struct parsers in the drop zones but lives here so
     /// SidebarView can use it without depending on a struct that may not exist.
+    private static func applyLoFi(pcm: Data, fromRate: Int) -> (Data, UInt32) {
+        AkaiDiskImage.applyLoFi(pcm: pcm, fromRate: fromRate)
+    }
+
     private static func parseWAVMinimal(_ data: Data) throws -> (Data, Int, Int) {
         guard data.count > 44,
               data[0..<4] == Data("RIFF".utf8),
@@ -430,7 +453,7 @@ struct SidebarView: View {
             throw NSError(domain: "WAV", code: 0,
                           userInfo: [NSLocalizedDescriptionKey: "Not a valid WAV file"])
         }
-        var offset = 12, sampleRate = 44100, numChannels = 1
+        var offset = 12, sampleRate = 44100, numChannels = 1, bitsPerSample = 16
         var pcmData = Data()
         while offset + 8 <= data.count {
             let id = String(bytes: data[offset..<offset+4], encoding: .ascii) ?? ""
@@ -438,6 +461,7 @@ struct SidebarView: View {
             if id == "fmt " {
                 numChannels = Int(data.readLE16(at: offset + 2))
                 sampleRate  = Int(data.readLE32(at: offset + 4))
+                bitsPerSample = Int(data.readLE16(at: offset + 14))
             } else if id == "data" {
                 pcmData = data.subdata(in: offset..<min(offset + size, data.count))
             }
@@ -446,6 +470,16 @@ struct SidebarView: View {
         guard !pcmData.isEmpty else {
             throw NSError(domain: "WAV", code: 1,
                           userInfo: [NSLocalizedDescriptionKey: "No audio data"])
+        }
+        if bitsPerSample == 24 {
+            let bytesPerFrame = 3 * numChannels
+            var out = Data(); out.reserveCapacity((pcmData.count / bytesPerFrame) * 2 * numChannels)
+            var i = 0
+            while i + bytesPerFrame <= pcmData.count {
+                for ch in 0..<numChannels { out.append(pcmData[i + ch*3 + 1]); out.append(pcmData[i + ch*3 + 2]) }
+                i += bytesPerFrame
+            }
+            return (out, sampleRate, numChannels)
         }
         return (pcmData, sampleRate, numChannels)
     }
@@ -653,7 +687,6 @@ struct SidebarView: View {
             EmptyView()
         } header: {
             HStack(spacing: 6) {
-                Image(systemName: "internaldrive.fill").foregroundStyle(akaiRed).font(.title2)
                 if isEditingVolumeName {
                     TextField("Volume name", text: $editedVolumeName)
                         .textFieldStyle(.plain)
@@ -673,7 +706,7 @@ struct SidebarView: View {
                     }.buttonStyle(.plain).help("Cancel")
                 } else {
                     Text(diskImage.diskName.isEmpty ? "Akai Disk" : diskImage.diskName)
-                        .font(.title3.weight(.semibold)).lineLimit(1)
+                        .font(.title2.weight(.semibold)).lineLimit(1).foregroundStyle(.secondary)
                     Spacer()
                     Button { beginVolumeRename() } label: {
                         Image(systemName: "pencil").font(.system(size: 14)).foregroundStyle(.secondary)
@@ -708,16 +741,31 @@ struct SidebarView: View {
             }
         } header: {
             HStack {
-                Label("Samples (\(diskImage.samples.count))", systemImage: "waveform")
-                    .font(.subheadline.weight(.semibold)).foregroundStyle(.secondary)
+                let isActive = selectedTab == .samples && selectedSampleID == nil
+                HStack(spacing: 6) {
+                    Image(systemName: "waveform")
+                        .foregroundStyle(Color(red: 0.91, green: 0, blue: 0.11))
+                    Text("Samples (\(diskImage.samples.count))")
+                        .font(.body)
+                        .foregroundStyle(isActive ? Color.primary : Color.secondary)
+                }
                 Spacer()
-                Image(systemName: samplesExpanded ? "chevron.down" : "chevron.right")
-                    .font(.system(size: 10, weight: .semibold)).foregroundStyle(.secondary)
+                Button {
+                    withAnimation(.easeInOut(duration: 0.2)) { samplesExpanded.toggle() }
+                } label: {
+                    Image(systemName: samplesExpanded ? "chevron.down" : "chevron.right")
+                        .font(.system(size: 10, weight: .semibold)).foregroundStyle(.secondary)
+                }
+                .buttonStyle(.plain)
             }
             .contentShape(Rectangle())
             .onTapGesture {
-                withAnimation(.easeInOut(duration: 0.2)) { samplesExpanded.toggle() }
-                if samplesExpanded { selectedTab = .samples; selectedSampleID = nil; selectedSampleIDs.removeAll() }
+                if !samplesExpanded {
+                    withAnimation(.easeInOut(duration: 0.2)) { samplesExpanded = true }
+                }
+                selectedTab = .samples
+                selectedSampleID = nil
+                selectedSampleIDs.removeAll()
             }
             .padding(.trailing, 12)
         }
@@ -749,16 +797,31 @@ struct SidebarView: View {
             }
         } header: {
             HStack {
-                Label("Programs (\(diskImage.programs.count))", systemImage: "pianokeys")
-                    .font(.subheadline.weight(.semibold)).foregroundStyle(.secondary)
+                let isActive = selectedTab == .programs && selectedProgramID == nil
+                HStack(spacing: 6) {
+                    Image(systemName: "pianokeys")
+                        .foregroundStyle(Color.purple)
+                    Text("Programs (\(diskImage.programs.count))")
+                        .font(.body)
+                        .foregroundStyle(isActive ? Color.primary : Color.secondary)
+                }
                 Spacer()
-                Image(systemName: programsExpanded ? "chevron.down" : "chevron.right")
-                    .font(.system(size: 10, weight: .semibold)).foregroundStyle(.secondary)
+                Button {
+                    withAnimation(.easeInOut(duration: 0.2)) { programsExpanded.toggle() }
+                } label: {
+                    Image(systemName: programsExpanded ? "chevron.down" : "chevron.right")
+                        .font(.system(size: 10, weight: .semibold)).foregroundStyle(.secondary)
+                }
+                .buttonStyle(.plain)
             }
             .contentShape(Rectangle())
             .onTapGesture {
-                withAnimation(.easeInOut(duration: 0.2)) { programsExpanded.toggle() }
-                if programsExpanded { selectedTab = .programs; selectedProgramID = nil; selectedProgramIDs.removeAll() }
+                if !programsExpanded {
+                    withAnimation(.easeInOut(duration: 0.2)) { programsExpanded = true }
+                }
+                selectedTab = .programs
+                selectedProgramID = nil
+                selectedProgramIDs.removeAll()
             }
             .padding(.trailing, 12)
             .contextMenu {
@@ -816,16 +879,30 @@ struct SidebarView: View {
         } header: {
             let count = diskImage.multis.count
             HStack {
-                Label(count == 0 ? "Multis" : "Multis (\(count))", systemImage: "square.stack.3d.up")
-                    .font(.subheadline.weight(.semibold)).foregroundStyle(.secondary)
+                let isActive = selectedTab == .multis && selectedMultiID == nil
+                HStack(spacing: 6) {
+                    Image(systemName: "square.stack.3d.up")
+                        .foregroundStyle(Color.teal)
+                    Text("Multis (\(count))")
+                        .font(.body)
+                        .foregroundStyle(isActive ? Color.primary : Color.secondary)
+                }
                 Spacer()
-                Image(systemName: multisExpanded ? "chevron.down" : "chevron.right")
-                    .font(.system(size: 10, weight: .semibold)).foregroundStyle(.secondary)
+                Button {
+                    withAnimation(.easeInOut(duration: 0.2)) { multisExpanded.toggle() }
+                } label: {
+                    Image(systemName: multisExpanded ? "chevron.down" : "chevron.right")
+                        .font(.system(size: 10, weight: .semibold)).foregroundStyle(.secondary)
+                }
+                .buttonStyle(.plain)
             }
             .contentShape(Rectangle())
             .onTapGesture {
-                withAnimation(.easeInOut(duration: 0.2)) { multisExpanded.toggle() }
-                if multisExpanded { selectedTab = .multis; selectedMultiID = nil }
+                if !multisExpanded {
+                    withAnimation(.easeInOut(duration: 0.2)) { multisExpanded = true }
+                }
+                selectedTab = .multis
+                selectedMultiID = nil
             }
             .padding(.trailing, 12)
             .contextMenu {
@@ -843,18 +920,27 @@ struct SidebarView: View {
 
     @ViewBuilder private var diskInfoSection: some View {
         Section {
-            Label("Disk Info", systemImage: "info.circle")
-                .contentShape(Rectangle())
-                .onTapGesture {
-                    selectedTab = .diskInfo
-                    selectedSampleID = nil
-                    selectedSampleIDs.removeAll()
-                    selectionAnchorID = nil
-                    selectedProgramID = nil
-                    selectedProgramIDs.removeAll()
-                    programSelectionAnchorID = nil
-                    selectedMultiID = nil
-                }
+            EmptyView()
+        } header: {
+            HStack(spacing: 6) {
+                Image(systemName: "externaldrive.badge.questionmark")
+                    .foregroundStyle(Color.white)
+                Text("Disk Info")
+                    .font(.body)
+                    .foregroundStyle(selectedTab == .diskInfo ? Color.primary : Color.secondary)
+            }
+            .contentShape(Rectangle())
+            .onTapGesture {
+                selectedTab = .diskInfo
+                selectedSampleID = nil
+                selectedSampleIDs.removeAll()
+                selectionAnchorID = nil
+                selectedProgramID = nil
+                selectedProgramIDs.removeAll()
+                programSelectionAnchorID = nil
+                selectedMultiID = nil
+            }
+            .padding(.trailing, 12)
         }
     }
 }
@@ -1137,7 +1223,7 @@ struct GreaseweazleSection: View {
         } header: {
             HStack {
                 Image(systemName: "opticaldiscdrive.fill").foregroundStyle(greaseweazlePurple).font(.title2)
-                Text("Greaseweazle").font(.title3.weight(.semibold))
+                Text("Greaseweazle").font(.title3.weight(.semibold)).foregroundStyle(.secondary)
                 if runner.isBusy {
                     Spacer()
                     ProgressView().controlSize(.small)

@@ -14,6 +14,10 @@ struct ProgramDetailView: View {
     @State private var keyzoneKeyMonitor: Any? = nil
     @FocusState private var keyzoneListFocused: Bool
     @FocusState private var nameFieldFocused: Bool
+    @State private var showDropError = false
+    @State private var dropErrorMessage = ""
+    private let audioExts: Set<String> = ["wav", "wave", "aif", "aiff", "aifc"]
+    @AppStorage("lowQualityImport") private var lowQualityImport = false
     init(programFile: AkaiProgramFile, diskImage: AkaiDiskImage) {
         self.programFile = programFile
         self.diskImage = diskImage
@@ -394,6 +398,14 @@ struct ProgramDetailView: View {
             Text("This removes the keyzone\(selectedKeyzoneIndices.count > 1 ? "s" : "") from the program. The disk image file is not modified until you save.")
         }
         .toast($toast)
+        .onDrop(of: [.fileURL], isTargeted: nil) { providers in
+            handleProgramDrop(providers: providers)
+        }
+        .alert("Import error", isPresented: $showDropError) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text(dropErrorMessage)
+        }
     }
 
     private func beginRename() {
@@ -527,6 +539,217 @@ struct ProgramDetailView: View {
         else { editedProgram.keyzones[idx].sampleName = name }
         commitProgramEdits()
     }
+    // MARK: - Drop handling
+
+    private func handleProgramDrop(providers: [NSItemProvider]) -> Bool {
+        guard let provider = providers.first else { return false }
+        provider.loadItem(forTypeIdentifier: "public.file-url") { item, _ in
+            guard let data = item as? Data,
+                  let url = URL(dataRepresentation: data, relativeTo: nil) else { return }
+            var isDir: ObjCBool = false
+            FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir)
+            DispatchQueue.main.async {
+                if isDir.boolValue {
+                    dropFolder(url)
+                } else if audioExts.contains(url.pathExtension.lowercased()) {
+                    dropFile(url)
+                } else {
+                    dropErrorMessage = "\(url.lastPathComponent) is not a supported audio file."
+                    showDropError = true
+                }
+            }
+        }
+        return true
+    }
+
+    /// Determine the next key to use based on existing keyzones.
+    /// If the last keyzone is a single key, return lastKey + 1.
+    /// If the last keyzone is a full map (24–127), return 24 (another full map).
+    private func nextDropKey() -> (low: UInt8, high: UInt8, root: UInt8, isSingle: Bool) {
+        if let last = editedProgram.keyzones.last {
+            if last.lowKey == last.highKey {
+                // Single-key pattern — next key
+                let next = UInt8(min(Int(last.highKey) + 1, 127))
+                return (next, next, next, true)
+            } else {
+                // Full-map pattern — repeat full map
+                return (24, 127, 60, false)
+            }
+        }
+        // No keyzones yet — default to full map
+        return (24, 127, 60, false)
+    }
+
+    private func dropFile(_ url: URL) {
+        let accessing = url.startAccessingSecurityScopedResource()
+        guard let wavData = try? Data(contentsOf: url) else {
+            if accessing { url.stopAccessingSecurityScopedResource() }
+            return
+        }
+        if accessing { url.stopAccessingSecurityScopedResource() }
+        guard wavData.count > 44,
+              wavData[0..<4] == Data("RIFF".utf8),
+              wavData[8..<12] == Data("WAVE".utf8) else {
+            dropErrorMessage = "\(url.lastPathComponent) is not a valid WAV file."
+            showDropError = true
+            return
+        }
+        var offset = 12; var sampleRate = 44100; var numChannels = 1; var bitsPerSample = 16; var pcmData = Data()
+        while offset + 8 <= wavData.count {
+            let id = String(bytes: wavData[offset..<offset+4], encoding: .ascii) ?? ""
+            let size = Int(wavData.readLE32(at: offset + 4)); offset += 8
+            if id == "fmt " { numChannels = Int(wavData.readLE16(at: offset+2)); sampleRate = Int(wavData.readLE32(at: offset+4)); bitsPerSample = Int(wavData.readLE16(at: offset+14)) }
+            else if id == "data" { pcmData = wavData.subdata(in: offset..<min(offset+size, wavData.count)) }
+            offset += size + (size % 2)
+        }
+        guard !pcmData.isEmpty else { return }
+        if bitsPerSample == 24 {
+            let bytesPerFrame = 3 * numChannels
+            var out = Data(); out.reserveCapacity((pcmData.count / bytesPerFrame) * 2 * numChannels)
+            var i = 0
+            while i + bytesPerFrame <= pcmData.count {
+                for ch in 0..<numChannels { out.append(pcmData[i + ch*3 + 1]); out.append(pcmData[i + ch*3 + 2]) }
+                i += bytesPerFrame
+            }
+            pcmData = out
+        }
+        let rawName = url.deletingPathExtension().lastPathComponent
+        let keys = nextDropKey()
+        let loFi = lowQualityImport
+        DispatchQueue.global(qos: .userInitiated).async {
+        do {
+        var monoData: Data; let monoName: String
+        let rightData: Data?
+        if numChannels >= 2 {
+        let (left, right) = AkaiDiskImage.deinterleaveStereo(pcmData, channels: numChannels)
+        monoData = left
+        monoName = AkaiDiskImage.sanitizeNamePreservingEnd(rawName, maxLen: 10) + "-L"
+            rightData = right
+        } else {
+        monoData = pcmData
+            monoName = AkaiDiskImage.sanitizeName(String(rawName.prefix(12)))
+                            rightData = nil
+                        }
+                let finalRate: UInt32
+                if loFi {
+                    let (loPCM, loRate) = AkaiDiskImage.applyLoFi(pcm: monoData, fromRate: sampleRate)
+                    monoData = loPCM; finalRate = loRate
+                } else {
+                    finalRate = UInt32(sampleRate)
+                }
+                let sample = try diskImage.addImportedSample(
+                    name: monoName, sampleRate: finalRate, numChannels: 1, pcmData: monoData)
+                // Import right channel if stereo.
+                if numChannels >= 2, var r = rightData {
+                    let stemR = AkaiDiskImage.sanitizeNamePreservingEnd(rawName, maxLen: 10) + "-R"
+                    if loFi { r = AkaiDiskImage.applyLoFi(pcm: r, fromRate: sampleRate).0 }
+                    _ = try? diskImage.addImportedSample(name: stemR, sampleRate: finalRate, numChannels: 1, pcmData: r)
+                }
+                let kz = AkaiProgramKeyzone(
+                    sampleName: sample.header.name,
+                    lowKey: keys.low, highKey: keys.high, rootNote: keys.root,
+                    tuneOffset: 0, fineTune: 0, volume: 99, pan: 0,
+                    filterOffset: 0, filterCutoff: 99, filterKeyFollow: 0,
+                    filterResonance: 0, filterModDepth1: 0, filterModDepth2: 0, filterModDepth3: 0,
+                    rightSampleName: "", rightPan: 50,
+                    playbackMode: keys.isSingle ? .noLoop : .sample,
+                    velocityLow: 0, velocityHigh: 127)
+                DispatchQueue.main.async {
+                    editedProgram.keyzones.append(kz)
+                    let newIdx = editedProgram.keyzones.count - 1
+                    selectedKeyzoneIndices = [newIdx]
+                    anchorKeyzoneIndex = newIdx
+                    commitProgramEdits()
+                }
+            } catch {
+                DispatchQueue.main.async {
+                    dropErrorMessage = error.localizedDescription
+                    showDropError = true
+                }
+            }
+        }
+    }
+
+    private func dropFolder(_ folderURL: URL) {
+        guard let contents = try? FileManager.default.contentsOfDirectory(
+            at: folderURL, includingPropertiesForKeys: [.isRegularFileKey],
+            options: [.skipsHiddenFiles]
+        ) else { return }
+        let audioURLs = contents
+            .filter { audioExts.contains($0.pathExtension.lowercased()) }
+            .sorted { $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedAscending }
+        guard !audioURLs.isEmpty else {
+            dropErrorMessage = "No audio files found in \"\(folderURL.lastPathComponent)\"."
+            showDropError = true
+            return
+        }
+        // For folder drops always use single-key-per-sample mapping,
+        // continuing from the last used key.
+        var nextNote: Int
+        if let last = editedProgram.keyzones.last {
+            nextNote = last.lowKey == last.highKey ? Int(last.highKey) + 1 : 36
+        } else {
+            nextNote = 36
+        }
+        let loFi = lowQualityImport
+        DispatchQueue.global(qos: .userInitiated).async {
+            var newKeyzones: [AkaiProgramKeyzone] = []
+            for url in audioURLs {
+                let accessing = url.startAccessingSecurityScopedResource()
+                defer { if accessing { url.stopAccessingSecurityScopedResource() } }
+                guard let wavData = try? Data(contentsOf: url),
+                      wavData.count > 44,
+                      wavData[0..<4] == Data("RIFF".utf8),
+                      wavData[8..<12] == Data("WAVE".utf8) else { continue }
+                var offset = 12; var sampleRate = 44100; var numChannels = 1; var pcmData = Data()
+                while offset + 8 <= wavData.count {
+                    let id = String(bytes: wavData[offset..<offset+4], encoding: .ascii) ?? ""
+                    let size = Int(wavData.readLE32(at: offset + 4)); offset += 8
+                    if id == "fmt " { numChannels = Int(wavData.readLE16(at: offset+2)); sampleRate = Int(wavData.readLE32(at: offset+4)) }
+                    else if id == "data" { pcmData = wavData.subdata(in: offset..<min(offset+size, wavData.count)) }
+                    offset += size + (size % 2)
+                }
+                guard !pcmData.isEmpty else { continue }
+                let baseName = url.deletingPathExtension().lastPathComponent
+                do {
+                    var monoData: Data; let monoName: String
+                    if numChannels >= 2 {
+                        let (left, _) = AkaiDiskImage.deinterleaveStereo(pcmData, channels: numChannels)
+                        monoData = left; monoName = AkaiDiskImage.sanitizeNamePreservingEnd(baseName, maxLen: 10) + "-L"
+                    } else {
+                        monoData = pcmData; monoName = AkaiDiskImage.sanitizeName(String(baseName.prefix(12)))
+                    }
+                    let finalRate: UInt32
+                    if loFi {
+                        let (loPCM, loRate) = AkaiDiskImage.applyLoFi(pcm: monoData, fromRate: sampleRate)
+                        monoData = loPCM; finalRate = loRate
+                    } else { finalRate = UInt32(sampleRate) }
+                    let sample = try diskImage.addImportedSample(
+                        name: monoName, sampleRate: finalRate, numChannels: 1, pcmData: monoData)
+                    let note = UInt8(min(nextNote, 127))
+                    newKeyzones.append(AkaiProgramKeyzone(
+                        sampleName: sample.header.name,
+                        lowKey: note, highKey: note, rootNote: note,
+                        tuneOffset: 0, fineTune: 0, volume: 99, pan: 0,
+                        filterOffset: 0, filterCutoff: 99, filterKeyFollow: 0,
+                        filterResonance: 0, filterModDepth1: 0, filterModDepth2: 0, filterModDepth3: 0,
+                        rightSampleName: "", rightPan: 50,
+                        playbackMode: .noLoop, velocityLow: 0, velocityHigh: 127,
+                        env1Attack: 0, env1Decay: 0, env1Sustain: 99, env1Release: 0))
+                    nextNote += 1
+                } catch { break } // disk full
+            }
+            DispatchQueue.main.async {
+                guard !newKeyzones.isEmpty else { return }
+                editedProgram.keyzones.append(contentsOf: newKeyzones)
+                let newIdx = editedProgram.keyzones.count - 1
+                selectedKeyzoneIndices = [newIdx]
+                anchorKeyzoneIndex = newIdx
+                commitProgramEdits()
+            }
+        }
+    }
+
     private func toggleRightSample(_ name: String) {
         guard let idx = anchorKeyzoneIndex, editedProgram.keyzones.indices.contains(idx) else { return }
         if editedProgram.keyzones[idx].rightSampleName == name {
@@ -586,6 +809,7 @@ struct PresetDropZone: View {
     @State private var isDragging = false
     @State private var isImporting = false
     @State private var errorMessage: String? = nil
+    @AppStorage("lowQualityImport") private var lowQualityImport = false
     private let audioExts: Set<String> = ["wav", "wave", "aif", "aiff", "aifc"]
 
     var body: some View {
@@ -673,6 +897,7 @@ struct PresetDropZone: View {
     private func importURLs(_ urls: [URL]) {
         guard !urls.isEmpty else { return }
         isImporting = true; errorMessage = nil
+        let loFi = lowQualityImport
         var newKeyzones: [AkaiProgramKeyzone] = []; var errors: [String] = []
         DispatchQueue.global(qos: .userInitiated).async {
             for url in urls {
@@ -682,12 +907,17 @@ struct PresetDropZone: View {
                     let wavData = try Data(contentsOf: url)
                     let (pcmData, sampleRate, numChannels, _) = try parseWAV(wavData)
                     let baseName = AkaiDiskImage.sanitizeName(url.deletingPathExtension().lastPathComponent)
-                    let monoData: Data; let monoName: String
+                    var monoData: Data; let monoName: String
                     if numChannels >= 2 {
                         let (left, _) = AkaiDiskImage.deinterleaveStereo(pcmData, channels: numChannels)
-                        monoData = left; monoName = String(baseName.prefix(10)) + "-L"
+                        monoData = left; monoName = AkaiDiskImage.sanitizeNamePreservingEnd(baseName, maxLen: 10) + "-L"
                     } else { monoData = pcmData; monoName = baseName }
-                    let sample = try diskImage.addImportedSample(name: monoName, sampleRate: UInt32(sampleRate), numChannels: 1, pcmData: monoData)
+                    let finalRate: UInt32
+                    if loFi {
+                        let (loPCM, loRate) = AkaiDiskImage.applyLoFi(pcm: monoData, fromRate: sampleRate)
+                        monoData = loPCM; finalRate = loRate
+                    } else { finalRate = UInt32(sampleRate) }
+                    let sample = try diskImage.addImportedSample(name: monoName, sampleRate: finalRate, numChannels: 1, pcmData: monoData)
                     let note = UInt8(min(24 + existingKeyzones.count + newKeyzones.count, 127))
                     newKeyzones.append(AkaiProgramKeyzone(
                         sampleName: sample.header.name, lowKey: 24, highKey: 127, rootNote: note,
@@ -717,6 +947,16 @@ struct PresetDropZone: View {
             offset += size + (size % 2)
         }
         guard !pcmData.isEmpty else { throw NSError(domain: "WAV", code: 1, userInfo: [NSLocalizedDescriptionKey: "No audio data in WAV"]) }
+        if bitsPerSample == 24 {
+            let bytesPerFrame = 3 * numChannels
+            var out = Data(); out.reserveCapacity((pcmData.count / bytesPerFrame) * 2 * numChannels)
+            var i = 0
+            while i + bytesPerFrame <= pcmData.count {
+                for ch in 0..<numChannels { out.append(pcmData[i + ch*3 + 1]); out.append(pcmData[i + ch*3 + 2]) }
+                i += bytesPerFrame
+            }
+            return (out, sampleRate, numChannels, 16)
+        }
         return (pcmData, sampleRate, numChannels, bitsPerSample)
     }
 }
@@ -730,6 +970,7 @@ struct DrumPresetDropZone: View {
     @State private var isDragging = false
     @State private var isImporting = false
     @State private var errorMessage: String? = nil
+    @AppStorage("lowQualityImport") private var lowQualityImport = false
     private let akaiRed = Color(red: 0.91, green: 0, blue: 0.11)
     private let audioExts: Set<String> = ["wav", "wave", "aif", "aiff", "aifc"]
 
@@ -773,25 +1014,30 @@ struct DrumPresetDropZone: View {
             }
             .animation(.easeInOut(duration: 0.15), value: isDragging)
             .onDrop(of: [.fileURL, .plainText], isTargeted: $isDragging) { providers in
-                if let provider = providers.first, provider.canLoadObject(ofClass: NSString.self) {
+                guard let provider = providers.first else { return false }
+                // Sidebar sample drag — carries plain text (the sample name).
+                if provider.hasItemConformingToTypeIdentifier("public.plain-text") &&
+                   !provider.hasItemConformingToTypeIdentifier("public.file-url") {
                     _ = provider.loadObject(ofClass: NSString.self) { string, _ in
                         guard let name = string as? String else { return }
                         guard self.diskImage.samples.contains(where: {
                             ($0.header.name.isEmpty ? $0.directoryEntry.name : $0.header.name) == name
                         }) else { return }
                         DispatchQueue.main.async {
-                            let note = UInt8(min(24 + self.existingKeyzones.count, 127))
+                            let note = UInt8(min(36 + self.existingKeyzones.count, 127))
                             let kz = AkaiProgramKeyzone(
                                 sampleName: name, lowKey: note, highKey: note, rootNote: note,
                                 tuneOffset: 0, fineTune: 0, volume: 99, pan: 0,
                                 filterOffset: 0, filterCutoff: 99, filterKeyFollow: 0,
                                 filterResonance: 0, filterModDepth1: 0, filterModDepth2: 0, filterModDepth3: 0,
-                                rightSampleName: "", rightPan: 50, playbackMode: .noLoop, velocityLow: 0, velocityHigh: 127)
+                                rightSampleName: "", rightPan: 50, playbackMode: .noLoop, velocityLow: 0, velocityHigh: 127,
+                                env1Attack: 0, env1Decay: 0, env1Sustain: 99, env1Release: 0)
                             self.onSamplesImported([kz])
                         }
                     }
                     return true
                 }
+                // File URL drag.
                 handleDrop(providers: providers)
                 return true
             }
@@ -822,8 +1068,9 @@ struct DrumPresetDropZone: View {
     private func importURLs(_ urls: [URL]) {
         guard !urls.isEmpty else { return }
         isImporting = true; errorMessage = nil
+        let loFi = lowQualityImport
         var newKeyzones: [AkaiProgramKeyzone] = []
-        var nextNote: Int = existingKeyzones.last.map { Int($0.rootNote) + 1 } ?? 24
+        var nextNote: Int = existingKeyzones.last.map { Int($0.rootNote) + 1 } ?? 36
         var errors: [String] = []
         DispatchQueue.global(qos: .userInitiated).async {
             for url in urls {
@@ -833,19 +1080,25 @@ struct DrumPresetDropZone: View {
                     let wavData = try Data(contentsOf: url)
                     let (pcmData, sampleRate, numChannels, _) = try parseWAV(wavData)
                     let baseName = AkaiDiskImage.sanitizeName(url.deletingPathExtension().lastPathComponent)
-                    let monoData: Data; let monoName: String
+                    var monoData: Data; let monoName: String
                     if numChannels >= 2 {
                         let (left, _) = AkaiDiskImage.deinterleaveStereo(pcmData, channels: numChannels)
-                        monoData = left; monoName = String(baseName.prefix(10)) + "-L"
+                        monoData = left; monoName = AkaiDiskImage.sanitizeNamePreservingEnd(baseName, maxLen: 10) + "-L"
                     } else { monoData = pcmData; monoName = baseName }
-                    let sample = try diskImage.addImportedSample(name: monoName, sampleRate: UInt32(sampleRate), numChannels: 1, pcmData: monoData)
+                    let finalRate: UInt32
+                    if loFi {
+                        let (loPCM, loRate) = AkaiDiskImage.applyLoFi(pcm: monoData, fromRate: sampleRate)
+                        monoData = loPCM; finalRate = loRate
+                    } else { finalRate = UInt32(sampleRate) }
+                    let sample = try diskImage.addImportedSample(name: monoName, sampleRate: finalRate, numChannels: 1, pcmData: monoData)
                     let note = UInt8(min(nextNote, 127))
                     newKeyzones.append(AkaiProgramKeyzone(
                         sampleName: sample.header.name, lowKey: note, highKey: note, rootNote: note,
                         tuneOffset: 0, fineTune: 0, volume: 99, pan: 0,
                         filterOffset: 0, filterCutoff: 99, filterKeyFollow: 0,
                         filterResonance: 0, filterModDepth1: 0, filterModDepth2: 0, filterModDepth3: 0,
-                        rightSampleName: "", rightPan: 50, playbackMode: .noLoop, velocityLow: 0, velocityHigh: 127))
+                        rightSampleName: "", rightPan: 50, playbackMode: .noLoop, velocityLow: 0, velocityHigh: 127,
+                        env1Attack: 0, env1Decay: 0, env1Sustain: 99, env1Release: 0))
                     nextNote += 1
                 } catch { errors.append(url.lastPathComponent + ": " + error.localizedDescription) }
             }
@@ -869,6 +1122,16 @@ struct DrumPresetDropZone: View {
             offset += size + (size % 2)
         }
         guard !pcmData.isEmpty else { throw NSError(domain: "WAV", code: 1, userInfo: [NSLocalizedDescriptionKey: "No audio data in WAV"]) }
+        if bitsPerSample == 24 {
+            let bytesPerFrame = 3 * numChannels
+            var out = Data(); out.reserveCapacity((pcmData.count / bytesPerFrame) * 2 * numChannels)
+            var i = 0
+            while i + bytesPerFrame <= pcmData.count {
+                for ch in 0..<numChannels { out.append(pcmData[i + ch*3 + 1]); out.append(pcmData[i + ch*3 + 2]) }
+                i += bytesPerFrame
+            }
+            return (out, sampleRate, numChannels, 16)
+        }
         return (pcmData, sampleRate, numChannels, bitsPerSample)
     }
 }
@@ -893,9 +1156,12 @@ struct KeyzoneRow: View {
                     }
                 }
                 HStack(spacing: 8) {
-                    Text("\(midiNoteName(keyzone.lowKey))–\(midiNoteName(keyzone.highKey))").font(.caption).foregroundStyle(.secondary)
                     Text("Root: \(midiNoteName(keyzone.rootNote))").font(.caption).foregroundStyle(.blue)
-                    Text("Vel: \(keyzone.velocityLow)–\(keyzone.velocityHigh)").font(.caption).foregroundStyle(.secondary)
+                    if keyzone.lowKey == keyzone.highKey {
+                        Text("Single: \(midiNoteName(keyzone.lowKey))").font(.caption).foregroundStyle(.secondary)
+                    } else {
+                        Text("Range: \(midiNoteName(keyzone.lowKey))–\(midiNoteName(keyzone.highKey))").font(.caption).foregroundStyle(.secondary)
+                    }
                 }
             }
             Spacer()
@@ -1179,18 +1445,44 @@ struct MidiKeyPicker: View {
 struct ProgramListView: View {
     @ObservedObject var diskImage: AkaiDiskImage
     @Binding var selectedProgramID: UUID?
+    @State private var showingImport = false
+    @State private var dropError: String? = nil
+    @State private var showDropError = false
+    @AppStorage("lowQualityImport") private var lowQualityImport = false
+    private let audioExts: Set<String> = ["wav", "wave", "aif", "aiff", "aifc"]
+
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            HStack {
-                Text("Programs").font(.title2.bold())
+            HStack(spacing: 10) {
+                Image(systemName: "pianokeys")
+                    .font(.title)
+                    .foregroundStyle(.purple)
+                Text("Programs").font(.title.bold())
                 Spacer()
                 Text("\(diskImage.programs.count) files").foregroundStyle(.secondary)
             }
             .padding()
             Divider()
             if diskImage.programs.isEmpty {
-                ContentUnavailableView("No Programs", systemImage: "pianokeys",
-                    description: Text("This disk image contains no program files."))
+                VStack(spacing: 16) {
+                    ContentUnavailableView("No Programs", systemImage: "pianokeys",
+                        description: Text("Right-click Programs in the sidebar to create one, or drag a WAV file onto this panel to create a preset from a single sample, or drag a folder to map each file to its own key."))
+                    Button {
+                        showingImport = true
+                    } label: {
+                        Label("Browse for Samples", systemImage: "square.and.arrow.down")
+                            .padding(.horizontal, 16)
+                            .padding(.vertical, 8)
+                    }
+                    .buttonStyle(.borderedProminent)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .fileImporter(isPresented: $showingImport,
+                              allowedContentTypes: [.audio],
+                              allowsMultipleSelection: false) { result in
+                    guard case .success(let urls) = result, let url = urls.first else { return }
+                    importFileAsPreset(url: url)
+                }
             } else {
                 Table(diskImage.programs, selection: $selectedProgramID) {
                     TableColumn("Name") { p in
@@ -1203,6 +1495,205 @@ struct ProgramListView: View {
                     }.width(70)
                     TableColumn("Polyphony") { p in Text("\(p.program.polyphony)") }.width(80)
                 }
+            }
+        }
+        .onDrop(of: [.fileURL], isTargeted: nil) { providers in
+            handleDrop(providers: providers)
+        }
+        .alert("Import error", isPresented: $showDropError) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text(dropError ?? "")
+        }
+    }
+
+    private func handleDrop(providers: [NSItemProvider]) -> Bool {
+        guard let provider = providers.first else { return false }
+        provider.loadItem(forTypeIdentifier: "public.file-url") { item, _ in
+            guard let data = item as? Data,
+                  let url = URL(dataRepresentation: data, relativeTo: nil) else { return }
+            let accessing = url.startAccessingSecurityScopedResource()
+            defer { if accessing { url.stopAccessingSecurityScopedResource() } }
+            var isDir: ObjCBool = false
+            FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir)
+            DispatchQueue.main.async {
+                if isDir.boolValue {
+                    importFolderAsDrumPreset(folderURL: url)
+                } else if audioExts.contains(url.pathExtension.lowercased()) {
+                    importFileAsPreset(url: url)
+                } else {
+                    dropError = "\(url.lastPathComponent) is not a supported audio file."
+                    showDropError = true
+                }
+            }
+        }
+        return true
+    }
+
+    private func importFileAsPreset(url: URL) {
+        let accessing = url.startAccessingSecurityScopedResource()
+        guard let wavData = try? Data(contentsOf: url) else {
+            if accessing { url.stopAccessingSecurityScopedResource() }
+            return
+        }
+        if accessing { url.stopAccessingSecurityScopedResource() }
+        guard wavData.count > 44,
+              wavData[0..<4] == Data("RIFF".utf8),
+              wavData[8..<12] == Data("WAVE".utf8) else {
+            dropError = "\(url.lastPathComponent) is not a valid WAV file."
+            showDropError = true
+            return
+        }
+        var offset = 12; var sampleRate = 44100; var numChannels = 1
+        var pcmData = Data()
+        while offset + 8 <= wavData.count {
+            let id = String(bytes: wavData[offset..<offset+4], encoding: .ascii) ?? ""
+            let size = Int(wavData.readLE32(at: offset + 4)); offset += 8
+            if id == "fmt " { numChannels = Int(wavData.readLE16(at: offset+2)); sampleRate = Int(wavData.readLE32(at: offset+4)) }
+            else if id == "data" { pcmData = wavData.subdata(in: offset..<min(offset+size, wavData.count)) }
+            offset += size + (size % 2)
+        }
+        guard !pcmData.isEmpty else { return }
+        let rawName = url.deletingPathExtension().lastPathComponent
+        let programName = AkaiDiskImage.sanitizeName(String(rawName.prefix(12)))
+        let loFi = lowQualityImport
+        DispatchQueue.global(qos: .userInitiated).async {
+            do {
+                var monoData: Data; let monoName: String
+                if numChannels >= 2 {
+                    let (left, _) = AkaiDiskImage.deinterleaveStereo(pcmData, channels: numChannels)
+                    monoData = left
+                    monoName = AkaiDiskImage.sanitizeNamePreservingEnd(rawName, maxLen: 10) + "-L"
+                } else {
+                    monoData = pcmData
+                    monoName = AkaiDiskImage.sanitizeName(String(rawName.prefix(12)))
+                }
+                let finalRate: UInt32
+                if loFi {
+                    let (loPCM, loRate) = AkaiDiskImage.applyLoFi(pcm: monoData, fromRate: sampleRate)
+                    monoData = loPCM; finalRate = loRate
+                } else { finalRate = UInt32(sampleRate) }
+                let sample = try diskImage.addImportedSample(
+                    name: monoName, sampleRate: finalRate,
+                    numChannels: 1, pcmData: monoData)
+                let prog = try diskImage.createProgram(name: programName)
+                let kz = AkaiProgramKeyzone(
+                    sampleName: sample.header.name,
+                    lowKey: 24, highKey: 127, rootNote: 60,
+                    tuneOffset: 0, fineTune: 0, volume: 99, pan: 0,
+                    filterOffset: 0, filterCutoff: 99, filterKeyFollow: 0,
+                    filterResonance: 0, filterModDepth1: 0,
+                    filterModDepth2: 0, filterModDepth3: 0,
+                    rightSampleName: "", rightPan: 50,
+                    playbackMode: .sample, velocityLow: 0, velocityHigh: 127)
+                DispatchQueue.main.async {
+                    var updated = diskImage.programs.first(where: { $0.id == prog.id }) ?? prog
+                    updated.program.keyzones = [kz]
+                    diskImage.applyProgramEdits(updated)
+                    diskImage.hasUnsavedChanges = true
+                    selectedProgramID = prog.id
+                }
+            } catch {
+                DispatchQueue.main.async {
+                    dropError = error.localizedDescription
+                    showDropError = true
+                }
+            }
+        }
+    }
+
+    private func importFolderAsDrumPreset(folderURL: URL) {
+        let rawName = folderURL.lastPathComponent
+        let programName = AkaiDiskImage.sanitizeName(String(rawName.prefix(12)))
+        guard let contents = try? FileManager.default.contentsOfDirectory(
+            at: folderURL, includingPropertiesForKeys: [.isRegularFileKey],
+            options: [.skipsHiddenFiles]
+        ) else { return }
+        let audioURLs = contents
+            .filter { audioExts.contains($0.pathExtension.lowercased()) }
+            .sorted { $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedAscending }
+        guard !audioURLs.isEmpty else {
+            dropError = "No audio files found in \"\(folderURL.lastPathComponent)\"."
+            showDropError = true
+            return
+        }
+        let prog: AkaiProgramFile
+        do { prog = try diskImage.createProgram(name: programName) }
+        catch {
+            dropError = error.localizedDescription
+            showDropError = true
+            return
+        }
+        let loFi = lowQualityImport
+        DispatchQueue.global(qos: .userInitiated).async {
+            var keyzones: [AkaiProgramKeyzone] = []
+            var nextNote = 36
+            var hitLimit = false; var limitMsg = ""
+            for url in audioURLs {
+                let accessing = url.startAccessingSecurityScopedResource()
+                defer { if accessing { url.stopAccessingSecurityScopedResource() } }
+                do {
+                    guard let wavData = try? Data(contentsOf: url),
+                          wavData.count > 44,
+                          wavData[0..<4] == Data("RIFF".utf8),
+                          wavData[8..<12] == Data("WAVE".utf8) else { continue }
+                    var offset = 12; var sampleRate = 44100; var numChannels = 1
+                    var pcmData = Data()
+                    while offset + 8 <= wavData.count {
+                        let id = String(bytes: wavData[offset..<offset+4], encoding: .ascii) ?? ""
+                        let size = Int(wavData.readLE32(at: offset + 4)); offset += 8
+                        if id == "fmt " { numChannels = Int(wavData.readLE16(at: offset+2)); sampleRate = Int(wavData.readLE32(at: offset+4)) }
+                        else if id == "data" { pcmData = wavData.subdata(in: offset..<min(offset+size, wavData.count)) }
+                        offset += size + (size % 2)
+                    }
+                    guard !pcmData.isEmpty else { continue }
+                    let baseName = url.deletingPathExtension().lastPathComponent
+                    var monoData: Data; let monoName: String
+                    if numChannels >= 2 {
+                        let (left, _) = AkaiDiskImage.deinterleaveStereo(pcmData, channels: numChannels)
+                        monoData = left
+                        monoName = AkaiDiskImage.sanitizeNamePreservingEnd(baseName, maxLen: 10) + "-L"
+                    } else {
+                        monoData = pcmData
+                        monoName = AkaiDiskImage.sanitizeName(String(baseName.prefix(12)))
+                    }
+                    let finalRate: UInt32
+                    if loFi {
+                        let (loPCM, loRate) = AkaiDiskImage.applyLoFi(pcm: monoData, fromRate: sampleRate)
+                        monoData = loPCM; finalRate = loRate
+                    } else { finalRate = UInt32(sampleRate) }
+                    let sample = try diskImage.addImportedSample(
+                        name: monoName, sampleRate: finalRate,
+                        numChannels: 1, pcmData: monoData)
+                    let note = UInt8(min(nextNote, 127))
+                    var patchedSample = sample
+                    patchedSample.header.midiRootNote = note
+                    diskImage.applySampleEdits(patchedSample)
+                    keyzones.append(AkaiProgramKeyzone(
+                        sampleName: sample.header.name,
+                        lowKey: note, highKey: note, rootNote: note,
+                        tuneOffset: 0, fineTune: 0, volume: 99, pan: 0,
+                        filterOffset: 0, filterCutoff: 99, filterKeyFollow: 0,
+                        filterResonance: 0, filterModDepth1: 0,
+                        filterModDepth2: 0, filterModDepth3: 0,
+                        rightSampleName: "", rightPan: 50,
+                        playbackMode: .noLoop, velocityLow: 0, velocityHigh: 127,
+                        env1Attack: 0, env1Decay: 0, env1Sustain: 99, env1Release: 0))
+                    nextNote += 1
+                } catch {
+                    hitLimit = true
+                    limitMsg = "Disk full — only \(keyzones.count) of \(audioURLs.count) samples imported."
+                    break
+                }
+            }
+            DispatchQueue.main.async {
+                if !keyzones.isEmpty {
+                    var updated = diskImage.programs.first(where: { $0.id == prog.id }) ?? prog
+                    updated.program.keyzones = keyzones
+                    diskImage.applyProgramEdits(updated)
+                    diskImage.hasUnsavedChanges = true
+                }
+                if hitLimit { dropError = limitMsg; showDropError = true }
             }
         }
     }

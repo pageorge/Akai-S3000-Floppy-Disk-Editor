@@ -1,7 +1,7 @@
 import Foundation
+import AVFoundation
 
 // MARK: - Akai S3000 Disk Format Constants
-// Verified against (a) the akaiutil / akai-fs source structs and (b) a real
 // Greaseweazle-read S3000 HD floppy, byte-for-byte.
 //
 // Physical format:  80 cylinders × 2 heads × 10 sectors × 1024 bytes = 1,638,400 bytes
@@ -758,9 +758,10 @@ class AkaiDiskImage: ObservableObject {
         diskName = labelOffset + 12 <= data.count
             ? akaiString(from: data, offset: labelOffset, length: 12)
             : ""
-        freeBlocks = countFreeBlocks(data: data)
+        let computedFreeBlocks = countFreeBlocks(data: data)
         let (parsedSamples, parsedPrograms, parsedMultis) = try parseDirectory(data: data)
         DispatchQueue.main.async {
+            self.freeBlocks = computedFreeBlocks
             self.samples  = parsedSamples
             self.programs = parsedPrograms
             self.multis   = parsedMultis
@@ -1475,9 +1476,10 @@ class AkaiDiskImage: ObservableObject {
         entryBytes[21] = UInt8((startBlock >> 8) & 0xFF)
         data.replaceSubrange(dirSlot..<dirSlot + AkaiDiskFormat.dirEntrySize, with: entryBytes)
 
-        // 4. Commit to in-memory image + model.
+        // 4. Commit to in-memory image + model — @Published properties must
+        // be mutated on the main thread. imageData is not @Published so it can
+        // be set here; samples/freeBlocks/hasUnsavedChanges are @Published.
         imageData = data
-        freeBlocks = countFreeBlocks(data: data)
 
         let dirEntry = AkaiDirectoryEntry(
             name: name, fileType: AkaiDiskFormat.ftypeSample,
@@ -1488,13 +1490,22 @@ class AkaiDiskImage: ObservableObject {
             loopEnd: numSamples > 0 ? numSamples - 1 : 0, numSamples: numSamples,
             midiRootNote: 60, playbackMode: .noLoop, bitDepth: 16,
             numChannels: numChannels, fineTune: 0, semitoneTune: 0, loudness: 99, rawHeader: header)
-        let sample = AkaiSample(
+        let newSample = AkaiSample(
             directoryEntry: dirEntry, header: hdrModel, audioData: pcmData,
             offset: startBlock * bs)
 
-        samples.append(sample)
-        hasUnsavedChanges = true
-        return sample
+        if Thread.isMainThread {
+            freeBlocks = countFreeBlocks(data: data)
+            samples.append(newSample)
+            hasUnsavedChanges = true
+        } else {
+            DispatchQueue.main.sync {
+                self.freeBlocks = self.countFreeBlocks(data: data)
+                self.samples.append(newSample)
+                self.hasUnsavedChanges = true
+            }
+        }
+        return newSample
     }
 
     /// Number of free (unallocated) blocks currently available on the disk.
@@ -2420,15 +2431,116 @@ class AkaiDiskImage: ObservableObject {
         }
     }
 
-    /// The set of characters an Akai name can contain, for UI validation/filtering.
+    /// Downsample mono PCM to ~22kHz using AVAudioConverter for high-quality
+    /// resampling with proper anti-aliasing. Used by all lo-fi import paths.
+    static func applyLoFi(pcm: Data, fromRate: Int) -> (Data, UInt32) {
+        let targetRate: Double = 22050
+        let outRate = UInt32(targetRate)
+        guard fromRate > 0, !pcm.isEmpty else { return (pcm, UInt32(fromRate)) }
+        let frameCount = pcm.count / 2
+        guard let inFormat = AVAudioFormat(commonFormat: .pcmFormatInt16,
+                                           sampleRate: Double(fromRate),
+                                           channels: 1, interleaved: false),
+              let outFormat = AVAudioFormat(commonFormat: .pcmFormatInt16,
+                                            sampleRate: targetRate,
+                                            channels: 1, interleaved: false),
+              let converter = AVAudioConverter(from: inFormat, to: outFormat),
+              let inBuf = AVAudioPCMBuffer(pcmFormat: inFormat,
+                                           frameCapacity: AVAudioFrameCount(frameCount))
+        else { return (pcm, UInt32(fromRate)) }
+        inBuf.frameLength = AVAudioFrameCount(frameCount)
+        pcm.withUnsafeBytes { raw in
+            let src = raw.bindMemory(to: Int16.self)
+            let dst = inBuf.int16ChannelData![0]
+            for i in 0..<frameCount { dst[i] = src[i] }
+        }
+        let outFrames = AVAudioFrameCount(Double(frameCount) * targetRate / Double(fromRate)) + 1
+        guard let outBuf = AVAudioPCMBuffer(pcmFormat: outFormat,
+                                             frameCapacity: outFrames) else { return (pcm, UInt32(fromRate)) }
+        var inputDone = false
+        let status = converter.convert(to: outBuf, error: nil) { _, outStatus in
+            if inputDone { outStatus.pointee = .noDataNow; return nil }
+            outStatus.pointee = .haveData
+            inputDone = true
+            return inBuf
+        }
+        guard status != .error, outBuf.frameLength > 0 else { return (pcm, UInt32(fromRate)) }
+        let outFrameCount = Int(outBuf.frameLength)
+        var out = Data(count: outFrameCount * 2)
+        let src = outBuf.int16ChannelData![0]
+        out.withUnsafeMutableBytes { raw in
+            let dst = raw.bindMemory(to: Int16.self)
+            for i in 0..<outFrameCount { dst[i] = src[i] }
+        }
+        return (out, outRate)
+    }
+
+    /// Sanitize and truncate a filename stem for use as an Akai sample name,
+    /// preserving the trailing characters (which are usually the unique part)
+    /// rather than the leading characters when truncation is needed.
+    static func sanitizeNamePreservingEnd(_ raw: String, maxLen: Int) -> String {
+        let sanitized = sanitizeName(raw)
+        if sanitized.count <= maxLen { return sanitized }
+        return String(sanitized.suffix(maxLen))
+    }
     static let allowedNameCharacters = Set("ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 #+-.")
 
-    /// Sanitize a user-entered name: uppercase, keep only representable characters,
-    /// clamp to 12 characters.
+    /// CRC-32 of the raw PCM data for each on-disk sample, keyed by sample UUID.
+    /// Built lazily on first access, invalidated when samples change.
+    /// Used for duplicate detection when importing new audio files.
+    private var sampleCRCCache: [UUID: UInt32]? = nil
+
+    /// Return the CRC-32 of a sample's raw audio data (the on-disk bytes after
+    /// the 0xC0 header), reading from imageData via the FAT chain.
+    private func crc32OfSampleAudio(_ sample: AkaiSample) -> UInt32 {
+        guard let data = imageData else { return 0 }
+        let chain = fatChain(from: sample.offset / AkaiDiskFormat.blockSize, data: data)
+        let headerSize = AkaiDiskFormat.sampleHeaderSize
+        let totalSize = Int(sample.directoryEntry.size)
+        let audioSize = max(0, totalSize - headerSize)
+        guard audioSize > 0 else { return 0 }
+        let audioData = readFromChain(chain, fileOffset: headerSize, length: audioSize, data: data)
+        return crc32(audioData)
+    }
+
+    /// Simple CRC-32 (ISO 3309 polynomial, same as zlib/PNG).
+    private func crc32(_ data: Data) -> UInt32 {
+        var crc: UInt32 = 0xFFFFFFFF
+        for byte in data {
+            crc ^= UInt32(byte)
+            for _ in 0..<8 { crc = (crc & 1) != 0 ? (crc >> 1) ^ 0xEDB88320 : crc >> 1 }
+        }
+        return crc ^ 0xFFFFFFFF
+    }
+
+    /// Check incoming raw PCM data against all on-disk samples.
+    /// Returns the names of any samples whose audio content matches (by CRC-32).
+    /// Call this on a background thread before importing — it reads imageData.
+    func duplicateSampleNames(forPCM pcmData: Data) -> [String] {
+        let incoming = crc32(pcmData)
+        var matches: [String] = []
+        for sample in samples {
+            let existing = crc32OfSampleAudio(sample)
+            if existing == incoming {
+                let name = sample.header.name.isEmpty ? sample.directoryEntry.name : sample.header.name
+                matches.append(name)
+            }
+        }
+        return matches
+    }
+
+    /// Sanitize a user-entered name: uppercase, replace any character not in
+    /// the Akai charset with "-" (except spaces, which are kept as-is), clamp
+    /// to 12 characters.
+    /// Examples:  "new disk"  → "NEW DISK"
+    ///            "new_disk"  → "NEW-DISK"
+    ///            "new-disk"  → "NEW-DISK"
     static func sanitizeName(_ raw: String) -> String {
         let upper = raw.uppercased()
-        let filtered = upper.filter { allowedNameCharacters.contains($0) }
-        return String(filtered.prefix(12))
+        let filtered = upper.map { ch -> Character in
+            allowedNameCharacters.contains(ch) ? ch : "-"
+        }
+        return String(String(filtered).prefix(12))
     }
 
     // MARK: - Program Edits

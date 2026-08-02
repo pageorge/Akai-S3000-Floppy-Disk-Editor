@@ -161,6 +161,7 @@ struct SampleDetailView: View {
                         InfoRow(label: "Channels", value: "Mono")
                         InfoRow(label: "Bit Depth", value: "\(sample.header.bitDepth)-bit")
                         InfoRow(label: "Samples", value: "\(sample.header.numSamples)")
+                        InfoRow(label: "Size", value: formatSize(Int(sample.directoryEntry.size)))
                     }
                     InfoCard(title: "Pitch") {
                         VStack(alignment: .leading, spacing: 12) {
@@ -586,12 +587,29 @@ struct SampleListView: View {
     @ObservedObject var diskImage: AkaiDiskImage
     @Binding var selectedSampleID: UUID?
     @State private var showingImport = false
+    @State private var duplicateAlert = false
+    @State private var duplicateMessage = ""
+    @State private var duplicateCount = 0
+    @State private var duplicateHasOtherFiles = false
+    @State private var pendingImport: (() -> Void)? = nil
+    @AppStorage("lowQualityImport") private var lowQualityImport = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            HStack {
-                Text("Samples").font(.title2.bold())
+            HStack(spacing: 10) {
+                Image(systemName: "waveform")
+                    .font(.title)
+                    .foregroundStyle(Color(red: 0.91, green: 0, blue: 0.11))
+                Text("Samples").font(.title.bold())
                 Spacer()
+                Toggle(isOn: $lowQualityImport) {
+                    Text("Convert to 22k")
+                        .font(.callout)
+                        .foregroundStyle(lowQualityImport ? .primary : .secondary)
+                }
+                .toggleStyle(.switch)
+                .controlSize(.mini)
+                .help("Convert to 22,050 Hz to fit more on a floppy!")
                 Text("\(diskImage.samples.count) files").foregroundStyle(.secondary)
             }
             .padding()
@@ -614,14 +632,13 @@ struct SampleListView: View {
                               allowedContentTypes: [.audio],
                               allowsMultipleSelection: true) { result in
                     guard case .success(let urls) = result else { return }
-                    for url in urls {
-                        let accessing = url.startAccessingSecurityScopedResource()
-                        do {
-                            let s = try diskImage.importAndAddSample(from: url)
-                            selectedSampleID = s.id
-                        } catch {}
-                        if accessing { url.stopAccessingSecurityScopedResource() }
-                    }
+                    importURLs(urls)
+                }
+                .alert(duplicateCount == 1 ? "Sample already exists" : "Samples already exist", isPresented: $duplicateAlert) {
+                    Button("Import Anyway") { pendingImport?(); pendingImport = nil }
+                    Button(duplicateHasOtherFiles ? "Skip" : "Cancel", role: .cancel) { pendingImport = nil }
+                } message: {
+                    Text(duplicateMessage)
                 }
             } else {
                 Table(diskImage.samples, selection: $selectedSampleID) {
@@ -634,7 +651,7 @@ struct SampleListView: View {
                     TableColumn("Duration") { s in
                         let dur = s.header.sampleRate > 0
                             ? Double(s.header.numSamples) / Double(s.header.sampleRate) : 0
-                        return Text(dur < 1 ? String(format: "%.0fms", dur*1000) : String(format: "%.2fs", dur))
+                        Text(dur < 1 ? String(format: "%.0fms", dur*1000) : String(format: "%.2fs", dur))
                     }.width(70)
                     TableColumn("Loop") { s in
                         let loops = s.header.playbackMode == .loop || s.header.playbackMode == .loopNotRel
@@ -651,8 +668,6 @@ struct SampleListView: View {
 
     private func midiNoteName(_ note: UInt8) -> String {
         let names = ["C","C#","D","D#","E","F","F#","G","G#","A","A#","B"]
-        // -2, not -1: matches the real S3000XL's own octave display (confirmed
-        // against hardware), not the common "middle C = C4" MIDI convention.
         return "\(names[Int(note) % 12])\(Int(note) / 12 - 2)"
     }
 
@@ -660,5 +675,116 @@ struct SampleListView: View {
         if bytes < 1024 { return "\(bytes)B" }
         if bytes < 1024*1024 { return String(format: "%.0fKB", Double(bytes)/1024) }
         return String(format: "%.1fMB", Double(bytes)/1024/1024)
+    }
+
+    private func importOneURL(_ url: URL, pcm: Data, rate: Int, channels: Int, loFi: Bool) -> AkaiSample? {
+        let left = channels >= 2 ? AkaiDiskImage.deinterleaveStereo(pcm, channels: channels).0 : pcm
+        let right = channels >= 2 ? AkaiDiskImage.deinterleaveStereo(pcm, channels: channels).1 : nil
+        let stem = AkaiDiskImage.sanitizeName(url.deletingPathExtension().lastPathComponent)
+        let stemL = channels >= 2 ? AkaiDiskImage.sanitizeNamePreservingEnd(url.deletingPathExtension().lastPathComponent, maxLen: 10) + "-L" : stem
+        let stemR = AkaiDiskImage.sanitizeNamePreservingEnd(url.deletingPathExtension().lastPathComponent, maxLen: 10) + "-R"
+        let (finalL, finalRate): (Data, UInt32)
+        if loFi {
+            let (loPCM, loRate) = AkaiDiskImage.applyLoFi(pcm: left, fromRate: rate)
+            finalL = loPCM; finalRate = loRate
+        } else {
+            finalL = left; finalRate = UInt32(rate)
+        }
+        let leftSample = try? diskImage.addImportedSample(name: stemL, sampleRate: finalRate, numChannels: 1, pcmData: finalL)
+        if channels >= 2, let r = right {
+            let finalR = loFi ? AkaiDiskImage.applyLoFi(pcm: r, fromRate: rate).0 : r
+            _ = try? diskImage.addImportedSample(name: stemR, sampleRate: finalRate, numChannels: 1, pcmData: finalR)
+        }
+        return leftSample
+    }
+
+    private func importURLs(_ urls: [URL]) {
+        let loFi = lowQualityImport  // capture on main thread
+        DispatchQueue.global(qos: .userInitiated).async {
+            var clean: [(url: URL, pcm: Data, rate: UInt32, channels: Int)] = []
+            var dupeFiles: [(url: URL, pcm: Data, rate: UInt32, channels: Int)] = []
+            var dupeFileNames: [String] = []
+
+            for url in urls {
+                let accessing = url.startAccessingSecurityScopedResource()
+                defer { if accessing { url.stopAccessingSecurityScopedResource() } }
+                guard let wavData = try? Data(contentsOf: url),
+                      let (pcm, rate, ch, _) = try? parseWAVBasic(wavData) else { continue }
+                let checkPCM = ch >= 2 ? AkaiDiskImage.deinterleaveStereo(pcm, channels: ch).0 : pcm
+                let dupes = diskImage.duplicateSampleNames(forPCM: checkPCM)
+                if dupes.isEmpty {
+                    clean.append((url, pcm, UInt32(rate), ch))
+                } else {
+                    dupeFiles.append((url, pcm, UInt32(rate), ch))
+                    dupeFileNames.append(url.lastPathComponent)
+                }
+            }
+
+            // Import clean files immediately.
+            for file in clean {
+                let accessing = file.url.startAccessingSecurityScopedResource()
+                if let s = importOneURL(file.url, pcm: file.pcm, rate: Int(file.rate), channels: file.channels, loFi: loFi) {
+                    DispatchQueue.main.async { selectedSampleID = s.id }
+                }
+                if accessing { file.url.stopAccessingSecurityScopedResource() }
+            }
+
+            guard !dupeFiles.isEmpty else { return }
+
+            // Ask about duplicates.
+            DispatchQueue.main.async {
+                duplicateCount = dupeFiles.count
+                duplicateHasOtherFiles = !clean.isEmpty
+                duplicateMessage = "\(dupeFileNames.joined(separator: ", ")) already exist\(dupeFiles.count == 1 ? "s" : "") on the disk. Import anyway?"
+                pendingImport = {
+                    DispatchQueue.global(qos: .userInitiated).async {
+                        for file in dupeFiles {
+                            let accessing = file.url.startAccessingSecurityScopedResource()
+                            if let s = importOneURL(file.url, pcm: file.pcm, rate: Int(file.rate), channels: file.channels, loFi: loFi) {
+                                DispatchQueue.main.async { selectedSampleID = s.id }
+                            }
+                            if accessing { file.url.stopAccessingSecurityScopedResource() }
+                        }
+                    }
+                }
+                duplicateAlert = true
+            }
+        }
+    }
+
+    private func applyLoFi(pcm: Data, fromRate: Int) -> (Data, UInt32) {
+        AkaiDiskImage.applyLoFi(pcm: pcm, fromRate: fromRate)
+    }
+
+    private func parseWAVBasic(_ data: Data) throws -> (Data, Int, Int, Int) {
+        guard data.count > 44, data[0..<4] == Data("RIFF".utf8), data[8..<12] == Data("WAVE".utf8) else {
+            throw NSError(domain: "WAV", code: 0, userInfo: [NSLocalizedDescriptionKey: "Not a WAV"])
+        }
+        var offset = 12, sampleRate = 44100, numChannels = 1, bitsPerSample = 16
+        var pcmData = Data()
+        while offset + 8 <= data.count {
+            let id = String(bytes: data[offset..<offset+4], encoding: .ascii) ?? ""
+            let size = Int(data.readLE32(at: offset + 4)); offset += 8
+            if id == "fmt " { numChannels = Int(data.readLE16(at: offset+2)); sampleRate = Int(data.readLE32(at: offset+4)); bitsPerSample = Int(data.readLE16(at: offset+14)) }
+            else if id == "data" { pcmData = data.subdata(in: offset..<min(offset+size, data.count)) }
+            offset += size + (size % 2)
+        }
+        guard !pcmData.isEmpty else { throw NSError(domain: "WAV", code: 1, userInfo: [:]) }
+        // Convert 24-bit to 16-bit if needed.
+        if bitsPerSample == 24 {
+            let bytesPerFrame = 3 * numChannels
+            var out = Data(); out.reserveCapacity((pcmData.count / bytesPerFrame) * 2 * numChannels)
+            var i = 0
+            while i + bytesPerFrame <= pcmData.count {
+                for ch in 0..<numChannels {
+                    let base = i + ch * 3
+                    out.append(pcmData[base + 1])
+                    out.append(pcmData[base + 2])
+                }
+                i += bytesPerFrame
+            }
+            return (out, sampleRate, numChannels, 16)
+        }
+        return (pcmData, sampleRate, numChannels, bitsPerSample)
     }
 }

@@ -2,7 +2,7 @@ import SwiftUI
 
 struct WelcomeView: View {
     @ObservedObject var diskImage: AkaiDiskImage
-    @State private var lastPath: String? = UserDefaults.standard.string(forKey: "lastOpenedImagePath")
+    @AppStorage("lastOpenedImagePath") private var lastPath: String = ""
 
     /// The vivid Akai brand red, shared with the logo and the Greaseweazle Write
     /// button so the prominent action buttons match exactly. Using a flat fill +
@@ -38,10 +38,10 @@ struct WelcomeView: View {
                                 )
                         )
                     VStack(spacing: 6) {
-                        if let path = lastPath, FileManager.default.fileExists(atPath: path) {
-                            let filename = URL(fileURLWithPath: path).lastPathComponent
+                        if !lastPath.isEmpty, FileManager.default.fileExists(atPath: lastPath) {
+                            let filename = URL(fileURLWithPath: lastPath).lastPathComponent
                             Button {
-                                try? diskImage.load(from: URL(fileURLWithPath: path))
+                                try? diskImage.load(from: URL(fileURLWithPath: lastPath))
                             } label: {
                                 Label(filename, systemImage: "clock.arrow.circlepath")
                                     .frame(width: actionButtonWidth)
@@ -86,8 +86,8 @@ struct WelcomeView: View {
                     FeaturePill(icon: "waveform",             text: "Import Samples",  color: Color(red: 0.91, green: 0, blue: 0.11))
                     FeaturePill(icon: "pianokeys",             text: "Create Programs", color: .purple)
                     FeaturePill(icon: "square.stack.3d.up",   text: "Create Multis",   color: .teal)
-                    FeaturePill(icon: "opticaldiscdrive.fill", text: "Import & Export", color: greaseweazlePurple)
-                    FeaturePill(icon: "internaldrive",         text: "Disk Info",        color: .white)
+                    FeaturePill(icon: "square.and.arrow.up.on.square", text: "Import & Export", color: greaseweazlePurple)
+                    FeaturePill(icon: "externaldrive.badge.questionmark", text: "Disk Info", color: .white)
                 }
             }
             .padding(60)
@@ -186,10 +186,12 @@ struct FeaturePill: View {
     var body: some View {
         VStack(spacing: 6) {
             Image(systemName: icon)
-                .font(.title3)
+                .font(.title2)
                 .foregroundStyle(color)
+                .frame(height: 28)
             Text(text)
-                .font(.caption).foregroundStyle(.secondary)
+                .font(.footnote).foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
         }
     }
 }

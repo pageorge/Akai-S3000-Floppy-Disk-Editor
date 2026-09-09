@@ -91,7 +91,7 @@ To build from source: **Xcode 15** or later.
 
 ### Global settings are saved to disk
 
-The S3000XL saves its global settings (master transpose, fine tune, MIDI channel assignments, etc.) into **blocks 0–4** of the floppy when you do SAVE → ALL or SAVE → GLOBALS. When you load a disk, these settings are restored — including any transpose or tuning that was active when the disk was last saved.
+The S3000XL saves its global settings (master transpose, fine tune, MIDI channel assignments, etc.) into **blocks 0–4** of the floppy as part of a normal SAVE operation. When you load a disk, these settings are restored — including any transpose or tuning that was active when the disk was last saved.
 
 **If samples play back at the wrong speed or pitch after loading a disk:** check the global TRANSPOSE and FINE TUNE settings (TUNE/MIDI button). A non-zero transpose saved to disk will affect all playback. Reset to zero and save back to the disk to fix it.
 
@@ -118,6 +118,12 @@ The sample's **root key** (`rkey`, shown as "Root Note" in the sample detail vie
 - The app automatically sets `rkey` to match the pad's trigger key (e.g. C1 for the first pad)
 - This means each pad plays its sample at recorded pitch regardless of where it sits on the keyboard
 - `rkey` is stored on the **sample**, not the keyzone — if the same sample is used by two different drum pads, the second drag will prompt you before changing it
+
+### Clone Sample (shared PCM)
+
+Right-click any sample in the sidebar → **Clone Sample**. This creates a second directory entry pointing to the same audio data on disk — no PCM bytes are duplicated, so the clone costs only a tiny directory entry (effectively free in terms of disk space).
+
+Why this is powerful: the S3000 has no per-keyzone start or loop point — every keyzone referencing a sample uses the same trim and loop settings. If you want different parts of a long sample (e.g. a breakbeat) to play on different keys, you'd normally have to duplicate the entire audio. Clone Sample sidesteps this: make several clones of the same sample, set a different start point or loop on each clone, then assign each clone to its own keyzone. You get multiple independent playback positions from a single copy of the audio on disk.
 
 ### Lo-fi / Convert to 22k
 

@@ -101,6 +101,7 @@ struct AkaiDiskFormat {
     // Single canonical offsets from akai_sample1000_s — no scanning, no fallback.
     static let hdrNameOffset        = 0x03    // name[12]
     static let hdrSampleCountOffset = 0x1A    // slen[4]  (number of samples)
+    static let hdrStartOffset        = 0x1E    // start[4] (playback start point)
     static let hdrLoopAtOffset      = 0x26    // loop[0].at[4]
     static let hdrLoopFineOffset    = 0x2A    // loop[0].flen[2] (1/65536 sample)
     static let hdrLoopLenOffset     = 0x2C    // loop[0].len[4]
@@ -139,6 +140,16 @@ struct AkaiSampleHeader {
     var sampleRate: UInt32
     var loopStart: UInt32
     var loopEnd: UInt32
+    /// Sample PLAYBACK start point — `start[4]` @ 0x1E in akai_sample1000_s.
+    /// This is the TRIM-page "start" the S3000XL edits (manual p.129): the
+    /// point playback begins from. It's independent of the loop points, so
+    /// setting it to loopStart makes a note effectively begin inside the loop.
+    /// Defaults to 0 (play from the very beginning), which is what every sample
+    /// this app creates uses. NOTE: writing a non-zero value here changes real
+    /// hardware playback and has NOT yet been byte-diff-confirmed on an S3000XL
+    /// — treat as provisional until verified (same discipline as the rest of
+    /// this format map).
+    var sampleStart: UInt32
     var numSamples: UInt32
     var midiRootNote: UInt8
     var playbackMode: AkaiSamplePlaybackMode
@@ -168,24 +179,26 @@ enum AkaiSamplePlaybackMode: UInt8, CaseIterable, Identifiable {
 
     var displayName: String {
         switch self {
-        case .loop:       return "Loop"
+        case .loop:       return "Loop In Release"
         case .loopNotRel: return "Loop Until Release"
         case .noLoop:     return "No Loop"
         case .toEnd:      return "Play to End"
         }
     }
 
-    /// User-facing explanation shown under the Playback Mode picker in Sample Edit.
+    /// User-facing explanation shown under the Playback Mode picker in Sample
+    /// Edit. Wording matches the S3000XL Operator's Manual (EDIT SAMPLE, MORE
+    /// page, p.148) rather than a simplified/invented description.
     var explanation: String {
         switch self {
         case .loop:
-            return "This sample will loop between the start/end points below for as long as the key is held."
+            return "Loops between the start/end points, and keeps looping through the envelope's Release stage after the key is lifted — the loop only stops once Release has fully faded out. Every new sample starts in this mode."
         case .loopNotRel:
-            return "This sample will loop between the start/end points below, but will NOT play a release tail when the key is lifted — it just stops."
+            return "Loops between the start/end points while the key is held. On key-up, looping stops and any recorded audio after the loop point plays through once as the real tail — rather than fading via the envelope's Release stage."
         case .noLoop:
-            return "This sample will play straight through once and stop. The start/end points below are ignored during playback (but kept here so you can switch back to a loop mode without losing them)."
+            return "Plays straight through once, no looping, for as long as the key is held. If the key is released early, the envelope's Release stage kicks in and the sound decays; if the audio itself is shorter than the note, it simply finishes early."
         case .toEnd:
-            return "This sample will always play out to the very end — ignoring both the loop points and key-up — even if the key is released early."
+            return "Always plays the entire sample through to the end from a single trigger or key press — the key doesn't need to be held for its full length. Loop points and key-up are ignored entirely. Built for drum hits triggered from a keyboard, sequencer, or trigger unit."
         }
     }
 }
@@ -288,7 +301,12 @@ struct AkaiProgramKeyzone {
     var velocityLow: UInt8
     var velocityHigh: UInt8
     // ENV1 (amplitude envelope) — confirmed by real hardware byte-diff.
-    // Simple ADSR: A=0 = instant attack, D=50, S=99, R=45 are hardware defaults.
+    // Simple ADSR: A=25 = quick-but-not-instant attack, D=50, S=99, R=45 are
+    // hardware defaults — confirmed on a real S3000XL ENV1 screen for a fresh
+    // keygroup (Attack:25 Decay:50 Sustain:99 Release:45), matching
+    // AkaiKeyzoneDefaults.env1Attack exactly. (This comment previously said
+    // "A=0", which was stale/wrong — the 25 used throughout the code was
+    // always the correct, separately-confirmed value.)
     // kg+0x0C = Attack, kg+0x0D = Decay, kg+0x0E = Sustain, kg+0x0F = Release.
     var env1Attack: UInt8 = AkaiKeyzoneDefaults.env1Attack
     var env1Decay: UInt8 = AkaiKeyzoneDefaults.env1Decay
@@ -308,6 +326,20 @@ struct AkaiProgramKeyzone {
     var env2L3: UInt8 = AkaiKeyzoneDefaults.env2L3
     var env2R4: UInt8 = AkaiKeyzoneDefaults.env2R4
     var env2L4: UInt8 = AkaiKeyzoneDefaults.env2L4
+    /// SMP1 pitch mode — kg+0x84. CONFIRMED BY REAL HARDWARE BYTE-DIFF:
+    /// isolated test changing ONLY SMP1 PITCH TRACK→CONST produced exactly
+    /// one changed byte at kg+0x84: 0x00 (TRACK) → 0x01 (CONST).
+    /// TRACK: pitch follows keyboard (melodic use). CONST: pitch locked to
+    /// recorded pitch regardless of note played (required for drums — without
+    /// it, samples play back at wrong speed/pitch).
+    var pitchMode: UInt8 = 0   // default TRACK (0x00) — pitch follows the keyboard, correct
+                               // for most melodic/general keyzone creation. Drum-specific
+                               // import paths (DrumPresetDropZone, folder-drop batch imports)
+                               // explicitly override this to 1 (CONST) at their call sites,
+                               // since one-shot drum samples need a fixed, unpitched playback
+                               // speed regardless of which key triggers them — relying on this
+                               // default alone previously caused drum samples to play back at
+                               // the wrong speed.
 }
 
 /// The full set of modulation sources selectable for any of the 3 filter
@@ -397,30 +429,30 @@ enum AkaiPlaybackMode: UInt8, CaseIterable, Identifiable {
     var displayName: String {
         switch self {
         case .sample:     return "Sample's Setting"
-        case .loop:       return "Loop"
+        case .loop:       return "Loop In Release"
         case .loopNotRel: return "Loop Until Release"
         case .noLoop:     return "No Loop"
         case .toEnd:      return "Play to End"
         }
     }
 
-    /// User-facing explanation shown under the Playback Mode picker. Spells out
-    /// what will actually happen on playback, since "pmode" naming alone (even
-    /// translated to e.g. "Loop Until Release") doesn't make the behavior obvious
-    /// — and critically, makes clear that the loop POINTS always come from the
-    /// sample itself (set in Sample Edit), never from the keyzone.
+    /// User-facing explanation shown under the Playback Mode picker. Matches
+    /// the S3000XL Operator's Manual (EDIT PROGRAM, KGRP page, p.94): these
+    /// override the sample's own setting for this program only, without
+    /// touching the underlying sample — but the loop POINTS themselves always
+    /// come from the sample (set in Sample Edit), never from the keyzone.
     var explanation: String {
         switch self {
         case .sample:
             return "Playback will use this sample's own loop setting from Sample Edit — if the sample loops, this keyzone loops; if not, it won't."
         case .loop:
-            return "Playback will loop using the start/end points set on the sample in Sample Edit, for as long as the key is held."
+            return "Overrides the sample's own setting to loop it here, continuing to loop through the envelope's Release stage after key-up — same behavior as Loop In Release in Sample Edit, applied just for this program."
         case .loopNotRel:
-            return "Playback will loop (using the sample's loop points) but will NOT play any release tail when the key is lifted — it just stops."
+            return "Overrides the sample's own setting: loops while the key is held, then on key-up stops looping and plays any remaining recorded tail once, instead of fading via the envelope — same as Loop Until Release in Sample Edit, applied just for this program."
         case .noLoop:
-            return "Playback will ignore the sample's loop points entirely and just play through once, stopping at the end (or on key-up)."
+            return "Overrides the sample's own setting to ignore its loop points entirely and just play through once, stopping at the end (or decaying via the envelope's Release stage on key-up)."
         case .toEnd:
-            return "Playback will ignore both the loop points and key-up — the whole sample plays out to the end no matter what."
+            return "Overrides the sample's own setting so the whole sample always plays out to the end from a single trigger, ignoring both loop points and key-up — same as Play to End in Sample Edit, applied just for this program."
         }
     }
 }
@@ -499,6 +531,18 @@ struct AkaiProgram {
     var filterModSource2: AkaiFilterModSource
     var filterModSource3: AkaiFilterModSource
     var rawData: Data
+
+    /// Heuristic: a program is treated as a DRUM KIT when ANY of its keyzones is
+    /// mapped to a single key (lowKey == highKey) — the shape produced by "Create
+    /// Drum Program" / drum imports. A program can be mixed (some single-key drum
+    /// zones alongside full-range melodic zones) and still counts as a drum kit
+    /// under this rule. This is a live computed classification from the keyzones,
+    /// NOT an on-disk flag: the S3000 format has no program sub-type field, so
+    /// there's nothing to persist and nothing that could break round-tripping on
+    /// real hardware. An empty program (no keyzones) is not a drum kit.
+    var isDrumKit: Bool {
+        keyzones.contains { $0.lowKey == $0.highKey }
+    }
 }
 
 struct AkaiSample: Identifiable {
@@ -676,6 +720,12 @@ struct AkaiMultiFormat {
 // MARK: - Disk Image
 
 class AkaiDiskImage: ObservableObject {
+    /// Serial queue that serialises all imageData mutations (FAT writes, sample
+    /// imports, directory-entry writes). Prevents concurrent addImportedSample
+    /// calls from reading a stale imageData snapshot and clobbering each other's
+    /// directory entries.
+    private let diskQueue = DispatchQueue(label: "AkaiDiskImage.diskQueue")
+
     @Published var isLoaded    = false
     @Published var diskName    = ""
     @Published var samples:  [AkaiSample]      = []
@@ -697,6 +747,15 @@ class AkaiDiskImage: ObservableObject {
     /// NSEvent key monitors (delete-to-remove-sample, space-to-play) check this
     /// and bow out so keystrokes reach the field instead of triggering shortcuts.
     @Published var isEditingText = false
+
+    /// Session-only set of program names created as drum programs this session.
+    /// Not persisted — the S3000 format has no drum-program flag, so once an
+    /// empty drum program is saved and reloaded the only indicator is its
+    /// keyzones being single-key. This covers the window between creation and
+    /// the first keyzone being dragged in.
+    var drumProgramNames: Set<String> = []
+
+    func isDrumProgram(name: String) -> Bool { drumProgramNames.contains(name) }
 
     /// True whenever a Program's keyzone list has an active selection —
     /// ProgramDetailView sets this true/false as selectedKeyzoneIndices changes.
@@ -929,6 +988,13 @@ class AkaiDiskImage: ObservableObject {
                          (UInt32(headerData[AkaiDiskFormat.hdrSampleCountOffset + 2]) << 16) |
                          (UInt32(headerData[AkaiDiskFormat.hdrSampleCountOffset + 3]) << 24)
 
+        // Playback start point: start[4] @ 0x1E. Independent of the loop points;
+        // playback begins here (manual p.129, TRIM page). Usually 0.
+        let sampleStart = UInt32(headerData[AkaiDiskFormat.hdrStartOffset]) |
+                          (UInt32(headerData[AkaiDiskFormat.hdrStartOffset + 1]) << 8) |
+                          (UInt32(headerData[AkaiDiskFormat.hdrStartOffset + 2]) << 16) |
+                          (UInt32(headerData[AkaiDiskFormat.hdrStartOffset + 3]) << 24)
+
         // Read the audio that follows the 0xC0 header across the FAT chain(s).
         var audioData = Data()
         for part in parts {
@@ -988,6 +1054,7 @@ class AkaiDiskImage: ObservableObject {
             sampleRate: sampleRate,
             loopStart: loopStart,
             loopEnd: loopEnd,
+            sampleStart: sampleStart,
             numSamples: numSamples,
             midiRootNote: midiRootNote,
             playbackMode: playbackMode,
@@ -1024,7 +1091,13 @@ class AkaiDiskImage: ObservableObject {
         let rawMidi = fileData.count > 0x10 ? fileData[0x10] : 0xff
         let midiChannel: UInt8 = rawMidi == 0xff ? 0 : rawMidi &+ 1
         let keygroupCount = fileData.count > 0x2A ? fileData[0x2A] : 0
-        let octave = fileData.count > 0x15 ? fileData[0x15] : 0
+        let octave: UInt8 = {
+            // bendRange is stored at 0x27 (up) and 0x15 (down). Take the max
+            // so old disks that only had 0x27 set still parse correctly.
+            let up   = fileData.count > 0x27 ? fileData[0x27] : 0
+            let down = fileData.count > 0x15 ? fileData[0x15] : 0
+            return max(up, down)
+        }()
         // Polyphony @ hdr+0x11: 0-indexed (0=1 voice, 31=32 voices). Default 32 voices.
         let rawPoly = fileData.count > 0x11 ? fileData[0x11] : 31
         let polyphony: UInt8 = rawPoly &+ 1
@@ -1110,7 +1183,8 @@ class AkaiDiskImage: ObservableObject {
                 env2R3:       kg + 0x15 < fileData.count ? fileData[kg + 0x15] : AkaiKeyzoneDefaults.env2R3,
                 env2L3:       kg + 0x16 < fileData.count ? fileData[kg + 0x16] : AkaiKeyzoneDefaults.env2L3,
                 env2R4:       kg + 0x17 < fileData.count ? fileData[kg + 0x17] : AkaiKeyzoneDefaults.env2R4,
-                env2L4:       kg + 0x9F < fileData.count ? fileData[kg + 0x9F] : AkaiKeyzoneDefaults.env2L4))
+                env2L4:       kg + 0x9F < fileData.count ? fileData[kg + 0x9F] : AkaiKeyzoneDefaults.env2L4,
+                pitchMode:    kg + 0x84 < fileData.count ? fileData[kg + 0x84] : 1))
         }
 
         let program = AkaiProgram(name: name, keyzones: keyzones,
@@ -1230,6 +1304,92 @@ class AkaiDiskImage: ObservableObject {
         return progFile
     }
 
+    /// Create a new DRUM program instantly (no folder picker), seeded with ONE
+    /// single-key placeholder keyzone at C1 (note 36, unassigned sample). The
+    /// seed is what makes it register as a drum kit (AkaiProgram.isDrumKit looks
+    /// for a single-key zone) AND — crucially — what makes that classification
+    /// SURVIVE save/close/reopen: the S3000 format has no program sub-type flag,
+    /// so the only way "this is a drum program" persists on disk is as a real
+    /// keygroup. The placeholder uses the drum convention (root C3, Const pitch,
+    /// no loop) so the user's first dragged drum sample lands correctly; they
+    /// assign a sample to it or stack more single-key zones from there.
+    ///
+    /// Built via buildProgramFileData (the same keygroup→bytes builder used on
+    /// every program save), so the on-disk layout is the ordinary, hardware-
+    /// validated program format — nothing non-standard.
+    @discardableResult
+    func createDrumProgram(name rawName: String = "NEW DRUMS") throws -> AkaiProgramFile {
+        guard var data = imageData else { throw AkaiError.noImageLoaded }
+        let name = uniqueProgramName(basedOn: rawName)
+
+        // No seed keyzone — the user drags samples in after creation. Drum-ness
+        // is remembered in drumProgramNames for this session so the drag path
+        // knows to create single-key zones even before any keyzone exists.
+        let file = buildProgramFileData(
+            name: name, midiChannel: 0, bendRange: 2,
+            stereoLevel: 99, basicLoudness: 99,
+            polyphony: 32, priority: .norm, reassignment: .oldest,
+            filterModSource1: .velocity, filterModSource2: .lfo2, filterModSource3: .env2,
+            keyzones: [])
+
+        let bs = AkaiDiskFormat.blockSize
+        let blocksNeeded = (file.count + bs - 1) / bs
+        guard let blocks = findFreeBlocks(count: blocksNeeded, data: data) else {
+            throw AkaiError.diskFull("Not enough space on the disk to create a program.")
+        }
+        guard let dirSlot = findFreeDirectorySlot(data: data) else {
+            throw AkaiError.dataError("Disk directory is full")
+        }
+
+        for i in 0..<blocks.count {
+            let value: UInt16 = (i == blocks.count - 1) ? AkaiDiskFormat.fatEnd : UInt16(blocks[i + 1])
+            setFatValue(block: blocks[i], value: value, data: &data)
+        }
+        for (i, block) in blocks.enumerated() {
+            let srcStart = i * bs
+            let srcEnd = min(srcStart + bs, file.count)
+            let dstStart = block * bs
+            guard dstStart + bs <= data.count else { throw AkaiError.dataError("Block out of range") }
+            let chunk = file[srcStart..<srcEnd]
+            let padded = chunk + Data(repeating: 0, count: bs - (srcEnd - srcStart))
+            data.replaceSubrange(dstStart..<dstStart + bs, with: padded)
+        }
+
+        let startBlock = blocks[0]
+        let totalSize = UInt32(file.count)
+        var entryBytes = Data(repeating: 0, count: AkaiDiskFormat.dirEntrySize)
+        let nameBytes = akaiBytes(from: name, length: 12)
+        for (i, b) in nameBytes.enumerated() { entryBytes[i] = b }
+        entryBytes[16] = AkaiDiskFormat.ftypeProgram
+        entryBytes[17] = UInt8(totalSize & 0xFF)
+        entryBytes[18] = UInt8((totalSize >> 8) & 0xFF)
+        entryBytes[19] = UInt8((totalSize >> 16) & 0xFF)
+        entryBytes[20] = UInt8(startBlock & 0xFF)
+        entryBytes[21] = UInt8((startBlock >> 8) & 0xFF)
+        entryBytes[22] = 0x00; entryBytes[23] = 0x11   // osver 0x1100 (v17.00)
+        data.replaceSubrange(dirSlot..<dirSlot + AkaiDiskFormat.dirEntrySize, with: entryBytes)
+
+        imageData = data
+        freeBlocks = countFreeBlocks(data: data)
+
+        let dirEntry = AkaiDirectoryEntry(
+            name: name, fileType: AkaiDiskFormat.ftypeProgram,
+            startBlock: UInt16(startBlock), size: totalSize,
+            rawEntry: entryBytes, diskOffset: dirSlot)
+        let program = AkaiProgram(name: name, keyzones: [],
+            midiChannel: 0, polyphony: 32, priority: .norm, reassignment: .oldest,
+            bendRange: 2,
+            stereoLevel: 99, basicLoudness: 99,
+            filterModSource1: .velocity, filterModSource2: .lfo2, filterModSource3: .env2,
+            rawData: file)
+        let progFile = AkaiProgramFile(directoryEntry: dirEntry, program: program,
+                                       offset: startBlock * bs)
+        programs.append(progFile)
+        drumProgramNames.insert(name)   // remember it's a drum program this session
+        hasUnsavedChanges = true
+        return progFile
+    }
+
     // MARK: - WAV Export
 
     func exportSampleAsWAV(sample: AkaiSample) throws -> Data {
@@ -1283,7 +1443,10 @@ class AkaiDiskImage: ObservableObject {
             // De-interleave to two mono channels (use channels 0 and 1).
             let (left, right) = Self.deinterleaveStereo(pcmData, channels: numChannels)
             // Base clamped to 10 chars so the -L/-R suffix fits within 12.
-            let stem = String(baseName.prefix(10))
+            // Preserve the trailing characters (usually the unique part, e.g.
+            // number suffixes) rather than the leading ones, so names like
+            // DNB_BREAK_111 / DNB_BREAK_113 don't collide.
+            let stem = Self.sanitizeNamePreservingEnd(baseName, maxLen: 10)
             let l = try addImportedSample(name: "\(stem)-L", sampleRate: UInt32(sampleRate),
                                           numChannels: 1, pcmData: left)
             _ = try addImportedSample(name: "\(stem)-R", sampleRate: UInt32(sampleRate),
@@ -1357,13 +1520,40 @@ class AkaiDiskImage: ObservableObject {
         var hdr = Data(repeating: 0, count: AkaiDiskFormat.sampleHeaderSize)  // 0xC0
 
         hdr[0x00] = 0x03            // blockid (SAMPLE1000_BLOCKID)
-        hdr[0x01] = 0x01            // bandw = 20kHz
+        // bandw @ 0x01: 0x01 = 20kHz band (44.1kHz sample rate), 0x00 = 10kHz
+        // band (22.05kHz). The manual (RECORD, p.148) ties bandwidth directly to
+        // sample rate: 20kHz ⇒ 44.1kHz, 10kHz ⇒ 22.05kHz. The Akai uses THIS
+        // flag (not just srate) to clock playback, so it MUST agree with the
+        // actual rate — hardcoding 0x01 for a 22.05kHz (lo-fi) sample made the
+        // hardware clock it for the 20kHz band and play it back ~an octave too
+        // fast. Derive it from the rate: anything at/above ~33kHz is the 20kHz
+        // band, below is the 10kHz band.
+        hdr[0x01] = sampleRate >= 33075 ? 0x01 : 0x00
         hdr[0x02] = rootNote        // rkey
         let nameBytes = akaiBytes(from: name, length: 12)
         for (i, b) in nameBytes.enumerated() { hdr[AkaiDiskFormat.hdrNameOffset + i] = b }
         hdr[0x0F] = 0x80            // dummy1 (canonical constant)
+        // locat @ 0x16 (4-byte LE): sampler RAM address. The Akai computes this
+        // at load time, but writing 0 causes 22k samples to play at half speed
+        // while 44k samples are unaffected. Hardware-confirmed: all Akai-recorded
+        // samples have locat=131072 (0x20000) as the base. Writing this default
+        // fixes 22k playback speed without breaking factory samples (which have
+        // their own locat preserved via rawHeader in applySampleEdits).
+        hdr[0x16] = 0x00; hdr[0x17] = 0x00; hdr[0x18] = 0x02; hdr[0x19] = 0x00  // 131072
         hdr[0x10] = 0x00           // lnum = 0 loops
-        hdr[0x13] = AkaiSamplePlaybackMode.noLoop.rawValue   // pmode = NOLOOP by default
+        hdr[0x13] = AkaiSamplePlaybackMode.noLoop.rawValue   // pmode = NO LOOP by default.
+                                                              // A freshly imported WAV (one-shot,
+                                                              // drum hit, or break) must NOT loop —
+                                                              // defaulting to a looping mode made
+                                                              // breaks play through then repeat,
+                                                              // which sounds like "dragging/slow" on
+                                                              // hardware. This matches v1.0 behaviour
+                                                              // (44k samples played fine). If the user
+                                                              // wants a loop they set it in the editor,
+                                                              // and applySampleEdits writes their
+                                                              // chosen pmode. (The manual's "loop
+                                                              // always selected on RECORD" applies to
+                                                              // hardware sampling, not WAV import.)
         hdr[0x14] = 0x00           // ctune
         hdr[0x15] = 0x00           // stune
 
@@ -1402,6 +1592,26 @@ class AkaiDiskImage: ObservableObject {
         hdr[0x2D] = UInt8((endMarker >> 8) & 0xFF)
         hdr[0x2E] = UInt8((endMarker >> 16) & 0xFF)
         hdr[0x2F] = UInt8((endMarker >> 24) & 0xFF)               // loop[0].len = numSamples-1
+        // loop[0].time[2] @ 0x30 = 0 for a freshly imported (NoLoop) sample.
+        // 9999=HOLD makes the Akai loop regardless of pmode. Since imports
+        // default to NoLoop, write 0 (OFF) here. If the user later enables
+        // looping, applySampleEdits writes 9999 correctly.
+        hdr[0x30] = 0; hdr[0x31] = 0
+        hdr[0x10] = 0  // lnum=0: no active loops on a fresh NoLoop import
+        // Replicate zeroed loop time across slots 1-3.
+        for slot in 1...3 {
+            let base = 0x26 + slot * 0x0C
+            hdr[base + 0]  = UInt8(endMarker & 0xFF)             // at
+            hdr[base + 1]  = UInt8((endMarker >> 8) & 0xFF)
+            hdr[base + 2]  = UInt8((endMarker >> 16) & 0xFF)
+            hdr[base + 3]  = UInt8((endMarker >> 24) & 0xFF)
+            hdr[base + 4]  = 0; hdr[base + 5] = 0                 // flen
+            hdr[base + 6]  = UInt8(endMarker & 0xFF)             // len
+            hdr[base + 7]  = UInt8((endMarker >> 8) & 0xFF)
+            hdr[base + 8]  = UInt8((endMarker >> 16) & 0xFF)
+            hdr[base + 9]  = UInt8((endMarker >> 24) & 0xFF)
+            hdr[base + 10] = 0; hdr[base + 11] = 0   // time = 0 (OFF) for NoLoop default
+        }
 
         // stpaira[2] @ 0x88 = 0xFFFF (none) — canonical AKAI_SAMPLE1000_STPAIRA_NONE.
         hdr[AkaiDiskFormat.hdrStPairOffset]     = 0xFF
@@ -1422,9 +1632,12 @@ class AkaiDiskImage: ObservableObject {
     @discardableResult
     func addImportedSample(name rawName: String, sampleRate: UInt32,
                            numChannels: Int, pcmData: Data) throws -> AkaiSample {
+        // Serialise on diskQueue so concurrent imports don't read stale imageData
+        // and clobber each other's FAT chains or directory entries.
+        return try diskQueue.sync {
         guard var data = imageData else { throw AkaiError.noImageLoaded }
 
-        let name = Self.sanitizeName(rawName.isEmpty ? "NEW SAMPLE" : rawName)
+        let name = uniqueSampleName(basedOn: rawName.isEmpty ? "NEW SAMPLE" : rawName)
         let numSamples = UInt32(pcmData.count) / UInt32(max(1, numChannels)) / 2
         let header = buildSampleHeader(name: name, sampleRate: sampleRate,
                                        numSamples: numSamples, rootNote: 60)
@@ -1487,7 +1700,7 @@ class AkaiDiskImage: ObservableObject {
             rawEntry: entryBytes, diskOffset: dirSlot)
         let hdrModel = AkaiSampleHeader(
             name: name, sampleRate: sampleRate, loopStart: 0,
-            loopEnd: numSamples > 0 ? numSamples - 1 : 0, numSamples: numSamples,
+            loopEnd: numSamples > 0 ? numSamples - 1 : 0, sampleStart: 0, numSamples: numSamples,
             midiRootNote: 60, playbackMode: .noLoop, bitDepth: 16,
             numChannels: numChannels, fineTune: 0, semitoneTune: 0, loudness: 99, rawHeader: header)
         let newSample = AkaiSample(
@@ -1499,13 +1712,14 @@ class AkaiDiskImage: ObservableObject {
             samples.append(newSample)
             hasUnsavedChanges = true
         } else {
-            DispatchQueue.main.sync {
+            DispatchQueue.main.async {
                 self.freeBlocks = self.countFreeBlocks(data: data)
                 self.samples.append(newSample)
                 self.hasUnsavedChanges = true
             }
         }
         return newSample
+        } // end diskQueue.sync
     }
 
     /// Number of free (unallocated) blocks currently available on the disk.
@@ -1612,6 +1826,203 @@ class AkaiDiskImage: ObservableObject {
         return samples.first(where: { $0.id == clone.id }) ?? clone
     }
 
+    /// TEST FEATURE — "clone sample with a different loop."
+    ///
+    /// Purpose: verify on real S3000XL hardware that the sanctioned way to get
+    /// different keygroups looping DIFFERENT regions of the same audio is to
+    /// make separate sample copies, each with its own loop points, and assign
+    /// each to its own keygroup. The S3000 format fuses a sample's header
+    /// (which carries the loop points) to its audio in one FAT chain and offers
+    /// no way for two headers to share one audio region — so a genuine copy is
+    /// unavoidable, exactly as the hardware's own COPY function does (manual
+    /// p.93 frames the per-program loop-mode override as a way to AVOID this
+    /// copy, confirming a copy is otherwise required for real loop differences).
+    ///
+    /// This clones `id` (fresh blocks, fresh directory entry, unique name,
+    /// duplicated audio — byte-for-byte what the Akai's COPY produces) and then
+    /// sets the clone's loop to [loopStart, loopEnd) and forces playbackMode to
+    /// .loop so the loop is actually audible when triggered. loopEnd is clamped
+    /// to the sample length and loopStart below loopEnd. Does NOT write to disk
+    /// immediately — persist via Save, then write the .img to a floppy to test.
+    ///
+    /// Everything it does routes through the SAME primitives every other
+    /// sample-create path uses (addImportedSample + applySampleEdits), so the
+    /// bytes it writes are the ordinary, hardware-validated sample layout — the
+    /// only thing "test" about it is the workflow it's exercising, not any
+    /// novel/unsafe byte format.
+    @discardableResult
+    func cloneSampleWithLoop(id: UUID, loopStart: UInt32, loopEnd: UInt32) throws -> AkaiSample {
+        guard let src = samples.first(where: { $0.id == id }) else {
+            throw AkaiError.dataError("Sample to clone not found")
+        }
+        // Clone first (carries over root/tune/mode/loop from the source), then
+        // override just the loop region + mode on the fresh copy.
+        var clone = try cloneSample(id: id)
+
+        let total = src.header.numSamples
+        let end = min(loopEnd, total)
+        let start = min(loopStart, end > 0 ? end - 1 : 0)
+        clone.header.loopStart = start
+        clone.header.loopEnd = end
+        clone.header.playbackMode = .loop   // make the loop audible on trigger
+        applySampleEdits(clone)
+
+        return samples.first(where: { $0.id == clone.id }) ?? clone
+    }
+
+    /// TEST FEATURE — "clone sample with a different playback START point."
+    ///
+    /// The S3000 format has NO per-keyzone start field (a velocity zone stores
+    /// only sample name/velocity/tune/volume/pan/filter-trim/pmode). So to make
+    /// different keygroups BEGIN the same audio at different absolute points,
+    /// the only hardware-faithful route is separate sample copies, each with its
+    /// own `start` (0x1E), assigned to its own keygroup — same pattern as the
+    /// different-loops case. This clones `id` and sets the clone's `start` to
+    /// `sampleStart` (clamped into the buffer). Persist via Save.
+    ///
+    /// Like cloneSampleWithLoop, this routes through the ordinary create/edit
+    /// primitives, so the only "test" aspect is the workflow — with the caveat
+    /// that the `start`/0x1E write itself is not yet hardware byte-diff-confirmed
+    /// (see AkaiSampleHeader.sampleStart).
+    @discardableResult
+    func cloneSampleWithStart(id: UUID, sampleStart: UInt32) throws -> AkaiSample {
+        guard let src = samples.first(where: { $0.id == id }) else {
+            throw AkaiError.dataError("Sample to clone not found")
+        }
+        var clone = try cloneSample(id: id)
+        let total = src.header.numSamples
+        clone.header.sampleStart = min(sampleStart, total > 0 ? total - 1 : 0)
+        applySampleEdits(clone)
+        return samples.first(where: { $0.id == clone.id }) ?? clone
+    }
+
+    /// EXPERIMENTAL / UNSAFE — "shared-PCM clone" for hardware testing ONLY.
+    ///
+    /// ⚠️ Creates a NON-STANDARD on-disk structure that real S3000 hardware and
+    /// akaiutil never produce. It may fail to load, play garbage, or (see the
+    /// delete caveat below) corrupt the source sample. TEST ONLY ON A THROWAWAY
+    /// FLOPPY / DISPOSABLE .img — never on a disk you care about.
+    ///
+    /// What it does: instead of duplicating the audio (what cloneSample does),
+    /// it allocates ONE new block for a fresh header, and chains that header
+    /// block directly into the SOURCE sample's existing audio blocks. On disk
+    /// the new sample then reads as [newHeader][source's audio] with the audio
+    /// bytes physically shared — no second copy. The new header gets its own
+    /// name and its own loop/start, and we copy the source's `locat` (0x16) in
+    /// case the hardware uses that field to locate sample data (a comment in
+    /// buildSampleHeader records that a WRONG locat makes the S3000 "start
+    /// loading, show the name, then stop" — i.e. locat is NOT inert, which is
+    /// exactly why this experiment might work).
+    ///
+    /// THE POINT: settle empirically whether the format can share PCM. If the
+    /// S3000XL loads BOTH samples and plays the shared audio, sharing is real.
+    /// If it rejects the disk or plays noise, it's confirmed impossible and we
+    /// keep the full-copy approach.
+    ///
+    /// Known hazards (deliberately not "fixed", since this is a throwaway test):
+    ///   • deleteSample frees a sample's whole FAT chain by startBlock — deleting
+    ///     EITHER the source or this shared clone will free the shared audio
+    ///     blocks out from under the other. Don't delete either on the test disk.
+    ///   • The disk map / block accounting will show the shared blocks as owned
+    ///     by whichever sample is walked last; free-space math still works
+    ///     (blocks aren't double-counted as free), but ownership display is fuzzy.
+    ///   • blocksNeeded/space checks assume a full copy; here we need only 1 block.
+    @discardableResult
+    func cloneSampleSharedPCM_EXPERIMENTAL(id: UUID) throws -> AkaiSample {
+        guard var data = imageData else { throw AkaiError.noImageLoaded }
+        guard let src = samples.first(where: { $0.id == id }) else {
+            throw AkaiError.dataError("Sample to clone not found")
+        }
+
+        let bs = AkaiDiskFormat.blockSize
+        let headerSize = AkaiDiskFormat.sampleHeaderSize
+
+        // The source's on-disk chain is [headerBlock, audio blocks...]. We need
+        // its AUDIO blocks (everything after the header region). Header is 0xC0
+        // bytes = well under one 1024-byte block, so the audio blocks are the
+        // source chain from index 1 onward.
+        let srcStartBlock = src.offset / bs
+        let srcChain = fatChain(from: srcStartBlock, data: data)
+        guard srcChain.count >= 2 else {
+            throw AkaiError.dataError("Source sample has no separate audio blocks to share (too small).")
+        }
+        let srcAudioBlocks = Array(srcChain.dropFirst())   // blocks holding the PCM
+
+        // Allocate ONE new block for the new header, plus a directory slot.
+        guard let headerBlocks = findFreeBlocks(count: 1, data: data) else {
+            throw AkaiError.diskFull("No free block for the shared-PCM header.")
+        }
+        guard let dirSlot = findFreeDirectorySlot(data: data) else {
+            throw AkaiError.dataError("Disk directory is full")
+        }
+        let newHeaderBlock = headerBlocks[0]
+
+        // Build a fresh header for the new sample (own name, carried-over root/
+        // tune/loop/start), then copy the source's locat (0x16) verbatim.
+        let newName = uniqueSampleName(basedOn: src.header.name)
+        var hdr = buildSampleHeader(name: newName, sampleRate: src.header.sampleRate,
+                                    numSamples: src.header.numSamples, rootNote: src.header.midiRootNote)
+        // Carry over loop + start so the shared clone can differ musically.
+        let le = src.header.loopEnd
+        hdr[0x26] = UInt8(le & 0xFF); hdr[0x27] = UInt8((le >> 8) & 0xFF)
+        hdr[0x28] = UInt8((le >> 16) & 0xFF); hdr[0x29] = UInt8((le >> 24) & 0xFF)
+        let ll = le > src.header.loopStart ? le - src.header.loopStart : 0
+        hdr[0x2C] = UInt8(ll & 0xFF); hdr[0x2D] = UInt8((ll >> 8) & 0xFF)
+        hdr[0x2E] = UInt8((ll >> 16) & 0xFF); hdr[0x2F] = UInt8((ll >> 24) & 0xFF)
+        // ISOLATION TEST (round 2): we now leave locat (0x16) at ZERO, exactly
+        // as buildSampleHeader does for every normal sample, instead of copying
+        // the source's locat. Round 1 (which copied locat AND chained the FAT)
+        // worked on real hardware. If THIS version also works, the FAT chain
+        // alone is the sharing mechanism and locat is irrelevant/recomputed by
+        // the sampler on load — which means the production version never needs
+        // to touch the sampler-managed locat field. If this version FAILS where
+        // round 1 worked, locat was load-bearing and must be set correctly.
+        // (locat intentionally NOT copied here.)
+
+        // FAT: new header block -> first source audio block -> ... (sharing the
+        // source's existing audio chain, which already ends in FILEEND).
+        setFatValue(block: newHeaderBlock, value: UInt16(srcAudioBlocks[0]), data: &data)
+        // (We do NOT re-terminate the source audio chain; it keeps its own end.)
+
+        // Write the header into the new header block (zero-padded to a full block).
+        let dst = newHeaderBlock * bs
+        guard dst + bs <= data.count else { throw AkaiError.dataError("Header block out of range") }
+        let padded = hdr + Data(repeating: 0, count: bs - hdr.count)
+        data.replaceSubrange(dst..<dst + bs, with: padded)
+
+        // Directory entry: size = header + source audio (so the hardware reads
+        // the full length through the shared chain).
+        let audioBytes = Int(src.directoryEntry.size) - headerSize
+        let totalSize = UInt32(headerSize + max(0, audioBytes))
+        var entryBytes = Data(repeating: 0, count: AkaiDiskFormat.dirEntrySize)
+        let nameBytes = akaiBytes(from: newName, length: 12)
+        for (i, b) in nameBytes.enumerated() { entryBytes[i] = b }
+        entryBytes[16] = AkaiDiskFormat.ftypeSample
+        entryBytes[17] = UInt8(totalSize & 0xFF)
+        entryBytes[18] = UInt8((totalSize >> 8) & 0xFF)
+        entryBytes[19] = UInt8((totalSize >> 16) & 0xFF)
+        entryBytes[20] = UInt8(newHeaderBlock & 0xFF)
+        entryBytes[21] = UInt8((newHeaderBlock >> 8) & 0xFF)
+        data.replaceSubrange(dirSlot..<dirSlot + AkaiDiskFormat.dirEntrySize, with: entryBytes)
+
+        imageData = data
+        freeBlocks = countFreeBlocks(data: data)
+
+        let dirEntry = AkaiDirectoryEntry(
+            name: newName, fileType: AkaiDiskFormat.ftypeSample,
+            startBlock: UInt16(newHeaderBlock), size: totalSize,
+            rawEntry: entryBytes, diskOffset: dirSlot)
+        var hdrModel = src.header
+        hdrModel.name = newName
+        hdrModel.rawHeader = hdr
+        let newSample = AkaiSample(
+            directoryEntry: dirEntry, header: hdrModel, audioData: src.audioData,
+            offset: newHeaderBlock * bs)
+        samples.append(newSample)
+        hasUnsavedChanges = true
+        return newSample
+    }
+
     private func parseWAV(_ data: Data) throws -> (Data, Int, Int, Int) {
         // Route by file magic: RIFF/WAVE → WAV, FORM/AIFF or FORM/AIFC → AIFF.
         if data.count > 12,
@@ -1640,6 +2051,19 @@ class AkaiDiskImage: ObservableObject {
             offset += size + (size % 2)
         }
         guard !pcmData.isEmpty else { throw AkaiError.dataError("No audio data in WAV") }
+        // 24-bit needs converting to 16-bit before anything downstream (like
+        // deinterleaveStereo) touches it — that code assumes 2 bytes/sample.
+        // Take the top 2 of each 3 LE bytes (drop the least-significant byte).
+        if bitsPerSample == 24 {
+            let bytesPerFrame = 3 * numChannels
+            var out = Data(); out.reserveCapacity((pcmData.count / bytesPerFrame) * 2 * numChannels)
+            var i = 0
+            while i + bytesPerFrame <= pcmData.count {
+                for ch in 0..<numChannels { out.append(pcmData[i + ch*3 + 1]); out.append(pcmData[i + ch*3 + 2]) }
+                i += bytesPerFrame
+            }
+            return (out, sampleRate, numChannels, 16)
+        }
         return (pcmData, sampleRate, numChannels, bitsPerSample)
     }
 
@@ -1710,9 +2134,28 @@ class AkaiDiskImage: ObservableObject {
 
         var pcmData = data.subdata(in: soundDataOffset..<soundDataOffset + soundDataSize)
 
-        // AIFF is big-endian 16-bit; swap bytes to little-endian for the Akai.
-        // AIFC 'sowt' is already little-endian — skip the swap.
-        if bitsPerSample == 16 && !isSowt {
+        if bitsPerSample == 24 {
+            // AIFF is big-endian: 24-bit samples are stored [MSB, mid, LSB]
+            // per channel. Keep the top 16 bits (MSB, mid), swapped into
+            // little-endian order for the Akai (mid, MSB) — same top-16-bits
+            // truncation as the WAV 24-bit path in parseWAV, just accounting
+            // for AIFF's opposite byte order.
+            let bytesPerFrame = 3 * numChannels
+            var out = Data(); out.reserveCapacity((pcmData.count / bytesPerFrame) * 2 * numChannels)
+            var i = 0
+            while i + bytesPerFrame <= pcmData.count {
+                for ch in 0..<numChannels {
+                    let base = i + ch * 3
+                    out.append(pcmData[base + 1])
+                    out.append(pcmData[base])
+                }
+                i += bytesPerFrame
+            }
+            pcmData = out
+            bitsPerSample = 16
+        } else if bitsPerSample == 16 && !isSowt {
+            // AIFF is big-endian 16-bit; swap bytes to little-endian for the Akai.
+            // AIFC 'sowt' is already little-endian — skip the swap.
             pcmData.withUnsafeMutableBytes { (buf: UnsafeMutableRawBufferPointer) in
                 var i = 0
                 while i + 1 < buf.count {
@@ -2160,10 +2603,9 @@ class AkaiDiskImage: ObservableObject {
     }
 
     /// Build a blank but VALID Akai S3000 HD floppy image (1600 blocks) and load
-    /// it. Structure verified byte-for-byte against a real Greaseweazle-formatted
-    /// disk: floppy-header file[64] with the 0xFF volume flag in slot 0, FAT with
-    /// the 17 system blocks (header + 12 voldir blocks) marked 0x4000 and the rest
-    /// free, an empty volume directory at block 5, and an optional volume label.
+    /// it. Blocks 0–4 are seeded from hardware-captured factory defaults so global
+    /// settings (transpose, tune, MIDI, etc.) start correct. Structure verified
+    /// byte-for-byte against a real S3000XL formatted disk.
     /// Writes the file to `url`, then loads it as the active image.
     func createBlankImage(at url: URL, volumeName: String = "VOLUME") throws {
         let bs = AkaiDiskFormat.blockSize
@@ -2171,47 +2613,84 @@ class AkaiDiskImage: ObservableObject {
         var data = Data(repeating: 0, count: total)
 
         // --- Floppy header file[64] (block 0) ---
-        // Each 24-byte entry: 12 spaces + tag(0000040b) + type + 6 zero + osver(0011).
-        // Slot 0 carries the S3000 volume flag (type 0xFF); slots 1..63 are 0x00.
-        let spaces: [UInt8] = Array(repeating: 0x20, count: 12)
+        // Hardware-captured pattern from fresh S3000XL format: each 24-byte slot
+        // contains the volume name (Akai charset), tag 00 00 04 0b, type (0xFF
+        // for slot 0 only), byte 18 = 0x10 (undocumented field), osver 0x11.
+        let labelBytes = akaiBytes(from: Self.sanitizeName(volumeName), length: 12)
         for i in 0..<AkaiDiskFormat.dirEntryCount {
             let base = i * AkaiDiskFormat.dirEntrySize
-            for (j, b) in spaces.enumerated() { data[base + j] = b }
+            for (j, b) in labelBytes.enumerated() { data[base + j] = b }
             data[base + 12] = 0x00; data[base + 13] = 0x00
-            data[base + 14] = 0x04; data[base + 15] = 0x0b   // tag
-            data[base + 16] = (i == 0) ? 0xFF : 0x00          // type: volume flag in slot 0
-            // bytes 17..21 stay zero
-            data[base + 22] = 0x00; data[base + 23] = 0x11    // osver 0x1100
+            data[base + 14] = 0x04; data[base + 15] = 0x0b
+            data[base + 16] = (i == 0) ? 0xFF : 0x00
+            data[base + 18] = 0x10   // hardware-confirmed: factory disks have 0x10 here
+            data[base + 23] = 0x11   // osver
         }
 
-        // --- FAT (at 0x600): system blocks 0..16 = 0x4000, rest = 0x0000 (free) ---
-        // 17 system blocks = 5 header blocks + 12 volume-directory blocks.
+        // --- FAT (at 0x600): system blocks 0..16 = 0x4000, rest = 0x0000 ---
         let systemBlocks = AkaiDiskFormat.volDirStartBlock
-            + (AkaiDiskFormat.volDirEntryCount * AkaiDiskFormat.dirEntrySize + bs - 1) / bs  // 5 + 12 = 17
+            + (AkaiDiskFormat.volDirEntryCount * AkaiDiskFormat.dirEntrySize + bs - 1) / bs
         for block in 0..<systemBlocks {
             setFatValue(block: block, value: AkaiDiskFormat.fatSystem, data: &data)
         }
-        // Remaining blocks already 0x0000 (free).
 
-        // --- Volume label (akai_flvol_label_s name field at 0x1280) ---
-        let labelBytes = akaiBytes(from: Self.sanitizeName(volumeName), length: 12)
+        // --- Volume label at 0x1280 ---
         let labelOffset = 0x1280
         if labelOffset + 12 <= data.count {
             for (i, b) in labelBytes.enumerated() { data[labelOffset + i] = b }
         }
+        // Hardware-confirmed: osver byte after label
+        if labelOffset + 15 < data.count { data[labelOffset + 15] = 0x11 }
 
-        // Volume directory at block 5 is already all-zero (empty slots).
+        // --- Global settings (blk4 + 0x292–0x299) ---
+        // Captured from S3000XL with factory defaults. These bytes control global
+        // settings loaded on disk open. Leaving them zero causes corrupt transpose
+        // and other global state when the Akai saves back.
+        let g = 4 * bs + 0x292
+        data[g + 0] = 0x01   // unknown global field
+        data[g + 4] = 0x32   // = 50
+        data[g + 5] = 0x09   // = 9
+        data[g + 6] = 0x0c   // = 12
+        data[g + 7] = 0xff   // = 255
 
         try data.write(to: url, options: .atomic)
         try load(from: url)
     }
 
+    /// App version string stamped into every saved image at 0x128C (8 bytes,
+    /// ASCII, right after the 12-byte volume label). Lets you confirm which
+    /// build wrote a given .img — visible via hex dump at offset 0x128C.
+    static let imageVersionTag = "AKE-1.2 "   // 8 bytes exactly
+
     func saveImageToDisk() throws {
-        guard let data = imageData, let url = imageURL else {
+        guard var data = imageData, let url = imageURL else {
             throw AkaiError.noImageLoaded
         }
+        // Stamp the app version at 0x128C (8 bytes after volume label).
+        let tag = Array(Self.imageVersionTag.utf8.prefix(8))
+        for (i, b) in tag.enumerated() { data[0x128C + i] = b }
+        imageData = data
         try data.write(to: url, options: .atomic)
         hasUnsavedChanges = false
+    }
+
+    /// Returns the last track (0-based, 0–159) that contains used blocks,
+    /// by scanning the FAT. Used to pass --tracks=0-N to Greaseweazle so
+    /// writes stop early rather than writing the whole empty disk.
+    func lastUsedTrack() -> Int? {
+        guard let data = imageData else { return nil }
+        let bs = AkaiDiskFormat.blockSize
+        let fatOffset = 0x600
+        let totalBlocks = data.count / bs
+        var lastUsed = 0
+        for blk in 0..<totalBlocks {
+            guard fatOffset + blk * 2 + 1 < data.count else { break }
+            let entry = UInt16(data[fatOffset + blk * 2]) |
+                        (UInt16(data[fatOffset + blk * 2 + 1]) << 8)
+            if entry != 0x0000 { lastUsed = blk }
+        }
+        // Akai double-sided: 5 sectors/side × 2 sides = 10 blocks per cylinder
+        return lastUsed / 10
     }
 
     /// Rename the disk's volume label (akai_flvol_label_s.name @ absolute 0x1280).
@@ -2240,13 +2719,25 @@ class AkaiDiskImage: ObservableObject {
     /// picked up by a later Save All (saveImageToDisk). Updates the samples model
     /// too. Returns silently if no image is loaded.
     func applySampleEdits(_ sample: AkaiSample) {
+        diskQueue.sync {
         guard var data = imageData else { return }
         var hdr = sample.header.rawHeader
         guard hdr.count >= AkaiDiskFormat.sampleHeaderSize else { return }
         hdr[0x02] = sample.header.midiRootNote
         hdr[0x13] = sample.header.playbackMode.rawValue
+        // lnum @ 0x10: number of active loops. Hardware-confirmed: factory samples
+        // with a loop have lnum=1; samples with no loop have lnum=0. Writing 0
+        // even when loop points are set causes wrong playback on hardware.
+        let lnumLoopLen = sample.header.loopEnd > sample.header.loopStart
+            ? sample.header.loopEnd - sample.header.loopStart : 0
+        hdr[0x10] = lnumLoopLen > 0 ? 1 : 0
         hdr[0x14] = UInt8(bitPattern: sample.header.fineTune)
         hdr[0x15] = UInt8(bitPattern: sample.header.semitoneTune)
+        let ss = sample.header.sampleStart
+        hdr[AkaiDiskFormat.hdrStartOffset]     = UInt8(ss & 0xFF)
+        hdr[AkaiDiskFormat.hdrStartOffset + 1] = UInt8((ss >> 8) & 0xFF)
+        hdr[AkaiDiskFormat.hdrStartOffset + 2] = UInt8((ss >> 16) & 0xFF)
+        hdr[AkaiDiskFormat.hdrStartOffset + 3] = UInt8((ss >> 24) & 0xFF)
         // loop[0]: `at` is the loop's RIGHT-HAND boundary (the return-to point),
         // not the start — see the doc comment in parseSample for the hardware
         // cross-reference that corrected this. So `at` = loopEnd, `len` =
@@ -2262,6 +2753,30 @@ class AkaiDiskImage: ObservableObject {
             ? sample.header.loopEnd - sample.header.loopStart : 0
         hdr[0x2C] = UInt8(loopLen & 0xFF); hdr[0x2D] = UInt8((loopLen >> 8) & 0xFF)
         hdr[0x2E] = UInt8((loopLen >> 16) & 0xFF); hdr[0x2F] = UInt8((loopLen >> 24) & 0xFF)
+        // loop[0].time[2] @ 0x30 = 9999 (HOLD) when there IS a loop, else 0 (OFF).
+        // HARDWARE-CONFIRMED: 9999 shows "time:HOLD" and loops; 0 shows
+        // "time:OFF" and does not loop (factory SINE/PULSE all use 9999). A
+        // looping sample MUST have 9999 here or it won't loop on real hardware.
+        let loopTime: UInt16 = loopLen > 0 ? 9999 : 0
+        hdr[0x30] = UInt8(loopTime & 0xFF); hdr[0x31] = UInt8((loopTime >> 8) & 0xFF)
+        // lnum @ 0x10: number of active loops. Factory samples with a loop have
+        // lnum=1; no-loop samples have lnum=0. Hardware-confirmed against SINE.
+        hdr[0x10] = loopLen > 0 ? 1 : 0
+        // Replicate the loop across slots 1–3 (matching a real recorded sample)
+        // when there IS a loop; clear them when there isn't.
+        for slot in 1...3 {
+            let base = 0x26 + slot * 0x0C
+            if loopLen > 0 {
+                hdr[base + 0] = UInt8(le & 0xFF); hdr[base + 1] = UInt8((le >> 8) & 0xFF)
+                hdr[base + 2] = UInt8((le >> 16) & 0xFF); hdr[base + 3] = UInt8((le >> 24) & 0xFF)
+                hdr[base + 4] = 0; hdr[base + 5] = 0
+                hdr[base + 6] = UInt8(loopLen & 0xFF); hdr[base + 7] = UInt8((loopLen >> 8) & 0xFF)
+                hdr[base + 8] = UInt8((loopLen >> 16) & 0xFF); hdr[base + 9] = UInt8((loopLen >> 24) & 0xFF)
+                hdr[base + 10] = UInt8(loopTime & 0xFF); hdr[base + 11] = UInt8((loopTime >> 8) & 0xFF)
+            } else {
+                for i in 0..<0x0C { hdr[base + i] = 0 }
+            }
+        }
 
         let chain = fatChain(from: sample.offset / AkaiDiskFormat.blockSize, data: data)
         let bs = AkaiDiskFormat.blockSize
@@ -2284,6 +2799,7 @@ class AkaiDiskImage: ObservableObject {
             samples[index] = updated
         }
         hasUnsavedChanges = true
+        } // end diskQueue.sync
     }
 
     /// Patch a raw sample header with correct S1000/S3000 offsets and write to disk.
@@ -2308,6 +2824,12 @@ class AkaiDiskImage: ObservableObject {
         hdr[0x14] = UInt8(bitPattern: sample.header.fineTune)
         // Semitone tune (signed)
         hdr[0x15] = UInt8(bitPattern: sample.header.semitoneTune)
+        // Playback start point: start[4] @ 0x1E (independent of loop points).
+        let ss = sample.header.sampleStart
+        hdr[AkaiDiskFormat.hdrStartOffset]     = UInt8(ss & 0xFF)
+        hdr[AkaiDiskFormat.hdrStartOffset + 1] = UInt8((ss >> 8) & 0xFF)
+        hdr[AkaiDiskFormat.hdrStartOffset + 2] = UInt8((ss >> 16) & 0xFF)
+        hdr[AkaiDiskFormat.hdrStartOffset + 3] = UInt8((ss >> 24) & 0xFF)
         // Loop: `at` is the loop's RIGHT-HAND boundary (return-to point), not
         // the start — see parseSample's doc comment for the hardware
         // cross-reference that corrected this. at = loopEnd, len = end-start.
@@ -2327,6 +2849,28 @@ class AkaiDiskImage: ObservableObject {
         hdr[0x2D] = UInt8((loopLen >> 8) & 0xFF)
         hdr[0x2E] = UInt8((loopLen >> 16) & 0xFF)
         hdr[0x2F] = UInt8((loopLen >> 24) & 0xFF)
+        // loop[0].time[2] @ 0x30 = 9999 (HOLD) when looping, else 0 (OFF).
+        // Hardware-confirmed: 9999=HOLD loops, 0=OFF doesn't. See
+        // buildSampleHeader/applySampleEdits.
+        let loopTime: UInt16 = loopLen > 0 ? 9999 : 0
+        hdr[0x30] = UInt8(loopTime & 0xFF)
+        hdr[0x31] = UInt8((loopTime >> 8) & 0xFF)
+        // lnum @ 0x10: 1 when looping, 0 otherwise. Hardware-confirmed.
+        hdr[0x10] = loopLen > 0 ? 1 : 0
+        // Replicate loop across slots 1–3 when looping; clear otherwise.
+        for slot in 1...3 {
+            let base = 0x26 + slot * 0x0C
+            if loopLen > 0 {
+                hdr[base + 0] = UInt8(le & 0xFF); hdr[base + 1] = UInt8((le >> 8) & 0xFF)
+                hdr[base + 2] = UInt8((le >> 16) & 0xFF); hdr[base + 3] = UInt8((le >> 24) & 0xFF)
+                hdr[base + 4] = 0; hdr[base + 5] = 0
+                hdr[base + 6] = UInt8(loopLen & 0xFF); hdr[base + 7] = UInt8((loopLen >> 8) & 0xFF)
+                hdr[base + 8] = UInt8((loopLen >> 16) & 0xFF); hdr[base + 9] = UInt8((loopLen >> 24) & 0xFF)
+                hdr[base + 10] = UInt8(loopTime & 0xFF); hdr[base + 11] = UInt8((loopTime >> 8) & 0xFF)
+            } else {
+                for i in 0..<0x0C { hdr[base + i] = 0 }
+            }
+        }
         // Loudness is per-keygroup in S3000, not in sample header — skip for now
 
         let chain = fatChain(from: sample.offset / AkaiDiskFormat.blockSize, data: data)
@@ -2363,6 +2907,9 @@ class AkaiDiskImage: ObservableObject {
         if fileData.count > 0x0C { fileData[0x0C] = programFile.program.midiChannel }
         if fileData.count > 0x0D { fileData[0x0D] = programFile.program.polyphony }
         if fileData.count > 0x0E { fileData[0x0E] = programFile.program.bendRange }
+        // Also write bend up/down at their confirmed offsets.
+        if fileData.count > 0x27 { fileData[0x27] = programFile.program.bendRange }
+        if fileData.count > 0x15 { fileData[0x15] = programFile.program.bendRange }
         let chain = fatChain(from: programFile.offset / AkaiDiskFormat.blockSize, data: data)
         let bs = AkaiDiskFormat.blockSize
         for (i, block) in chain.enumerated() {
@@ -2475,13 +3022,52 @@ class AkaiDiskImage: ObservableObject {
         return (out, outRate)
     }
 
-    /// Sanitize and truncate a filename stem for use as an Akai sample name,
-    /// preserving the trailing characters (which are usually the unique part)
-    /// rather than the leading characters when truncation is needed.
+    /// Sanitizes a name for the Akai charset and truncates it to maxLen,
+    /// always keeping the leading characters and cutting off whatever
+    /// doesn't fit at the end — same simple rule as sanitizeName()'s 12-char
+    /// clamp, just parameterized to an arbitrary length (used here for the
+    /// 10-char base before a "-L"/"-R" stereo suffix is appended). Function
+    /// name is kept as-is for call-site stability even though it no longer
+    /// preserves the end — earlier attempts at guessing which end holds the
+    /// unique part (suffix, or head+tail) proved less predictable than just
+    /// always truncating the same way.
     static func sanitizeNamePreservingEnd(_ raw: String, maxLen: Int) -> String {
-        let sanitized = sanitizeName(raw)
-        if sanitized.count <= maxLen { return sanitized }
-        return String(sanitized.suffix(maxLen))
+        let upper = raw.uppercased()
+        let filtered = String(upper.map { ch -> Character in
+            allowedNameCharacters.contains(ch) ? ch : "-"
+        })
+        return String(filtered.prefix(maxLen))
+    }
+
+    /// If `candidate` is already in `usedNames` (either an existing on-disk
+    /// sample or another name already assigned earlier in this import
+    /// batch), disambiguates by overwriting the trailing characters with an
+    /// incrementing counter: the last character becomes "1", "2", ... "9"
+    /// for the first nine collisions, then — if still colliding — the last
+    /// TWO characters become "10", "11", "12"... This mirrors what someone
+    /// doing this by hand would do: keep as much of the original name as
+    /// possible and only touch the very end. Adds whatever name is returned
+    /// to `usedNames` so later calls in the same batch see it as taken.
+    static func disambiguateSampleName(_ candidate: String, usedNames: inout Set<String>) -> String {
+        guard usedNames.contains(candidate) else {
+            usedNames.insert(candidate)
+            return candidate
+        }
+        var counter = 1
+        while counter < 1000 {
+            let suffix = String(counter)
+            guard candidate.count >= suffix.count else { break }
+            let attempt = String(candidate.prefix(candidate.count - suffix.count)) + suffix
+            if !usedNames.contains(attempt) {
+                usedNames.insert(attempt)
+                return attempt
+            }
+            counter += 1
+        }
+        // Unreachable in any realistic batch size — accept the collision
+        // rather than loop forever.
+        usedNames.insert(candidate)
+        return candidate
     }
     static let allowedNameCharacters = Set("ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 #+-.")
 
@@ -2609,6 +3195,7 @@ class AkaiDiskImage: ObservableObject {
             file[kg + 0x9D] = kz?.env2R2 ?? 50        // ENV2 Rate 2   — hardware-confirmed kg+0x9D
             file[kg + 0x9E] = kz?.env2L2 ?? 99        // ENV2 Level 2  — hardware-confirmed kg+0x9E
             file[kg + 0x9F] = kz?.env2L4 ?? 0         // ENV2 Level 4  — hardware-confirmed kg+0x9F
+            file[kg + 0x84] = kz?.pitchMode ?? 1      // SMP1 pitch mode: 0=TRACK, 1=CONST — confirmed kg+0x84
             file[kg + 0x95] = kz?.filterResonance ?? 0
             file[kg + 0x97] = UInt8(bitPattern: kz?.filterModDepth1 ?? 0)  // Mod depth #1 (Velocity→Freq) — confirmed offset
             file[kg + 0x98] = UInt8(bitPattern: kz?.filterModDepth2 ?? 0)  // Mod depth #2 (Lfo2→Freq) — confirmed offset
@@ -2971,24 +3558,5 @@ enum AkaiError: LocalizedError {
         case .noImageLoaded:       return "No disk image loaded"
         case .diskFull(let s):     return s
         }
-    }
-}
-
-// MARK: - Data Extensions
-
-extension Data {
-    mutating func appendLE16(_ v: UInt16) { append(UInt8(v & 0xFF)); append(UInt8(v >> 8)) }
-    mutating func appendLE32(_ v: UInt32) {
-        append(UInt8(v & 0xFF)); append(UInt8((v >> 8) & 0xFF))
-        append(UInt8((v >> 16) & 0xFF)); append(UInt8(v >> 24))
-    }
-    func readLE16(at i: Int) -> UInt16 {
-        guard i+1 < count else { return 0 }
-        return UInt16(self[i]) | (UInt16(self[i+1]) << 8)
-    }
-    func readLE32(at i: Int) -> UInt32 {
-        guard i+3 < count else { return 0 }
-        return UInt32(self[i]) | (UInt32(self[i+1]) << 8) |
-               (UInt32(self[i+2]) << 16) | (UInt32(self[i+3]) << 24)
     }
 }

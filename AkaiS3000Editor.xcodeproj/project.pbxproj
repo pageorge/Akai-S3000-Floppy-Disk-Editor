@@ -18,6 +18,8 @@
 		A1000009 /* SupportingViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1000009 /* SupportingViews.swift */; };
 		AF33648C2FE58687002905E2 /* GreaseweazleRunner.swift in Sources */ = {isa = PBXBuildFile; fileRef = AF33648B2FE58687002905E2 /* GreaseweazleRunner.swift */; };
 		AF45316C2FE042900063F9EF /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = AF45316B2FE042900063F9EF /* Assets.xcassets */; };
+		AF6EE9273020A1E8006A2F7E /* Data+LittleEndian.swift in Sources */ = {isa = PBXBuildFile; fileRef = AF6EE9263020A1E8006A2F7E /* Data+LittleEndian.swift */; };
+		AF6EE9293020A1F2006A2F7E /* WAVImport.swift in Sources */ = {isa = PBXBuildFile; fileRef = AF6EE9283020A1F2006A2F7E /* WAVImport.swift */; };
 		AF857FA62FF2A3E400FE438E /* MultiDetailView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AF857FA52FF2A3E400FE438E /* MultiDetailView.swift */; };
 /* End PBXBuildFile section */
 
@@ -25,6 +27,8 @@
 		AF3138DD2FF040E50040BCA9 /* README.md */ = {isa = PBXFileReference; lastKnownFileType = net.daringfireball.markdown; path = README.md; sourceTree = "<group>"; };
 		AF33648B2FE58687002905E2 /* GreaseweazleRunner.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GreaseweazleRunner.swift; sourceTree = "<group>"; };
 		AF45316B2FE042900063F9EF /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
+		AF6EE9263020A1E8006A2F7E /* Data+LittleEndian.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "Data+LittleEndian.swift"; sourceTree = "<group>"; };
+		AF6EE9283020A1F2006A2F7E /* WAVImport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WAVImport.swift; sourceTree = "<group>"; };
 		AF857FA52FF2A3E400FE438E /* MultiDetailView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MultiDetailView.swift; sourceTree = "<group>"; };
 		AFB9FA582FF2A04800E234D5 /* AkaiS3000Editor.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = AkaiS3000Editor.entitlements; sourceTree = "<group>"; };
 		B1000001 /* AkaiS3000EditorApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AkaiS3000EditorApp.swift; sourceTree = "<group>"; };
@@ -54,6 +58,15 @@
 /* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
+		AF6EE92A3020A207006A2F7E /* Audio */ = {
+			isa = PBXGroup;
+			children = (
+				AF6EE9283020A1F2006A2F7E /* WAVImport.swift */,
+				AF6EE9263020A1E8006A2F7E /* Data+LittleEndian.swift */,
+			);
+			path = Audio;
+			sourceTree = "<group>";
+		};
 		E1000001 = {
 			isa = PBXGroup;
 			children = (
@@ -67,6 +80,7 @@
 		E1000002 /* AkaiS3000Editor */ = {
 			isa = PBXGroup;
 			children = (
+				AF6EE92A3020A207006A2F7E /* Audio */,
 				AF857FA52FF2A3E400FE438E /* MultiDetailView.swift */,
 				AFB9FA582FF2A04800E234D5 /* AkaiS3000Editor.entitlements */,
 				AF33648B2FE58687002905E2 /* GreaseweazleRunner.swift */,
@@ -165,12 +179,14 @@
 				A1000002 /* ContentView.swift in Sources */,
 				A1000003 /* AkaiDiskImage.swift in Sources */,
 				A1000004 /* SidebarView.swift in Sources */,
+				AF6EE9273020A1E8006A2F7E /* Data+LittleEndian.swift in Sources */,
 				AF33648C2FE58687002905E2 /* GreaseweazleRunner.swift in Sources */,
 				A1000005 /* WelcomeView.swift in Sources */,
 				A1000006 /* SampleDetailView.swift in Sources */,
 				AF857FA62FF2A3E400FE438E /* MultiDetailView.swift in Sources */,
 				A1000007 /* ProgramDetailView.swift in Sources */,
 				A1000008 /* PianoKeyboardView.swift in Sources */,
+				AF6EE9293020A1F2006A2F7E /* WAVImport.swift in Sources */,
 				A1000009 /* SupportingViews.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;

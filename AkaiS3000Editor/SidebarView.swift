@@ -211,10 +211,41 @@ struct SidebarView: View {
         }
     }
 
+    /// EXPERIMENTAL: make a shared-PCM clone of the sample (shares audio blocks,
+    /// no copy) and select it. Non-standard on-disk layout — for hardware testing
+    /// on a throwaway floppy only. See
+    /// AkaiDiskImage.cloneSampleSharedPCM_EXPERIMENTAL.
+    private func cloneSampleSharedPCM(_ sample: AkaiSample) {
+        do {
+            let clone = try diskImage.cloneSampleSharedPCM_EXPERIMENTAL(id: sample.id)
+            selectedTab = .samples
+            selectedSampleID = clone.id
+            selectedSampleIDs = [clone.id]
+            selectionAnchorID = clone.id
+        } catch {
+            cloneSpaceMessage = error.localizedDescription
+            cloneSpaceAlert = true
+        }
+    }
+
     /// Create a new empty program and select it.
     private func createProgram() {
         do {
             let prog = try diskImage.createProgram()
+            selectedTab = .programs
+            selectedProgramID = prog.id
+        } catch {
+            cloneSpaceMessage = error.localizedDescription
+            cloneSpaceAlert = true
+        }
+    }
+
+    /// Create a new drum program instantly (no picker), seeded with one
+    /// single-key C1 keyzone so it reads as — and persists as — a drum kit.
+    /// Mirrors createProgram(). See AkaiDiskImage.createDrumProgram.
+    private func createDrumProgram() {
+        do {
+            let prog = try diskImage.createDrumProgram()
             selectedTab = .programs
             selectedProgramID = prog.id
         } catch {
@@ -288,7 +319,7 @@ struct SidebarView: View {
                     numChannels: 1, pcmData: monoData)
                 let kz = AkaiProgramKeyzone(
                     sampleName: sample.header.name,
-                    lowKey: 24, highKey: 127, rootNote: 60,
+                    lowKey: 24, highKey: UInt8(PianoKeyboardView.visibleEndNote), rootNote: 60,
                     tuneOffset: 0, fineTune: 0, volume: 99, pan: 0,
                     filterOffset: 0, filterCutoff: 99, filterKeyFollow: 0,
                     filterResonance: 0, filterModDepth1: 0,
@@ -394,20 +425,18 @@ struct SidebarView: View {
                         name: monoName, sampleRate: finalRate,
                         numChannels: 1, pcmData: monoData)
                     let note = UInt8(min(nextNote, 127))
-                    // Patch the sample's root note to match the trigger key so
-                    // the S3000 plays it at unity pitch with no transposition.
-                    var patchedSample = sample
-                    patchedSample.header.midiRootNote = note
-                    diskImage.applySampleEdits(patchedSample)
+                    var patched = sample; patched.header.midiRootNote = note
+                    diskImage.applySampleEdits(patched)
                     keyzones.append(AkaiProgramKeyzone(
                         sampleName: sample.header.name,
-                        lowKey: note, highKey: note, rootNote: note,
+                        lowKey: note, highKey: note, rootNote: 60,
                         tuneOffset: 0, fineTune: 0, volume: 99, pan: 0,
                         filterOffset: 0, filterCutoff: 99, filterKeyFollow: 0,
                         filterResonance: 0, filterModDepth1: 0,
                         filterModDepth2: 0, filterModDepth3: 0,
                         rightSampleName: "", rightPan: 50,
-                        playbackMode: .noLoop, velocityLow: 0, velocityHigh: 127))
+                        playbackMode: .sample, velocityLow: 0, velocityHigh: 127,
+                        pitchMode: 0))   // TRACK — bendable, unity at its own key
                     nextNote += 1
                 } catch {
                     // Disk full or directory full — stop importing.
@@ -735,7 +764,8 @@ struct SidebarView: View {
                                 sampleToDelete = sample; showDeleteConfirm = true
                             }
                         },
-                        onClone: { cloneSample(sample) }
+                        onClone: { cloneSample(sample) },
+                        onCloneSharedPCM: { cloneSampleSharedPCM(sample) }
                     )
                 }
             }
@@ -777,6 +807,7 @@ struct SidebarView: View {
                 ForEach(diskImage.programs) { prog in
                     SidebarProgramRow(
                         program: prog,
+                        isDrumOverride: diskImage.isDrumProgram(name: prog.program.name.isEmpty ? prog.directoryEntry.name : prog.program.name),
                         isSelected: selectedProgramIDs.contains(prog.id)
                             || (selectedProgramIDs.isEmpty && selectedProgramID == prog.id),
                         selectedCount: selectedProgramIDs.count,
@@ -827,6 +858,9 @@ struct SidebarView: View {
             .contextMenu {
                 Button { createProgram() } label: {
                     Label("Create Program", systemImage: "plus.square.on.square")
+                }
+                Button { createDrumProgram() } label: {
+                    Label("Create Drum Program", systemImage: drumKitSymbol)
                 }
             }
         }
@@ -950,6 +984,13 @@ struct SidebarView: View {
 internal let greaseweazlePurple = Color(red: 0.55, green: 0.50, blue: 0.80)
 
 private let akaiRed = Color(red: 0.91, green: 0, blue: 0.11)
+/// Brown accent used to distinguish drum-kit programs (all single-key keyzones)
+/// from melodic/piano programs (purple). Shared by the sidebar row and the
+/// program detail header.
+let akaiDrumBrown = Color(red: 0.55, green: 0.36, blue: 0.20)
+/// SF Symbol used for drum-kit programs — a 3×3 pad grid reads as an MPC/drum
+/// machine, versus `pianokeys` for melodic programs.
+let drumKitSymbol = "circle.grid.3x3.fill"
 
 struct SidebarSampleRow: View {
     let sample: AkaiSample
@@ -958,6 +999,7 @@ struct SidebarSampleRow: View {
     let onTap: () -> Void
     let onDelete: () -> Void
     var onClone: () -> Void = {}
+    var onCloneSharedPCM: () -> Void = {}
 
     private var displayName: String {
         sample.header.name.isEmpty ? sample.directoryEntry.name : sample.header.name
@@ -996,6 +1038,13 @@ struct SidebarSampleRow: View {
                     Label("Clone", systemImage: "plus.square.on.square")
                 }
             }
+            // EXPERIMENTAL shared-PCM clone — makes a second sample that shares
+            // this one's audio blocks (no copy). Non-standard on disk; for
+            // testing on a throwaway floppy whether the S3000 can share PCM.
+            // See AkaiDiskImage.cloneSampleSharedPCM_EXPERIMENTAL.
+            Button(role: .destructive, action: onCloneSharedPCM) {
+                Label("Clone Shared PCM (experimental)", systemImage: "exclamationmark.triangle")
+            }
             Divider()
             Button(role: .destructive, action: onDelete) {
                 if selectedCount > 1 && isSelected {
@@ -1009,12 +1058,16 @@ struct SidebarSampleRow: View {
 
     private func midiNoteName(_ note: UInt8) -> String {
         let names = ["C","C#","D","D#","E","F","F#","G","G#","A","A#","B"]
-        return "\(names[Int(note) % 12])\(Int(note) / 12 - 1)"
+        // -2 matches the S3000XL's own octave display (C3 = MIDI 60), consistent
+        // with SampleDetailView / MidiKeyPicker / KeyzoneRow. Previously -1 here,
+        // which showed everything an octave too high (e.g. C4 for C3).
+        return "\(names[Int(note) % 12])\(Int(note) / 12 - 2)"
     }
 }
 
 struct SidebarProgramRow: View {
     let program: AkaiProgramFile
+    var isDrumOverride: Bool = false
     let isSelected: Bool
     var selectedCount: Int = 0
     let onTap: () -> Void
@@ -1028,10 +1081,15 @@ struct SidebarProgramRow: View {
         program.program.name.isEmpty ? program.directoryEntry.name : program.program.name
     }
 
+    /// Drum kits get a brown pad-grid look; melodic programs stay purple pianokeys.
+    private var isDrum: Bool { program.program.isDrumKit || isDrumOverride }
+    private var accent: Color { isDrum ? akaiDrumBrown : .purple }
+    private var iconName: String { isDrum ? drumKitSymbol : "pianokeys.inverse" }
+
     var body: some View {
         HStack(spacing: 8) {
-            Image(systemName: "pianokeys.inverse")
-                .foregroundStyle(isSelected ? .white : .purple)
+            Image(systemName: iconName)
+                .foregroundStyle(isSelected ? .white : accent)
                 .font(.system(size: 14))
             VStack(alignment: .leading, spacing: 1) {
                 Text(displayName)
@@ -1046,7 +1104,7 @@ struct SidebarProgramRow: View {
         .padding(.vertical, 3)
         .padding(.horizontal, 8)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(RoundedRectangle(cornerRadius: 6).fill(isSelected ? Color.purple : Color.clear))
+        .background(RoundedRectangle(cornerRadius: 6).fill(isSelected ? accent : Color.clear))
         .listRowInsets(EdgeInsets(top: 2, leading: 4, bottom: 2, trailing: 4))
         .contentShape(Rectangle())
         .onTapGesture { onTap() }
@@ -1243,7 +1301,7 @@ struct GreaseweazleSection: View {
                 guard let url = diskImage.imageURL else { return }
                 do {
                     try diskImage.saveImageToDisk()
-                    runner.write(from: url)
+                    runner.write(from: url, lastUsedTrack: diskImage.lastUsedTrack())
                 } catch {
                     saveErrorMessage = "Couldn't save: \(error.localizedDescription)"
                     saveErrorAlert = true
@@ -1286,7 +1344,7 @@ struct GreaseweazleSection: View {
                 showSaveBeforeWriteConfirm = true
                 return
             }
-            runner.write(from: url)
+            runner.write(from: url, lastUsedTrack: diskImage.lastUsedTrack())
             return
         }
         guard let url = targetURL(forWriting: true) else { return }

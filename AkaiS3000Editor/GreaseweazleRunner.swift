@@ -111,16 +111,24 @@ final class GreaseweazleRunner: ObservableObject {
             startMessage: "Reading \(drive.label) -> \(url.lastPathComponent)")
     }
 
-    /// Write an .img at `url` to a physical floppy.
-    /// Mirrors: gw write --format=akai.1600 <file> --drive=B
-    func write(from url: URL) {
+    /// Write an .img at `url` to a physical floppy, stopping after the last
+    /// used track so the write is as fast as possible.
+    func write(from url: URL, lastUsedTrack: Int? = nil) {
         currentFileURL = url
-        run(arguments: ["write",
-                        "--format=\(format.rawValue)",
-                        url.path,
-                        "--drive=\(drive.rawValue)"],
+        var args = ["write",
+                    "--format=\(format.rawValue)",
+                    url.path,
+                    "--drive=\(drive.rawValue)"]
+        if let last = lastUsedTrack, last < 79 {
+            // Greaseweazle --tracks uses cylinder syntax: c=0-N
+            // lastUsedTrack returns a cylinder number (block / 10, since
+            // Akai double-sided = 5 sectors/side × 2 sides = 10 blocks/cylinder)
+            args += ["--tracks=c=0-\(last)"]
+        }
+        run(arguments: args,
             activity: .writing,
-            startMessage: "Writing \(url.lastPathComponent) -> \(drive.label)")
+            startMessage: "Writing \(url.lastPathComponent) -> \(drive.label)" +
+                (lastUsedTrack.map { " (cylinders 0-\($0))" } ?? ""))
     }
 
     func cancel() {

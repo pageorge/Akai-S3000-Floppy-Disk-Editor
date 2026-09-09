@@ -37,34 +37,7 @@ struct WelcomeView: View {
                                     style: StrokeStyle(lineWidth: 1, dash: [6])
                                 )
                         )
-                    VStack(spacing: 6) {
-                        if !lastPath.isEmpty, FileManager.default.fileExists(atPath: lastPath) {
-                            let filename = URL(fileURLWithPath: lastPath).lastPathComponent
-                            Button {
-                                try? diskImage.load(from: URL(fileURLWithPath: lastPath))
-                            } label: {
-                                Label(filename, systemImage: "clock.arrow.circlepath")
-                                    .frame(width: actionButtonWidth)
-                                    .padding(.vertical, 10)
-                                    .foregroundStyle(.white)
-                                    .background(Color.accentColor)
-                                    .clipShape(RoundedRectangle(cornerRadius: 6))
-                            }
-                            .buttonStyle(.plain)
-                            .padding(.bottom, 12)
-                        }
-                        Button {
-                            NotificationCenter.default.post(name: .openDiskImage, object: nil)
-                        } label: {
-                            Label("Open Disk Image", systemImage: "folder")
-                                .frame(width: actionButtonWidth)
-                                .padding(.vertical, 10)
-                                .foregroundStyle(.white)
-                                .background(akaiRed)
-                                .clipShape(RoundedRectangle(cornerRadius: 6))
-                        }
-                        .buttonStyle(.plain)
-                        .padding(.bottom, 4)
+                    VStack(spacing: 12) {
                         Button {
                             NotificationCenter.default.post(name: .createDiskImage, object: nil)
                         } label: {
@@ -79,7 +52,31 @@ struct WelcomeView: View {
                                 )
                         }
                         .buttonStyle(.plain)
-                        .padding(.top, 4)
+                        Button {
+                            NotificationCenter.default.post(name: .openDiskImage, object: nil)
+                        } label: {
+                            Label("Open Disk Image", systemImage: "folder")
+                                .frame(width: actionButtonWidth)
+                                .padding(.vertical, 10)
+                                .foregroundStyle(.white)
+                                .background(akaiRed)
+                                .clipShape(RoundedRectangle(cornerRadius: 6))
+                        }
+                        .buttonStyle(.plain)
+                        if !lastPath.isEmpty, FileManager.default.fileExists(atPath: lastPath) {
+                            let filename = URL(fileURLWithPath: lastPath).lastPathComponent
+                            Button {
+                                try? diskImage.load(from: URL(fileURLWithPath: lastPath))
+                            } label: {
+                                Label(filename, systemImage: "clock.arrow.circlepath")
+                                    .frame(width: actionButtonWidth)
+                                    .padding(.vertical, 10)
+                                    .foregroundStyle(.white)
+                                    .background(Color.accentColor)
+                                    .clipShape(RoundedRectangle(cornerRadius: 6))
+                            }
+                            .buttonStyle(.plain)
+                        }
                     }
                 }
                 HStack(spacing: 28) {

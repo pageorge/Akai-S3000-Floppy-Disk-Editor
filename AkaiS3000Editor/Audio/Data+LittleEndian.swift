@@ -7,7 +7,7 @@ import Foundation
 /// byte buffer (Akai disk structures, WAV chunk headers, etc.).
 ///
 /// Note on indexing: these use offsets measured from the buffer's own
-/// `startIndex`, so they behave correctly even on a `Data` slice whose
+/// `startIndex`, so they behave  correctly even on a `Data` slice whose
 /// `startIndex` isn't 0 (e.g. the result of `subdata`/range subscripting).
 extension Data {
     mutating func appendLE16(_ v: UInt16) {

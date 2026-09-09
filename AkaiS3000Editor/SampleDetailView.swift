@@ -11,12 +11,18 @@ struct SampleDetailView: View {
     @State private var editedPlaybackMode: AkaiSamplePlaybackMode
     @State private var editedLoopStart: Double
     @State private var editedLoopEnd: Double
+    /// Playback start point (start[4] @ 0x1E). Where the sample begins playing,
+    /// independent of the loop. 0 = play from the beginning.
+    @State private var editedSampleStart: Double
     @State private var isPlaying = false
     @State private var audioEngine: AVAudioEngine?
     @State private var playerNode: AVAudioPlayerNode?
     @State private var loopStartFrame: Double = 0
     @State private var loopFrameCount: Double = 0
     @State private var totalPlayFrames: Double = 0
+    /// Absolute frame where the current playback began (the marker, or 0). The
+    /// player node's sampleTime is relative to this, so the playhead adds it back.
+    @State private var playbackStartFrame: Double = 0
     @State private var playheadPosition: Double = 0
     @State private var playheadTimer: Timer?
     @State private var toast: ToastData?
@@ -47,6 +53,7 @@ struct SampleDetailView: View {
         // already stored, and changing Playback Mode must not change it.
         _editedLoopEnd = State(initialValue: Double(sample.header.loopEnd))
         _editedSemitone = State(initialValue: Double(sample.header.semitoneTune))
+        _editedSampleStart = State(initialValue: Double(sample.header.sampleStart))
     }
 
     /// Current display name, preferring the live disk-image copy (so a rename
@@ -144,13 +151,32 @@ struct SampleDetailView: View {
                     loopEnabled: isLooping,
                     loopStart: $editedLoopStart,
                     loopEnd: $editedLoopEnd,
-                    playhead: playheadPosition
+                    playhead: playheadPosition,
+                    playStart: Binding(
+                        // The white marker IS the saved start point (0x1E): read
+                        // it from editedSampleStart (nil when 0 = no marker), and
+                        // writing it (click or drag on the waveform) updates the
+                        // start and commits to the image, so it persists on save
+                        // and reappears on reopen. Keeps the marker, the Playback
+                        // Start slider and the on-disk value all in sync.
+                        get: { editedSampleStart > 0 ? editedSampleStart : nil },
+                        set: { newValue in
+                            editedSampleStart = max(0, newValue ?? 0)
+                            commitEditsToImage()
+                        }
+                    )
                 )
                     .id(sample.id)   // force a fresh WaveformView (and @State) per sample,
                                      // so switching samples can never leave stale waveMin/
                                      // waveMax from a previous selection.
                     .frame(height: 180)
                     .clipShape(RoundedRectangle(cornerRadius: 8))
+
+                // Interaction hint below the graph, aligned right.
+                Text("Scroll to zoom · drag to pan · ⌥-drag to zoom to region · click to set play-start")
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+                    .frame(maxWidth: .infinity, alignment: .trailing)
 
                 Divider()
 
@@ -197,6 +223,33 @@ struct SampleDetailView: View {
                     }
                 }
 
+                InfoCard(title: "Playback Start") {
+                    VStack(alignment: .leading, spacing: 6) {
+                        HStack {
+                            Text("Start Point").font(.subheadline).foregroundStyle(.secondary)
+                            Spacer()
+                            Text("\(Int(editedSampleStart)) samples").font(.system(.caption, design: .monospaced))
+                        }
+                        Slider(value: $editedSampleStart, in: 0...Double(max(audioFrameCount - 1, 1)))
+                            .onChange(of: editedSampleStart) { _, _ in commitEditsToImage() }
+                        Text("Where the sample begins playing on the S3000XL (the TRIM-page start point), independent of the loop. Set it to the loop start to make a note begin inside the loop.")
+                            .font(.caption2).foregroundStyle(.tertiary)
+                            .fixedSize(horizontal: false, vertical: true)
+                        if isLooping {
+                            Button {
+                                editedSampleStart = editedLoopStart
+                                commitEditsToImage()
+                            } label: {
+                                Label("Set to loop start (\(Int(editedLoopStart)))", systemImage: "arrow.right.to.line")
+                                    .font(.caption)
+                            }
+                            .buttonStyle(.bordered)
+                            .controlSize(.small)
+                            .padding(.top, 2)
+                        }
+                    }
+                }
+
                 InfoCard(title: "Loop") {
                     VStack(alignment: .leading, spacing: 12) {
                         VStack(alignment: .leading, spacing: 6) {
@@ -212,6 +265,7 @@ struct SampleDetailView: View {
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
                                 .fixedSize(horizontal: false, vertical: true)
+                                .padding(.bottom, 4)
                         }
                         if isLooping {
                             let maxSamples = Double(max(audioFrameCount, 1))
@@ -360,6 +414,12 @@ struct SampleDetailView: View {
         let frameCount = pcm.count / 2
         guard frameCount > 0 else { return }
 
+        // Where playback begins: the sample's start point (0x1E), which is now
+        // the same value the white marker and the Playback Start slider show
+        // (editedSampleStart). 0 = play from the very beginning. Clamped into
+        // the buffer.
+        let startFrame = max(0, min(Int(editedSampleStart), frameCount - 1))
+
         func makeBuffer(fromFrame start: Int, toFrame end: Int) -> AVAudioPCMBuffer? {
             // Clamp defensively: a loop end can legitimately exceed the stored
             // audio length on hardware samples, and start must never exceed end.
@@ -422,18 +482,24 @@ struct SampleDetailView: View {
         engine.attach(node)
         engine.connect(node, to: engine.mainMixerNode, format: format)
 
-        let useLoop = isLooping
-        // loopStart/loopEnd come straight from the sliders, which mirror the real
-        // header fields (at, and at+len clamped to the buffer) — the loop region
-        // is genuinely [loopStart, loopEnd), not always the whole buffer.
         let bufferLen = frameCount
         let loopAtFr = max(0, min(Int(editedLoopStart), bufferLen - 1))
         let loopEndFr = max(loopAtFr + 1, min(Int(editedLoopEnd), bufferLen))
+
+        // If playback begins AT or AFTER the loop end, the playhead never crosses
+        // the loop's right boundary going forward, so the loop can never engage:
+        // the sample just plays start → end once. Mirror that here so the preview
+        // matches the hardware (no guard on the start point — starting past the
+        // loop simply bypasses it).
+        let useLoop = isLooping && startFrame < loopEndFr
 
         // Bookkeeping for the playhead overlay.
         loopStartFrame = Double(loopAtFr)
         loopFrameCount = Double(useLoop ? loopEndFr - loopAtFr : 0)
         totalPlayFrames = Double(frameCount)
+        // The node's sampleTime counts from wherever playback began (the marker),
+        // so remember that offset to convert node time → absolute frame.
+        playbackStartFrame = Double(startFrame)
 
         do {
             try engine.start()
@@ -443,15 +509,16 @@ struct SampleDetailView: View {
         }
 
         if useLoop {
-            // Bounded loop: run-in once, then loopStart → loopEnd repeated.
-            if let preview = makeBoundedLoop(introStart: 0,
+            // Bounded loop: run-in from the marker (or 0) once, then
+            // loopStart → loopEnd repeated.
+            if let preview = makeBoundedLoop(introStart: startFrame,
                                              loopStart: loopAtFr,
                                              loopEnd: loopEndFr,
                                              targetSeconds: 3.0) {
                 node.scheduleBuffer(preview, at: nil, options: [.loops])
             }
         } else {
-            if let whole = makeBuffer(fromFrame: 0, toFrame: frameCount) {
+            if let whole = makeBuffer(fromFrame: startFrame, toFrame: frameCount) {
                 node.scheduleBuffer(whole, at: nil, options: []) {
                     // Auto-stop at end when not looping.
                     DispatchQueue.main.async { self.stopPlayback() }
@@ -475,17 +542,19 @@ struct SampleDetailView: View {
             guard total > 0 else { return }
 
             if self.isLooping && self.loopFrameCount > 0 {
-                // First pass plays 0 → loopEnd; afterwards the playhead wraps
-                // within the loopStart → loopEnd region.
-                let firstPassFrames = self.loopStartFrame + self.loopFrameCount  // 0 → loopEnd
-                if played < firstPassFrames {
-                    self.playheadPosition = played / total
+                // First pass plays [startFrame → loopEnd]; afterwards the playhead
+                // wraps within the loopStart → loopEnd region. `played` counts from
+                // the marker, so the intro length is (loopEnd - startFrame).
+                let introFrames = max(0, self.loopStartFrame + self.loopFrameCount - self.playbackStartFrame)
+                if played < introFrames {
+                    self.playheadPosition = (self.playbackStartFrame + played) / total
                 } else {
-                    let into = (played - firstPassFrames).truncatingRemainder(dividingBy: self.loopFrameCount)
+                    let into = (played - introFrames).truncatingRemainder(dividingBy: self.loopFrameCount)
                     self.playheadPosition = (self.loopStartFrame + into) / total
                 }
             } else {
-                self.playheadPosition = min(played / total, 1.0)
+                // Absolute frame = where we started + frames played since.
+                self.playheadPosition = min((self.playbackStartFrame + played) / total, 1.0)
             }
         }
     }
@@ -498,6 +567,7 @@ struct SampleDetailView: View {
         h.playbackMode = editedPlaybackMode
         h.loopStart = UInt32(editedLoopStart)
         h.loopEnd = UInt32(editedLoopEnd)
+        h.sampleStart = UInt32(max(0, editedSampleStart))
         var s = sample
         s.header = h
         return s
@@ -557,6 +627,7 @@ struct SampleDetailView: View {
         editedPlaybackMode = sample.header.playbackMode
         editedLoopStart = Double(sample.header.loopStart)
         editedLoopEnd = Double(sample.header.loopEnd)
+        editedSampleStart = Double(sample.header.sampleStart)
         diskImage.applySampleEdits(editedSample())
         isDirty = false
     }
@@ -709,7 +780,10 @@ struct SampleListView: View {
                 let accessing = url.startAccessingSecurityScopedResource()
                 defer { if accessing { url.stopAccessingSecurityScopedResource() } }
                 guard let wavData = try? Data(contentsOf: url),
-                      let (pcm, rate, ch, _) = try? parseWAVBasic(wavData) else { continue }
+                      let decoded = try? WAVImport.decode(wavData) else { continue }
+                let pcm = decoded.pcm
+                let rate = decoded.sampleRate
+                let ch = decoded.channels
                 let checkPCM = ch >= 2 ? AkaiDiskImage.deinterleaveStereo(pcm, channels: ch).0 : pcm
                 let dupes = diskImage.duplicateSampleNames(forPCM: checkPCM)
                 if dupes.isEmpty {
@@ -754,37 +828,5 @@ struct SampleListView: View {
 
     private func applyLoFi(pcm: Data, fromRate: Int) -> (Data, UInt32) {
         AkaiDiskImage.applyLoFi(pcm: pcm, fromRate: fromRate)
-    }
-
-    private func parseWAVBasic(_ data: Data) throws -> (Data, Int, Int, Int) {
-        guard data.count > 44, data[0..<4] == Data("RIFF".utf8), data[8..<12] == Data("WAVE".utf8) else {
-            throw NSError(domain: "WAV", code: 0, userInfo: [NSLocalizedDescriptionKey: "Not a WAV"])
-        }
-        var offset = 12, sampleRate = 44100, numChannels = 1, bitsPerSample = 16
-        var pcmData = Data()
-        while offset + 8 <= data.count {
-            let id = String(bytes: data[offset..<offset+4], encoding: .ascii) ?? ""
-            let size = Int(data.readLE32(at: offset + 4)); offset += 8
-            if id == "fmt " { numChannels = Int(data.readLE16(at: offset+2)); sampleRate = Int(data.readLE32(at: offset+4)); bitsPerSample = Int(data.readLE16(at: offset+14)) }
-            else if id == "data" { pcmData = data.subdata(in: offset..<min(offset+size, data.count)) }
-            offset += size + (size % 2)
-        }
-        guard !pcmData.isEmpty else { throw NSError(domain: "WAV", code: 1, userInfo: [:]) }
-        // Convert 24-bit to 16-bit if needed.
-        if bitsPerSample == 24 {
-            let bytesPerFrame = 3 * numChannels
-            var out = Data(); out.reserveCapacity((pcmData.count / bytesPerFrame) * 2 * numChannels)
-            var i = 0
-            while i + bytesPerFrame <= pcmData.count {
-                for ch in 0..<numChannels {
-                    let base = i + ch * 3
-                    out.append(pcmData[base + 1])
-                    out.append(pcmData[base + 2])
-                }
-                i += bytesPerFrame
-            }
-            return (out, sampleRate, numChannels, 16)
-        }
-        return (pcmData, sampleRate, numChannels, bitsPerSample)
     }
 }

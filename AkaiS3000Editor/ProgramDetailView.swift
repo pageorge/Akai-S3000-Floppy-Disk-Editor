@@ -16,6 +16,9 @@ struct ProgramDetailView: View {
     @FocusState private var nameFieldFocused: Bool
     @State private var showDropError = false
     @State private var dropErrorMessage = ""
+    /// Highlights the "Add Samples" drop zone while a file/folder is dragged over
+    /// the program view. Bound to the whole-view .onDrop's isTargeted.
+    @State private var dropTargeted = false
     private let audioExts: Set<String> = ["wav", "wave", "aif", "aiff", "aifc"]
     @AppStorage("lowQualityImport") private var lowQualityImport = false
     init(programFile: AkaiProgramFile, diskImage: AkaiDiskImage) {
@@ -57,6 +60,9 @@ struct ProgramDetailView: View {
                         }
                     } else {
                         HStack(spacing: 6) {
+                            Image(systemName: editedProgram.isDrumKit ? drumKitSymbol : "pianokeys")
+                                .font(.system(size: 20))
+                                .foregroundStyle(editedProgram.isDrumKit ? akaiDrumBrown : .purple)
                             Text(currentName)
                                 .font(.system(.title, design: .monospaced).bold())
                                 .textSelection(.enabled)
@@ -66,7 +72,9 @@ struct ProgramDetailView: View {
                             .buttonStyle(.borderless).help("Rename program")
                         }
                     }
-                    Text("Program · \(editedProgram.keyzones.count) keyzones")
+                    Text(editedProgram.isDrumKit
+                         ? "Drum Program · \(editedProgram.keyzones.count) keys"
+                         : "Program · \(editedProgram.keyzones.count) keyzones")
                         .font(.subheadline).foregroundStyle(.secondary)
                 }
                 Spacer()
@@ -178,7 +186,7 @@ struct ProgramDetailView: View {
                                 editedProgram.filterModSource3 = .env2
                                 commitProgramEdits()
                             } label: {
-                                Label("Reset", systemImage: "arrow.counterclockwise").font(.system(size: 11))
+                                Label("Reset to Akai Defaults", systemImage: "arrow.counterclockwise").font(.system(size: 11))
                             }
                             .buttonStyle(.bordered).controlSize(.small).tint(.blue)
                             .help("Reset all program settings to hardware defaults")
@@ -191,7 +199,10 @@ struct ProgramDetailView: View {
                     } // ScrollView
                     .fixedSize(horizontal: false, vertical: true)
 
-                    InfoCard(title: "Keyzones") {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("Keyzones")
+                            .font(.headline.weight(.semibold))
+                            .foregroundStyle(.primary)
                         VStack(spacing: 0) {
                         HStack {
                             Spacer()
@@ -276,8 +287,16 @@ struct ProgramDetailView: View {
                         if let m = keyzoneKeyMonitor { NSEvent.removeMonitor(m); keyzoneKeyMonitor = nil }
                         diskImage.keyzoneEditorActive = false
                     }
-                        } // VStack inside InfoCard
-                    } // InfoCard Keyzones
+                        } // VStack inside Keyzones container
+                        .padding(8)
+                        .background(RoundedRectangle(cornerRadius: 6).fill(Color(nsColor: .controlBackgroundColor).opacity(0.4)))
+                        .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(Color.secondary.opacity(0.25)))
+                        .frame(maxHeight: .infinity)
+                    } // Keyzones container (plain VStack, not GroupBox/InfoCard —
+                      // GroupBox doesn't reliably propagate a bounded height to its
+                      // content, so with many keyzones the List never gets a fixed
+                      // frame to scroll within and the whole pane just grows past
+                      // the window instead of scrolling internally.)
                     .padding(.horizontal, 16).padding(.bottom, 16)
                     .frame(maxHeight: .infinity)
                 } // VStack left panel
@@ -323,7 +342,22 @@ struct ProgramDetailView: View {
                             HStack {
                                 MidiKeyPicker(label: "Low", value: keyzoneFieldBinding(idx, \.lowKey), onChange: { commitProgramEdits() })
                                 Spacer()
-                                MidiKeyPicker(label: "Root", value: keyzoneFieldBinding(idx, \.rootNote), onChange: { commitProgramEdits() })
+                                // Root note is the sample's rkey — read-only since
+                        // keyzone rootNote is not written to disk (it's a UI
+                        // field only; the sample's rkey controls pitch in TRACK).
+                        let sampleRkey: UInt8 = {
+                            let kzName = editedProgram.keyzones[idx].sampleName
+                            return diskImage.samples.first(where: {
+                                ($0.header.name.isEmpty ? $0.directoryEntry.name : $0.header.name) == kzName
+                            })?.header.midiRootNote ?? editedProgram.keyzones[idx].rootNote
+                        }()
+                        HStack {
+                            Text("Root").frame(width: 80, alignment: .leading).font(.subheadline)
+                            Text(midiNoteNameStatic(sampleRkey))
+                                .font(.system(.body, design: .monospaced))
+                                .foregroundStyle(.secondary)
+                            Text("(sample root)").font(.caption).foregroundStyle(.tertiary)
+                        }
                                 Spacer()
                                 MidiKeyPicker(label: "High", value: keyzoneFieldBinding(idx, \.highKey), onChange: { commitProgramEdits() })
                             }
@@ -348,31 +382,8 @@ struct ProgramDetailView: View {
                     } else {
                         ScrollView {
                             VStack(alignment: .leading, spacing: 16) {
-                                InfoCard(title: "Create Keyzone") {
-                                    HStack(alignment: .top, spacing: 12) {
-                                        PresetDropZone(
-                                            diskImage: diskImage,
-                                            existingKeyzones: editedProgram.keyzones,
-                                            onSamplesImported: { newKeyzones in
-                                                editedProgram.keyzones.append(contentsOf: newKeyzones)
-                                                let newIdx = editedProgram.keyzones.count - 1
-                                                selectedKeyzoneIndices = [newIdx]
-                                                anchorKeyzoneIndex = newIdx
-                                                commitProgramEdits()
-                                            }
-                                        )
-                                        DrumPresetDropZone(
-                                            diskImage: diskImage,
-                                            existingKeyzones: editedProgram.keyzones,
-                                            onSamplesImported: { newKeyzones in
-                                                editedProgram.keyzones.append(contentsOf: newKeyzones)
-                                                let newIdx = editedProgram.keyzones.count - 1
-                                                selectedKeyzoneIndices = [newIdx]
-                                                anchorKeyzoneIndex = newIdx
-                                                commitProgramEdits()
-                                            }
-                                        )
-                                    }
+                                InfoCard(title: "Add Samples") {
+                                    SimpleDropZone(isTargeted: dropTargeted)
                                 }
                             }
                             .padding(16)
@@ -398,7 +409,7 @@ struct ProgramDetailView: View {
             Text("This removes the keyzone\(selectedKeyzoneIndices.count > 1 ? "s" : "") from the program. The disk image file is not modified until you save.")
         }
         .toast($toast)
-        .onDrop(of: [.fileURL], isTargeted: nil) { providers in
+        .onDrop(of: [.fileURL, .plainText], isTargeted: $dropTargeted) { providers in
             handleProgramDrop(providers: providers)
         }
         .alert("Import error", isPresented: $showDropError) {
@@ -427,13 +438,39 @@ struct ProgramDetailView: View {
         } catch { toast = ToastData(message: error.localizedDescription, isError: true) }
     }
     private func addKeyzone() {
-        let newKZ = AkaiProgramKeyzone(
-            sampleName: diskImage.samples.first?.header.name ?? "NO NAME",
-            lowKey: 24, highKey: 127, rootNote: 60,
-            tuneOffset: 0, fineTune: 0, volume: 99, pan: 0,
-            filterOffset: 0, filterCutoff: 99, filterKeyFollow: 0,
-            filterResonance: 0, filterModDepth1: 0, filterModDepth2: 0, filterModDepth3: 0,
-            rightSampleName: "", rightPan: 50, playbackMode: .sample, velocityLow: 0, velocityHigh: 127)
+        let sampleName = diskImage.samples.first?.header.name ?? "NO NAME"
+        let newKZ: AkaiProgramKeyzone
+        if editedProgram.isDrumKit {
+            // Drum program: single key, continuing +1 from the last single-key
+            // zone (C1/36 if none). TRACK pitch with rootNote == key so the pad
+            // plays at unity pitch AND responds to pitch bend (CONST would pin
+            // pitch to C3 and ignore bend).
+            let nextNote: Int
+            if let last = editedProgram.keyzones.last, last.lowKey == last.highKey {
+                nextNote = Int(last.highKey) + 1
+            } else {
+                nextNote = 36
+            }
+            let note = UInt8(min(nextNote, 127))
+            newKZ = AkaiProgramKeyzone(
+                sampleName: sampleName,
+                lowKey: note, highKey: note, rootNote: 60,
+                tuneOffset: 0, fineTune: 0, volume: 99, pan: 0,
+                filterOffset: 0, filterCutoff: 99, filterKeyFollow: 0,
+                filterResonance: 0, filterModDepth1: 0, filterModDepth2: 0, filterModDepth3: 0,
+                rightSampleName: "", rightPan: 50, playbackMode: .sample,
+                velocityLow: 0, velocityHigh: 127,
+                env1Attack: 0, env1Decay: 0, env1Sustain: 99, env1Release: 0, pitchMode: 0)
+        } else {
+            // Melodic program: one zone across the whole visible keyboard.
+            newKZ = AkaiProgramKeyzone(
+                sampleName: sampleName,
+                lowKey: 24, highKey: UInt8(PianoKeyboardView.visibleEndNote), rootNote: 60,
+                tuneOffset: 0, fineTune: 0, volume: 99, pan: 0,
+                filterOffset: 0, filterCutoff: 99, filterKeyFollow: 0,
+                filterResonance: 0, filterModDepth1: 0, filterModDepth2: 0, filterModDepth3: 0,
+                rightSampleName: "", rightPan: 50, playbackMode: .sample, velocityLow: 0, velocityHigh: 127)
+        }
         editedProgram.keyzones.append(newKZ)
         let newIdx = editedProgram.keyzones.count - 1
         selectedKeyzoneIndices = [newIdx]; anchorKeyzoneIndex = newIdx
@@ -513,6 +550,7 @@ struct ProgramDetailView: View {
             if old.env2L3 != newValue.env2L3 { kz.env2L3 = newValue.env2L3 }
             if old.env2R4 != newValue.env2R4 { kz.env2R4 = newValue.env2R4 }
             if old.env2L4 != newValue.env2L4 { kz.env2L4 = newValue.env2L4 }
+            if old.pitchMode != newValue.pitchMode { kz.pitchMode = newValue.pitchMode }
             editedProgram.keyzones[idx] = kz
         }
     }
@@ -527,6 +565,11 @@ struct ProgramDetailView: View {
             }
         )
     }
+    private func midiNoteNameStatic(_ note: UInt8) -> String {
+        let names = ["C","C#","D","D#","E","F","F#","G","G#","A","A#","B"]
+        return "\(names[Int(note) % 12])\(Int(note) / 12 - 2)"
+    }
+
     private func commitProgramEdits() {
         isDirty = true
         var updated = diskImage.programs.first(where: { $0.id == programFile.id }) ?? programFile
@@ -543,6 +586,18 @@ struct ProgramDetailView: View {
 
     private func handleProgramDrop(providers: [NSItemProvider]) -> Bool {
         guard let provider = providers.first else { return false }
+        // Sidebar-sample drag: carries plain text (the sample name), NOT a file
+        // URL. Per the simplified model, dragging an existing sample onto a
+        // program only ever adds it drum-style — one key, continuing +1 from the
+        // last mapped key.
+        if provider.hasItemConformingToTypeIdentifier("public.plain-text") &&
+           !provider.hasItemConformingToTypeIdentifier("public.file-url") {
+            _ = provider.loadObject(ofClass: NSString.self) { string, _ in
+                guard let name = string as? String else { return }
+                DispatchQueue.main.async { addKeyzoneFromDraggedSample(named: String(name)) }
+            }
+            return true
+        }
         provider.loadItem(forTypeIdentifier: "public.file-url") { item, _ in
             guard let data = item as? Data,
                   let url = URL(dataRepresentation: data, relativeTo: nil) else { return }
@@ -562,22 +617,88 @@ struct ProgramDetailView: View {
         return true
     }
 
+    /// Add an already-imported sidebar sample as a keyzone. Behaviour depends on
+    /// the program type: a DRUM program (isDrumKit) gets a single-key zone
+    /// continuing +1 from the last key (C1/36 if none), Const pitch, no loop —
+    /// stacking one-shot per key. A normal/melodic program gets ONE zone mapped
+    /// across the whole visible keyboard (24…visibleEndNote), Track pitch, so it
+    /// plays as a pitched instrument. The sample already exists on disk, so its
+    /// header is left untouched — only a keyzone referencing it by name is added.
+    private func addKeyzoneFromDraggedSample(named name: String) {
+        guard diskImage.samples.contains(where: {
+            ($0.header.name.isEmpty ? $0.directoryEntry.name : $0.header.name) == name
+        }) else { return }
+
+        let kz: AkaiProgramKeyzone
+        let isDrum = editedProgram.isDrumKit || diskImage.isDrumProgram(name: currentName)
+        if isDrum {
+            // Single key, continuing +1 from the last single-key zone (C1/36 if none).
+            // No seed keyzone exists to fill — the first drag just appends at C1.
+            let nextNote: Int
+            if let last = editedProgram.keyzones.last, last.lowKey == last.highKey {
+                nextNote = Int(last.highKey) + 1
+            } else {
+                nextNote = 36
+            }
+            let note = UInt8(min(nextNote, 127))
+            // Patch the sample's rkey to match the pad key so TRACK mode
+            // plays at unity pitch (rkey=trigger = 1:1 ratio).
+            if let sample = diskImage.samples.first(where: {
+                ($0.header.name.isEmpty ? $0.directoryEntry.name : $0.header.name) == name
+            }), sample.header.midiRootNote != note {
+                let from = midiNoteNameStatic(sample.header.midiRootNote)
+                let to = midiNoteNameStatic(note)
+                var patched = sample
+                patched.header.midiRootNote = note
+                diskImage.applySampleEdits(patched)
+                toast = ToastData(message: "\"\(name)\" root changed \(from) → \(to)")
+            }
+            kz = AkaiProgramKeyzone(
+                sampleName: name, lowKey: note, highKey: note, rootNote: 60,
+                tuneOffset: 0, fineTune: 0, volume: 99, pan: 0,
+                filterOffset: 0, filterCutoff: 99, filterKeyFollow: 0,
+                filterResonance: 0, filterModDepth1: 0, filterModDepth2: 0, filterModDepth3: 0,
+                rightSampleName: "", rightPan: 50, playbackMode: .sample,
+                velocityLow: 0, velocityHigh: 127,
+                env1Attack: 0, env1Decay: 0, env1Sustain: 99, env1Release: 0, pitchMode: 0)
+        } else {
+            // Melodic: one zone across the whole visible keyboard, Track pitch.
+            kz = AkaiProgramKeyzone(
+                sampleName: name,
+                lowKey: 24, highKey: UInt8(PianoKeyboardView.visibleEndNote), rootNote: 60,
+                tuneOffset: 0, fineTune: 0, volume: 99, pan: 0,
+                filterOffset: 0, filterCutoff: 99, filterKeyFollow: 0,
+                filterResonance: 0, filterModDepth1: 0, filterModDepth2: 0, filterModDepth3: 0,
+                rightSampleName: "", rightPan: 50, playbackMode: .sample,
+                velocityLow: 0, velocityHigh: 127,
+                env1Attack: 0, env1Decay: 0, env1Sustain: 99, env1Release: 0, pitchMode: 0)
+        }
+        editedProgram.keyzones.append(kz)
+        let newIdx = editedProgram.keyzones.count - 1
+        selectedKeyzoneIndices = [newIdx]
+        anchorKeyzoneIndex = newIdx
+        commitProgramEdits()
+    }
+
     /// Determine the next key to use based on existing keyzones.
     /// If the last keyzone is a single key, return lastKey + 1.
-    /// If the last keyzone is a full map (24–127), return 24 (another full map).
+    /// If the last keyzone is a full map, return another full map spanning the
+    /// VISIBLE keyboard range (24…visibleEndNote), so a preset's top key matches
+    /// what the piano view actually shows rather than extending to 127.
     private func nextDropKey() -> (low: UInt8, high: UInt8, root: UInt8, isSingle: Bool) {
+        let top = UInt8(PianoKeyboardView.visibleEndNote)
         if let last = editedProgram.keyzones.last {
             if last.lowKey == last.highKey {
                 // Single-key pattern — next key
                 let next = UInt8(min(Int(last.highKey) + 1, 127))
                 return (next, next, next, true)
             } else {
-                // Full-map pattern — repeat full map
-                return (24, 127, 60, false)
+                // Full-map pattern — repeat full map across the visible range
+                return (24, top, 60, false)
             }
         }
-        // No keyzones yet — default to full map
-        return (24, 127, 60, false)
+        // No keyzones yet — default to full map across the visible range
+        return (24, top, 60, false)
     }
 
     private func dropFile(_ url: URL) {
@@ -587,34 +708,32 @@ struct ProgramDetailView: View {
             return
         }
         if accessing { url.stopAccessingSecurityScopedResource() }
-        guard wavData.count > 44,
-              wavData[0..<4] == Data("RIFF".utf8),
-              wavData[8..<12] == Data("WAVE".utf8) else {
-            dropErrorMessage = "\(url.lastPathComponent) is not a valid WAV file."
+        let decoded: WAVImport.Decoded
+        do { decoded = try WAVImport.decode(wavData) }
+        catch {
+            dropErrorMessage = "\(url.lastPathComponent): \(error.localizedDescription)"
             showDropError = true
             return
         }
-        var offset = 12; var sampleRate = 44100; var numChannels = 1; var bitsPerSample = 16; var pcmData = Data()
-        while offset + 8 <= wavData.count {
-            let id = String(bytes: wavData[offset..<offset+4], encoding: .ascii) ?? ""
-            let size = Int(wavData.readLE32(at: offset + 4)); offset += 8
-            if id == "fmt " { numChannels = Int(wavData.readLE16(at: offset+2)); sampleRate = Int(wavData.readLE32(at: offset+4)); bitsPerSample = Int(wavData.readLE16(at: offset+14)) }
-            else if id == "data" { pcmData = wavData.subdata(in: offset..<min(offset+size, wavData.count)) }
-            offset += size + (size % 2)
-        }
-        guard !pcmData.isEmpty else { return }
-        if bitsPerSample == 24 {
-            let bytesPerFrame = 3 * numChannels
-            var out = Data(); out.reserveCapacity((pcmData.count / bytesPerFrame) * 2 * numChannels)
-            var i = 0
-            while i + bytesPerFrame <= pcmData.count {
-                for ch in 0..<numChannels { out.append(pcmData[i + ch*3 + 1]); out.append(pcmData[i + ch*3 + 2]) }
-                i += bytesPerFrame
-            }
-            pcmData = out
-        }
+        let pcmData = decoded.pcm
+        let sampleRate = decoded.sampleRate
+        let numChannels = decoded.channels
         let rawName = url.deletingPathExtension().lastPathComponent
-        let keys = nextDropKey()
+        let isDrum = editedProgram.isDrumKit || diskImage.isDrumProgram(name: currentName)
+        let keys: (low: UInt8, high: UInt8, root: UInt8, isSingle: Bool)
+        if isDrum {
+            // Drum: single key continuing from last, or C1 if empty
+            let nextNote: Int
+            if let last = editedProgram.keyzones.last, last.lowKey == last.highKey {
+                nextNote = Int(last.highKey) + 1
+            } else {
+                nextNote = 36
+            }
+            let note = UInt8(min(nextNote, 127))
+            keys = (note, note, 60, true)
+        } else {
+            keys = nextDropKey()
+        }
         let loFi = lowQualityImport
         DispatchQueue.global(qos: .userInitiated).async {
         do {
@@ -623,8 +742,11 @@ struct ProgramDetailView: View {
         if numChannels >= 2 {
         let (left, right) = AkaiDiskImage.deinterleaveStereo(pcmData, channels: numChannels)
         monoData = left
-        monoName = AkaiDiskImage.sanitizeNamePreservingEnd(rawName, maxLen: 10) + "-L"
-            rightData = right
+        // Drum programs: no -L suffix, no right channel
+        monoName = isDrum
+            ? AkaiDiskImage.sanitizeName(String(rawName.prefix(12)))
+            : AkaiDiskImage.sanitizeNamePreservingEnd(rawName, maxLen: 10) + "-L"
+            rightData = isDrum ? nil : right
         } else {
         monoData = pcmData
             monoName = AkaiDiskImage.sanitizeName(String(rawName.prefix(12)))
@@ -639,8 +761,16 @@ struct ProgramDetailView: View {
                 }
                 let sample = try diskImage.addImportedSample(
                     name: monoName, sampleRate: finalRate, numChannels: 1, pcmData: monoData)
-                // Import right channel if stereo.
-                if numChannels >= 2, var r = rightData {
+                // For drum programs: set sample rkey to match the pad key so
+                // TRACK pitch plays at unity. rkey=C3 + trigger=C1 = 2 octaves
+                // down (really slow). rkey=trigger = unity pitch on that pad.
+                if isDrum {
+                    var patched = sample
+                    patched.header.midiRootNote = keys.low
+                    diskImage.applySampleEdits(patched)
+                }
+                // For melodic programs, import right channel too.
+                if !isDrum, numChannels >= 2, var r = rightData {
                     let stemR = AkaiDiskImage.sanitizeNamePreservingEnd(rawName, maxLen: 10) + "-R"
                     if loFi { r = AkaiDiskImage.applyLoFi(pcm: r, fromRate: sampleRate).0 }
                     _ = try? diskImage.addImportedSample(name: stemR, sampleRate: finalRate, numChannels: 1, pcmData: r)
@@ -652,8 +782,10 @@ struct ProgramDetailView: View {
                     filterOffset: 0, filterCutoff: 99, filterKeyFollow: 0,
                     filterResonance: 0, filterModDepth1: 0, filterModDepth2: 0, filterModDepth3: 0,
                     rightSampleName: "", rightPan: 50,
-                    playbackMode: keys.isSingle ? .noLoop : .sample,
-                    velocityLow: 0, velocityHigh: 127)
+                    playbackMode: .sample,
+                    velocityLow: 0, velocityHigh: 127,
+                    pitchMode: 0)   // TRACK — root==key gives unity pitch, and
+                                    // TRACK lets pitch bend affect the sample.
                 DispatchQueue.main.async {
                     editedProgram.keyzones.append(kz)
                     let newIdx = editedProgram.keyzones.count - 1
@@ -692,33 +824,27 @@ struct ProgramDetailView: View {
             nextNote = 36
         }
         let loFi = lowQualityImport
+        var usedNames = Set(diskImage.samples.map { $0.header.name })
         DispatchQueue.global(qos: .userInitiated).async {
             var newKeyzones: [AkaiProgramKeyzone] = []
             for url in audioURLs {
                 let accessing = url.startAccessingSecurityScopedResource()
                 defer { if accessing { url.stopAccessingSecurityScopedResource() } }
                 guard let wavData = try? Data(contentsOf: url),
-                      wavData.count > 44,
-                      wavData[0..<4] == Data("RIFF".utf8),
-                      wavData[8..<12] == Data("WAVE".utf8) else { continue }
-                var offset = 12; var sampleRate = 44100; var numChannels = 1; var pcmData = Data()
-                while offset + 8 <= wavData.count {
-                    let id = String(bytes: wavData[offset..<offset+4], encoding: .ascii) ?? ""
-                    let size = Int(wavData.readLE32(at: offset + 4)); offset += 8
-                    if id == "fmt " { numChannels = Int(wavData.readLE16(at: offset+2)); sampleRate = Int(wavData.readLE32(at: offset+4)) }
-                    else if id == "data" { pcmData = wavData.subdata(in: offset..<min(offset+size, wavData.count)) }
-                    offset += size + (size % 2)
-                }
-                guard !pcmData.isEmpty else { continue }
+                      let decoded = try? WAVImport.decode(wavData) else { continue }
+                let pcmData = decoded.pcm
+                let sampleRate = decoded.sampleRate
+                let numChannels = decoded.channels
                 let baseName = url.deletingPathExtension().lastPathComponent
                 do {
-                    var monoData: Data; let monoName: String
+                    var monoData: Data; var monoName: String
                     if numChannels >= 2 {
                         let (left, _) = AkaiDiskImage.deinterleaveStereo(pcmData, channels: numChannels)
                         monoData = left; monoName = AkaiDiskImage.sanitizeNamePreservingEnd(baseName, maxLen: 10) + "-L"
                     } else {
                         monoData = pcmData; monoName = AkaiDiskImage.sanitizeName(String(baseName.prefix(12)))
                     }
+                    monoName = AkaiDiskImage.disambiguateSampleName(monoName, usedNames: &usedNames)
                     let finalRate: UInt32
                     if loFi {
                         let (loPCM, loRate) = AkaiDiskImage.applyLoFi(pcm: monoData, fromRate: sampleRate)
@@ -727,24 +853,24 @@ struct ProgramDetailView: View {
                     let sample = try diskImage.addImportedSample(
                         name: monoName, sampleRate: finalRate, numChannels: 1, pcmData: monoData)
                     let note = UInt8(min(nextNote, 127))
+                    // Patch rkey to match pad key so TRACK plays at unity pitch.
+                    var patched = sample
+                    patched.header.midiRootNote = note
+                    diskImage.applySampleEdits(patched)
                     newKeyzones.append(AkaiProgramKeyzone(
                         sampleName: sample.header.name,
-                        lowKey: note, highKey: note, rootNote: note,
+                        lowKey: note, highKey: note, rootNote: 60,
                         tuneOffset: 0, fineTune: 0, volume: 99, pan: 0,
                         filterOffset: 0, filterCutoff: 99, filterKeyFollow: 0,
                         filterResonance: 0, filterModDepth1: 0, filterModDepth2: 0, filterModDepth3: 0,
                         rightSampleName: "", rightPan: 50,
-                        playbackMode: .noLoop, velocityLow: 0, velocityHigh: 127,
-                        env1Attack: 0, env1Decay: 0, env1Sustain: 99, env1Release: 0))
+                        playbackMode: .sample, velocityLow: 0, velocityHigh: 127,
+                        env1Attack: 0, env1Decay: 0, env1Sustain: 99, env1Release: 0, pitchMode: 0))
                     nextNote += 1
                 } catch { break } // disk full
             }
             DispatchQueue.main.async {
                 guard !newKeyzones.isEmpty else { return }
-                editedProgram.keyzones.append(contentsOf: newKeyzones)
-                let newIdx = editedProgram.keyzones.count - 1
-                selectedKeyzoneIndices = [newIdx]
-                anchorKeyzoneIndex = newIdx
                 commitProgramEdits()
             }
         }
@@ -800,339 +926,45 @@ struct ProgramDetailView: View {
     }
 }
 
-// MARK: - Preset Drop Zone
+// MARK: - Simple Drop Zone
 
-struct PresetDropZone: View {
-    @ObservedObject var diskImage: AkaiDiskImage
-    let existingKeyzones: [AkaiProgramKeyzone]
-    let onSamplesImported: ([AkaiProgramKeyzone]) -> Void
-    @State private var isDragging = false
-    @State private var isImporting = false
-    @State private var errorMessage: String? = nil
-    @AppStorage("lowQualityImport") private var lowQualityImport = false
-    private let audioExts: Set<String> = ["wav", "wave", "aif", "aiff", "aifc"]
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Text("Map to full keyboard").font(.headline)
-            ZStack {
-                RoundedRectangle(cornerRadius: 10)
-                    .fill(isDragging ? Color.blue.opacity(0.08) : Color.secondary.opacity(0.06))
-                RoundedRectangle(cornerRadius: 10)
-                    .strokeBorder(isDragging ? Color.blue.opacity(0.6) : Color.secondary.opacity(0.2),
-                                  style: StrokeStyle(lineWidth: isDragging ? 2 : 1, dash: [6]))
-                VStack(spacing: 8) {
-                    if isImporting {
-                        ProgressView("Importing...").padding()
-                    } else {
-                        Button { openSamples() } label: {
-                            Label("Browse Samples", systemImage: "square.on.square")
-                                .lineLimit(1)
-                                .frame(maxWidth: .infinity).padding(.vertical, 8)
-                                .foregroundStyle(.white).background(Color.blue)
-                                .clipShape(RoundedRectangle(cornerRadius: 6))
-                        }
-                        .buttonStyle(.plain).padding(.horizontal, 12)
-                        Text("or drag .wav / sidebar samples here").font(.caption).foregroundStyle(.tertiary)
-                        Divider().padding(.horizontal, 12)
-                        Label("One sample mapped across C0–G8.", systemImage: "info.circle")
-                            .font(.caption).foregroundStyle(.secondary).padding(.horizontal, 12)
-                    }
-                    if let err = errorMessage {
-                        Text(err).font(.caption).foregroundStyle(.red).padding(.horizontal, 12)
-                    }
-                }
-                .padding(.vertical, 12)
-            }
-            .animation(.easeInOut(duration: 0.15), value: isDragging)
-            .onDrop(of: [.fileURL, .plainText], isTargeted: $isDragging) { providers in
-                if let provider = providers.first, provider.canLoadObject(ofClass: NSString.self) {
-                    _ = provider.loadObject(ofClass: NSString.self) { string, _ in
-                        guard let name = string as? String,
-                              let sample = self.diskImage.samples.first(where: {
-                                  ($0.header.name.isEmpty ? $0.directoryEntry.name : $0.header.name) == name
-                              }) else { return }
-                        DispatchQueue.main.async { self.addKeyzoneFromSample(sample) }
-                    }
-                    return true
-                }
-                handleDrop(providers: providers)
-                return true
-            }
-        }
-        .padding(.horizontal, 8).padding(.bottom, 8)
-    }
-
-    private func addKeyzoneFromSample(_ sample: AkaiSample) {
-        let name = sample.header.name.isEmpty ? sample.directoryEntry.name : sample.header.name
-        let note = UInt8(min(24 + existingKeyzones.count, 127))
-        let kz = AkaiProgramKeyzone(
-            sampleName: name, lowKey: 24, highKey: 127, rootNote: note,
-            tuneOffset: 0, fineTune: 0, volume: 99, pan: 0,
-            filterOffset: 0, filterCutoff: 99, filterKeyFollow: 0,
-            filterResonance: 0, filterModDepth1: 0, filterModDepth2: 0, filterModDepth3: 0,
-            rightSampleName: "", rightPan: 50, playbackMode: .sample, velocityLow: 0, velocityHigh: 127)
-        onSamplesImported([kz])
-    }
-    private func openSamples() {
-        let panel = NSOpenPanel()
-        panel.allowsMultipleSelection = true; panel.canChooseDirectories = false
-        panel.allowedContentTypes = [.audio]; panel.title = "Choose samples for preset"
-        guard panel.runModal() == .OK else { return }
-        importURLs(panel.urls)
-    }
-    private func handleDrop(providers: [NSItemProvider]) {
-        var urls: [URL] = []; let group = DispatchGroup()
-        for provider in providers {
-            group.enter()
-            provider.loadItem(forTypeIdentifier: "public.file-url") { item, _ in
-                defer { group.leave() }
-                guard let data = item as? Data, let url = URL(dataRepresentation: data, relativeTo: nil),
-                      audioExts.contains(url.pathExtension.lowercased()) else { return }
-                urls.append(url)
-            }
-        }
-        group.notify(queue: .main) { importURLs(urls.sorted { $0.lastPathComponent < $1.lastPathComponent }) }
-    }
-    private func importURLs(_ urls: [URL]) {
-        guard !urls.isEmpty else { return }
-        isImporting = true; errorMessage = nil
-        let loFi = lowQualityImport
-        var newKeyzones: [AkaiProgramKeyzone] = []; var errors: [String] = []
-        DispatchQueue.global(qos: .userInitiated).async {
-            for url in urls {
-                let accessing = url.startAccessingSecurityScopedResource()
-                defer { if accessing { url.stopAccessingSecurityScopedResource() } }
-                do {
-                    let wavData = try Data(contentsOf: url)
-                    let (pcmData, sampleRate, numChannels, _) = try parseWAV(wavData)
-                    let baseName = AkaiDiskImage.sanitizeName(url.deletingPathExtension().lastPathComponent)
-                    var monoData: Data; let monoName: String
-                    if numChannels >= 2 {
-                        let (left, _) = AkaiDiskImage.deinterleaveStereo(pcmData, channels: numChannels)
-                        monoData = left; monoName = AkaiDiskImage.sanitizeNamePreservingEnd(baseName, maxLen: 10) + "-L"
-                    } else { monoData = pcmData; monoName = baseName }
-                    let finalRate: UInt32
-                    if loFi {
-                        let (loPCM, loRate) = AkaiDiskImage.applyLoFi(pcm: monoData, fromRate: sampleRate)
-                        monoData = loPCM; finalRate = loRate
-                    } else { finalRate = UInt32(sampleRate) }
-                    let sample = try diskImage.addImportedSample(name: monoName, sampleRate: finalRate, numChannels: 1, pcmData: monoData)
-                    let note = UInt8(min(24 + existingKeyzones.count + newKeyzones.count, 127))
-                    newKeyzones.append(AkaiProgramKeyzone(
-                        sampleName: sample.header.name, lowKey: 24, highKey: 127, rootNote: note,
-                        tuneOffset: 0, fineTune: 0, volume: 99, pan: 0,
-                        filterOffset: 0, filterCutoff: 99, filterKeyFollow: 0,
-                        filterResonance: 0, filterModDepth1: 0, filterModDepth2: 0, filterModDepth3: 0,
-                        rightSampleName: "", rightPan: 50, playbackMode: .sample, velocityLow: 0, velocityHigh: 127))
-                } catch { errors.append(url.lastPathComponent + ": " + error.localizedDescription) }
-            }
-            DispatchQueue.main.async {
-                isImporting = false
-                if !newKeyzones.isEmpty { onSamplesImported(newKeyzones) }
-                if !errors.isEmpty { errorMessage = errors.joined(separator: "\n") }
-            }
-        }
-    }
-    private func parseWAV(_ data: Data) throws -> (Data, Int, Int, Int) {
-        guard data.count > 44, data[0..<4] == Data("RIFF".utf8), data[8..<12] == Data("WAVE".utf8) else {
-            throw NSError(domain: "WAV", code: 0, userInfo: [NSLocalizedDescriptionKey: "Not a valid WAV file"])
-        }
-        var offset = 12, sampleRate = 44100, numChannels = 1, bitsPerSample = 16; var pcmData = Data()
-        while offset + 8 <= data.count {
-            let id = String(bytes: data[offset..<offset+4], encoding: .ascii) ?? ""
-            let size = Int(data.readLE32(at: offset + 4)); offset += 8
-            if id == "fmt " { numChannels = Int(data.readLE16(at: offset+2)); sampleRate = Int(data.readLE32(at: offset+4)); bitsPerSample = Int(data.readLE16(at: offset+14)) }
-            else if id == "data" { pcmData = data.subdata(in: offset..<min(offset+size, data.count)) }
-            offset += size + (size % 2)
-        }
-        guard !pcmData.isEmpty else { throw NSError(domain: "WAV", code: 1, userInfo: [NSLocalizedDescriptionKey: "No audio data in WAV"]) }
-        if bitsPerSample == 24 {
-            let bytesPerFrame = 3 * numChannels
-            var out = Data(); out.reserveCapacity((pcmData.count / bytesPerFrame) * 2 * numChannels)
-            var i = 0
-            while i + bytesPerFrame <= pcmData.count {
-                for ch in 0..<numChannels { out.append(pcmData[i + ch*3 + 1]); out.append(pcmData[i + ch*3 + 2]) }
-                i += bytesPerFrame
-            }
-            return (out, sampleRate, numChannels, 16)
-        }
-        return (pcmData, sampleRate, numChannels, bitsPerSample)
-    }
-}
-
-// MARK: - Drum Preset Drop Zone
-
-struct DrumPresetDropZone: View {
-    @ObservedObject var diskImage: AkaiDiskImage
-    let existingKeyzones: [AkaiProgramKeyzone]
-    let onSamplesImported: ([AkaiProgramKeyzone]) -> Void
-    @State private var isDragging = false
-    @State private var isImporting = false
-    @State private var errorMessage: String? = nil
-    @AppStorage("lowQualityImport") private var lowQualityImport = false
-    private let akaiRed = Color(red: 0.91, green: 0, blue: 0.11)
-    private let audioExts: Set<String> = ["wav", "wave", "aif", "aiff", "aifc"]
+/// A single, presentational drop target shown in the program's right panel when
+/// no keyzone is selected. It does NOT handle the drop itself — the whole
+/// ProgramDetailView already has an .onDrop that routes a dropped file to
+/// dropFile (single sample → mapped across the keyboard) or a dropped folder to
+/// dropFolder (each sample → its own key from C1, Const pitch). This view just
+/// gives that view-wide drop a clear visual home and explains the two outcomes.
+struct SimpleDropZone: View {
+    /// Driven by the parent view's .onDrop isTargeted binding so the box lights
+    /// up while dragging over anywhere in the program view.
+    var isTargeted: Bool = false
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Text("Map to individual keys").font(.headline)
-            ZStack {
-                RoundedRectangle(cornerRadius: 10)
-                    .fill(isDragging ? Color.orange.opacity(0.08) : Color.secondary.opacity(0.06))
-                RoundedRectangle(cornerRadius: 10)
-                    .strokeBorder(isDragging ? Color.orange.opacity(0.6) : Color.secondary.opacity(0.2),
-                                  style: StrokeStyle(lineWidth: isDragging ? 2 : 1, dash: [6]))
-                VStack(spacing: 8) {
-                    if isImporting {
-                        ProgressView("Importing samples...").padding()
-                    } else {
-                        Button { openSamples() } label: {
-                            Label("Browse Drum Samples", systemImage: "square.grid.2x2.fill")
-                                .lineLimit(1)
-                                .minimumScaleFactor(0.8)
-                                .frame(maxWidth: .infinity).padding(.vertical, 8)
-                                .foregroundStyle(.white).background(akaiRed)
-                                .clipShape(RoundedRectangle(cornerRadius: 6))
-                        }
-                        .buttonStyle(.plain).padding(.horizontal, 12)
-                        Text("or drag .wav / sidebar samples here").font(.caption).foregroundStyle(.tertiary)
-                        Divider().padding(.horizontal, 12)
-                        VStack(alignment: .leading, spacing: 3) {
-                            Label("Each sample mapped to its own key from C0 upwards.", systemImage: "info.circle")
-                                .font(.caption).foregroundStyle(.secondary)
-                            Label("Stereo: left channel only.", systemImage: "info.circle")
-                                .font(.caption).foregroundStyle(.secondary)
-                        }
-                        .padding(.horizontal, 12)
-                    }
-                    if let err = errorMessage {
-                        Text(err).font(.caption).foregroundStyle(.red).padding(.horizontal, 12)
-                    }
+        ZStack {
+            RoundedRectangle(cornerRadius: 10)
+                .fill(isTargeted ? Color.accentColor.opacity(0.10) : Color.secondary.opacity(0.06))
+            RoundedRectangle(cornerRadius: 10)
+                .strokeBorder(isTargeted ? Color.accentColor.opacity(0.7) : Color.secondary.opacity(0.25),
+                              style: StrokeStyle(lineWidth: isTargeted ? 2 : 1, dash: [6]))
+            VStack(spacing: 10) {
+                Image(systemName: "square.and.arrow.down")
+                    .font(.system(size: 28))
+                    .foregroundStyle(isTargeted ? Color.accentColor : .secondary)
+                Text("Drop samples here")
+                    .font(.headline)
+                VStack(alignment: .leading, spacing: 4) {
+                    Label("A single WAV maps across the whole keyboard.", systemImage: "pianokeys")
+                    Label("A folder maps each WAV to its own key from C1.", systemImage: "square.grid.2x2")
                 }
-                .padding(.vertical, 12)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .padding(.top, 2)
             }
-            .animation(.easeInOut(duration: 0.15), value: isDragging)
-            .onDrop(of: [.fileURL, .plainText], isTargeted: $isDragging) { providers in
-                guard let provider = providers.first else { return false }
-                // Sidebar sample drag — carries plain text (the sample name).
-                if provider.hasItemConformingToTypeIdentifier("public.plain-text") &&
-                   !provider.hasItemConformingToTypeIdentifier("public.file-url") {
-                    _ = provider.loadObject(ofClass: NSString.self) { string, _ in
-                        guard let name = string as? String else { return }
-                        guard self.diskImage.samples.contains(where: {
-                            ($0.header.name.isEmpty ? $0.directoryEntry.name : $0.header.name) == name
-                        }) else { return }
-                        DispatchQueue.main.async {
-                            let note = UInt8(min(36 + self.existingKeyzones.count, 127))
-                            let kz = AkaiProgramKeyzone(
-                                sampleName: name, lowKey: note, highKey: note, rootNote: note,
-                                tuneOffset: 0, fineTune: 0, volume: 99, pan: 0,
-                                filterOffset: 0, filterCutoff: 99, filterKeyFollow: 0,
-                                filterResonance: 0, filterModDepth1: 0, filterModDepth2: 0, filterModDepth3: 0,
-                                rightSampleName: "", rightPan: 50, playbackMode: .noLoop, velocityLow: 0, velocityHigh: 127,
-                                env1Attack: 0, env1Decay: 0, env1Sustain: 99, env1Release: 0)
-                            self.onSamplesImported([kz])
-                        }
-                    }
-                    return true
-                }
-                // File URL drag.
-                handleDrop(providers: providers)
-                return true
-            }
+            .padding(.vertical, 24)
+            .frame(maxWidth: .infinity)
         }
-        .padding(.horizontal, 8).padding(.bottom, 8)
-    }
-
-    private func openSamples() {
-        let panel = NSOpenPanel()
-        panel.allowsMultipleSelection = true; panel.canChooseDirectories = false
-        panel.allowedContentTypes = [.audio]; panel.title = "Choose samples for drum preset"
-        guard panel.runModal() == .OK else { return }
-        importURLs(panel.urls)
-    }
-    private func handleDrop(providers: [NSItemProvider]) {
-        var urls: [URL] = []; let group = DispatchGroup()
-        for provider in providers {
-            group.enter()
-            provider.loadItem(forTypeIdentifier: "public.file-url") { item, _ in
-                defer { group.leave() }
-                guard let data = item as? Data, let url = URL(dataRepresentation: data, relativeTo: nil),
-                      audioExts.contains(url.pathExtension.lowercased()) else { return }
-                urls.append(url)
-            }
-        }
-        group.notify(queue: .main) { importURLs(urls.sorted { $0.lastPathComponent < $1.lastPathComponent }) }
-    }
-    private func importURLs(_ urls: [URL]) {
-        guard !urls.isEmpty else { return }
-        isImporting = true; errorMessage = nil
-        let loFi = lowQualityImport
-        var newKeyzones: [AkaiProgramKeyzone] = []
-        var nextNote: Int = existingKeyzones.last.map { Int($0.rootNote) + 1 } ?? 36
-        var errors: [String] = []
-        DispatchQueue.global(qos: .userInitiated).async {
-            for url in urls {
-                let accessing = url.startAccessingSecurityScopedResource()
-                defer { if accessing { url.stopAccessingSecurityScopedResource() } }
-                do {
-                    let wavData = try Data(contentsOf: url)
-                    let (pcmData, sampleRate, numChannels, _) = try parseWAV(wavData)
-                    let baseName = AkaiDiskImage.sanitizeName(url.deletingPathExtension().lastPathComponent)
-                    var monoData: Data; let monoName: String
-                    if numChannels >= 2 {
-                        let (left, _) = AkaiDiskImage.deinterleaveStereo(pcmData, channels: numChannels)
-                        monoData = left; monoName = AkaiDiskImage.sanitizeNamePreservingEnd(baseName, maxLen: 10) + "-L"
-                    } else { monoData = pcmData; monoName = baseName }
-                    let finalRate: UInt32
-                    if loFi {
-                        let (loPCM, loRate) = AkaiDiskImage.applyLoFi(pcm: monoData, fromRate: sampleRate)
-                        monoData = loPCM; finalRate = loRate
-                    } else { finalRate = UInt32(sampleRate) }
-                    let sample = try diskImage.addImportedSample(name: monoName, sampleRate: finalRate, numChannels: 1, pcmData: monoData)
-                    let note = UInt8(min(nextNote, 127))
-                    newKeyzones.append(AkaiProgramKeyzone(
-                        sampleName: sample.header.name, lowKey: note, highKey: note, rootNote: note,
-                        tuneOffset: 0, fineTune: 0, volume: 99, pan: 0,
-                        filterOffset: 0, filterCutoff: 99, filterKeyFollow: 0,
-                        filterResonance: 0, filterModDepth1: 0, filterModDepth2: 0, filterModDepth3: 0,
-                        rightSampleName: "", rightPan: 50, playbackMode: .noLoop, velocityLow: 0, velocityHigh: 127,
-                        env1Attack: 0, env1Decay: 0, env1Sustain: 99, env1Release: 0))
-                    nextNote += 1
-                } catch { errors.append(url.lastPathComponent + ": " + error.localizedDescription) }
-            }
-            DispatchQueue.main.async {
-                isImporting = false
-                if !newKeyzones.isEmpty { onSamplesImported(newKeyzones) }
-                if !errors.isEmpty { errorMessage = errors.joined(separator: "\n") }
-            }
-        }
-    }
-    private func parseWAV(_ data: Data) throws -> (Data, Int, Int, Int) {
-        guard data.count > 44, data[0..<4] == Data("RIFF".utf8), data[8..<12] == Data("WAVE".utf8) else {
-            throw NSError(domain: "WAV", code: 0, userInfo: [NSLocalizedDescriptionKey: "Not a valid WAV file"])
-        }
-        var offset = 12, sampleRate = 44100, numChannels = 1, bitsPerSample = 16; var pcmData = Data()
-        while offset + 8 <= data.count {
-            let id = String(bytes: data[offset..<offset+4], encoding: .ascii) ?? ""
-            let size = Int(data.readLE32(at: offset + 4)); offset += 8
-            if id == "fmt " { numChannels = Int(data.readLE16(at: offset+2)); sampleRate = Int(data.readLE32(at: offset+4)); bitsPerSample = Int(data.readLE16(at: offset+14)) }
-            else if id == "data" { pcmData = data.subdata(in: offset..<min(offset+size, data.count)) }
-            offset += size + (size % 2)
-        }
-        guard !pcmData.isEmpty else { throw NSError(domain: "WAV", code: 1, userInfo: [NSLocalizedDescriptionKey: "No audio data in WAV"]) }
-        if bitsPerSample == 24 {
-            let bytesPerFrame = 3 * numChannels
-            var out = Data(); out.reserveCapacity((pcmData.count / bytesPerFrame) * 2 * numChannels)
-            var i = 0
-            while i + bytesPerFrame <= pcmData.count {
-                for ch in 0..<numChannels { out.append(pcmData[i + ch*3 + 1]); out.append(pcmData[i + ch*3 + 2]) }
-                i += bytesPerFrame
-            }
-            return (out, sampleRate, numChannels, 16)
-        }
-        return (pcmData, sampleRate, numChannels, bitsPerSample)
+        .frame(minHeight: 160)
+        .animation(.easeInOut(duration: 0.15), value: isTargeted)
     }
 }
 
@@ -1197,6 +1029,7 @@ struct KeyzoneEditorView: View {
                             .background(Capsule().fill(Color.accentColor))
                     }
                 }
+                .frame(maxWidth: .infinity, alignment: .leading)
                 InfoCard(title: "Playback") {
                     VStack(alignment: .leading, spacing: 6) {
                         HStack {
@@ -1208,11 +1041,28 @@ struct KeyzoneEditorView: View {
                             Spacer()
                         }
                         Text(keyzone.playbackMode.explanation).font(.caption).foregroundStyle(.secondary)
-                            .fixedSize(horizontal: false, vertical: true).padding(.top, 4).padding(.leading, 100)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .fixedSize(horizontal: false, vertical: true).padding(.top, 4).padding(.bottom, 4)
                     }
                 }
                 InfoCard(title: "Tune") {
                     VStack(alignment: .leading, spacing: 10) {
+                        HStack {
+                            Text("Pitch Mode").frame(width: 100, alignment: .leading).font(.subheadline).foregroundStyle(.secondary)
+                            Picker("", selection: $keyzone.pitchMode) {
+                                Text("Track").tag(UInt8(0))
+                                Text("Const").tag(UInt8(1))
+                            }
+                            .pickerStyle(.segmented)
+                            .labelsHidden()
+                            .onChange(of: keyzone.pitchMode) { _, _ in onChange() }
+                        }
+                        Text(keyzone.pitchMode == 0
+                             ? "Track: pitch follows the keyboard, transposing the sample normally across the key range — use for melodic/pitched instruments."
+                             : "Const: always plays back as if C3 were pressed, regardless of which key triggers it — per the manual, this only matches the sample's true pitch if its root note is set to C3, which is why the recommended drum workflow is to sample everything at C3, then switch Const on.")
+                            .font(.caption).foregroundStyle(.secondary)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .fixedSize(horizontal: false, vertical: true).padding(.top, 4).padding(.bottom, 4)
                         HStack {
                             Text("Tune (st)").frame(width: 100, alignment: .leading).font(.subheadline).foregroundStyle(.secondary)
                             Stepper("\(keyzone.tuneOffset)", value: $keyzone.tuneOffset, in: -24...24)
@@ -1221,21 +1071,21 @@ struct KeyzoneEditorView: View {
                         HStack {
                             Text("Fine (¢)").frame(width: 100, alignment: .leading).font(.subheadline).foregroundStyle(.secondary)
                             Slider(value: .init(get: { Double(keyzone.fineTune) }, set: { keyzone.fineTune = Int8($0); onChange() }), in: -50...50, step: 1)
-                            Text("\(keyzone.fineTune)¢").frame(width: 35).font(.system(.caption, design: .monospaced))
+                            Text("\(keyzone.fineTune)¢").frame(width: 35, alignment: .trailing).font(.system(.caption, design: .monospaced))
                         }
                         HStack {
                             Text("Volume").frame(width: 100, alignment: .leading).font(.subheadline).foregroundStyle(.secondary)
                             Slider(value: .init(get: { Double(keyzone.volume) }, set: { keyzone.volume = UInt8($0); onChange() }), in: 0...99, step: 1)
-                            Text("\(keyzone.volume)").frame(width: 30).font(.system(.body, design: .monospaced))
+                            Text("\(keyzone.volume)").frame(width: 35, alignment: .trailing).font(.system(.body, design: .monospaced))
                         }
                         HStack {
                             Text("Pan").frame(width: 100, alignment: .leading).font(.subheadline).foregroundStyle(.secondary)
                             Slider(value: .init(get: { Double(keyzone.pan) }, set: { keyzone.pan = Int8($0); onChange() }), in: -50...50, step: 1)
                             Text(keyzone.pan == 0 ? "C" : keyzone.pan > 0 ? "R\(keyzone.pan)" : "L\(abs(keyzone.pan))")
-                                .frame(width: 35).font(.system(.caption, design: .monospaced))
+                                .frame(width: 35, alignment: .trailing).font(.system(.caption, design: .monospaced))
                         }
                         if !keyzone.rightSampleName.trimmingCharacters(in: .whitespaces).isEmpty {
-                            VStack(alignment: .leading, spacing: 2) {
+                            VStack(alignment: .leading, spacing: 4) {
                                 HStack {
                                     Text("Right Pan").frame(width: 100, alignment: .leading).font(.subheadline).foregroundStyle(.secondary)
                                     Slider(value: .init(get: { Double(keyzone.rightPan) }, set: { keyzone.rightPan = Int8($0); onChange() }), in: -50...50, step: 1)
@@ -1243,7 +1093,10 @@ struct KeyzoneEditorView: View {
                                         .frame(width: 35).font(.system(.caption, design: .monospaced))
                                 }
                                 Text("Pan for the stereo right channel (zone 2: \(keyzone.rightSampleName.trimmingCharacters(in: .whitespaces))). Real hardware convention is hard left/right (-50/+50).")
-                                    .font(.caption2).foregroundStyle(.secondary).padding(.leading, 100)
+                                    .font(.caption2).foregroundStyle(.secondary)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                    .fixedSize(horizontal: false, vertical: true)
+                                    .padding(.bottom, 4)
                             }
                         }
                     }
@@ -1265,7 +1118,9 @@ struct KeyzoneEditorView: View {
                 InfoCard(title: "ENV1 — Shaping Amplitude") {
                     VStack(alignment: .leading, spacing: 8) {
                         Text("Controls the volume shape of each note over time. Attack sets how quickly the sound reaches full volume; Decay how quickly it falls to the Sustain level; Sustain the held level while the key is held; Release how quickly it fades after key release. (Manual p.105)")
-                            .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                            .font(.caption).foregroundStyle(.secondary)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .fixedSize(horizontal: false, vertical: true)
                         HStack(alignment: .center, spacing: 12) {
                             AdsrView(
                                 attack: Binding(get: { keyzone.env1Attack }, set: { keyzone.env1Attack = $0; onChange() }),
@@ -1285,7 +1140,7 @@ struct KeyzoneEditorView: View {
                                 keyzone.env1Attack = AkaiKeyzoneDefaults.env1Attack; keyzone.env1Decay = AkaiKeyzoneDefaults.env1Decay
                                 keyzone.env1Sustain = AkaiKeyzoneDefaults.env1Sustain; keyzone.env1Release = AkaiKeyzoneDefaults.env1Release
                                 onChange()
-                            } label: { Label("Reset", systemImage: "arrow.counterclockwise").font(.system(size: 11)) }
+                            } label: { Label("Reset to Akai Defaults", systemImage: "arrow.counterclockwise").font(.system(size: 11)) }
                             .buttonStyle(.bordered).controlSize(.small).tint(.blue)
                             .help("Reset ENV1 to hardware defaults: A=\(AkaiKeyzoneDefaults.env1Attack) D=\(AkaiKeyzoneDefaults.env1Decay) S=\(AkaiKeyzoneDefaults.env1Sustain) R=\(AkaiKeyzoneDefaults.env1Release)")
                             Spacer()
@@ -1294,75 +1149,98 @@ struct KeyzoneEditorView: View {
                 }
                 InfoCard(title: "Filter") {
                     VStack(alignment: .leading, spacing: 16) {
-                        VStack(alignment: .leading, spacing: 6) {
+                        VStack(alignment: .leading, spacing: 8) {
                             HStack {
                                 Text("Frequency").frame(width: 100, alignment: .leading).font(.subheadline).foregroundStyle(.secondary)
                                 Slider(value: .init(get: { Double(keyzone.filterCutoff) }, set: { keyzone.filterCutoff = UInt8($0); onChange() }), in: 0...99, step: 1)
                                 Text("\(keyzone.filterCutoff)").frame(width: 30).font(.system(.body, design: .monospaced))
                             }
                             Text("Cutoff frequency of the 12dB/octave resonant lowpass filter. 99 = fully open (no filtering); lower values progressively remove high frequencies, darkening the tone.")
-                                .font(.caption2).foregroundStyle(.secondary).padding(.top, 2).padding(.leading, 100)
+                                .font(.caption2).foregroundStyle(.secondary)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .fixedSize(horizontal: false, vertical: true)
+                                .padding(.top, 2).padding(.bottom, 4)
                         }
-                        VStack(alignment: .leading, spacing: 6) {
+                        VStack(alignment: .leading, spacing: 8) {
                             HStack {
                                 Text("Key Follow").frame(width: 100, alignment: .leading).font(.subheadline).foregroundStyle(.secondary)
                                 Stepper("\(keyzone.filterKeyFollow)", value: $keyzone.filterKeyFollow, in: -24...24)
                                     .onChange(of: keyzone.filterKeyFollow) { _, _ in onChange() }
                             }
                             Text("How much the cutoff tracks keyboard position. 0 = no tracking; +12 = filter opens one octave for every octave played up the keyboard.")
-                                .font(.caption2).foregroundStyle(.secondary).padding(.top, 2).padding(.leading, 100)
+                                .font(.caption2).foregroundStyle(.secondary)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .fixedSize(horizontal: false, vertical: true)
+                                .padding(.top, 2).padding(.bottom, 4)
                         }
-                        VStack(alignment: .leading, spacing: 6) {
+                        VStack(alignment: .leading, spacing: 8) {
                             HStack {
                                 Text("Resonance").frame(width: 100, alignment: .leading).font(.subheadline).foregroundStyle(.secondary)
                                 Slider(value: .init(get: { Double(keyzone.filterResonance) }, set: { keyzone.filterResonance = UInt8($0); onChange() }), in: 0...15, step: 1)
                                 Text("\(keyzone.filterResonance)").frame(width: 30).font(.system(.body, design: .monospaced))
                             }
                             Text("Narrows the filter's response slope, emphasising harmonics around the cutoff frequency. High settings produce a resonant 'weeow' character.")
-                                .font(.caption2).foregroundStyle(.secondary).padding(.top, 2).padding(.leading, 100)
+                                .font(.caption2).foregroundStyle(.secondary)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .fixedSize(horizontal: false, vertical: true)
+                                .padding(.top, 2).padding(.bottom, 4)
                         }
-                        VStack(alignment: .leading, spacing: 6) {
+                        VStack(alignment: .leading, spacing: 8) {
                             HStack {
                                 Text(modSource1.displayName).frame(width: 100, alignment: .leading).font(.subheadline).foregroundStyle(.secondary)
                                 Slider(value: .init(get: { Double(keyzone.filterModDepth1) }, set: { keyzone.filterModDepth1 = Int8($0); onChange() }), in: -50...50, step: 1)
                                 Text("\(keyzone.filterModDepth1)").frame(width: 35).font(.system(.caption, design: .monospaced))
                             }
-                            Text("How much this source opens/closes the filter (±50). Source is set in Program Settings (shared by every keygroup).")
-                                .font(.caption2).foregroundStyle(.secondary).padding(.top, 2).padding(.leading, 100)
+                            Text("\(modSource1.helpText) Range is ±50; the source itself is set once in Program Settings, shared by every keygroup.")
+                                .font(.caption2).foregroundStyle(.secondary)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .fixedSize(horizontal: false, vertical: true)
+                                .padding(.top, 2).padding(.bottom, 4)
                         }
-                        VStack(alignment: .leading, spacing: 6) {
+                        VStack(alignment: .leading, spacing: 8) {
                             HStack {
                                 Text(modSource2.displayName).frame(width: 100, alignment: .leading).font(.subheadline).foregroundStyle(.secondary)
                                 Slider(value: .init(get: { Double(keyzone.filterModDepth2) }, set: { keyzone.filterModDepth2 = Int8($0); onChange() }), in: -50...50, step: 1)
                                 Text("\(keyzone.filterModDepth2)").frame(width: 35).font(.system(.caption, design: .monospaced))
                             }
-                            Text("How much this source sweeps the filter (±50). Source is set in Program Settings (shared by every keygroup).")
-                                .font(.caption2).foregroundStyle(.secondary).padding(.top, 2).padding(.leading, 100)
+                            Text("\(modSource2.helpText) Range is ±50; the source itself is set once in Program Settings, shared by every keygroup.")
+                                .font(.caption2).foregroundStyle(.secondary)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .fixedSize(horizontal: false, vertical: true)
+                                .padding(.top, 2).padding(.bottom, 4)
                         }
-                        VStack(alignment: .leading, spacing: 6) {
+                        VStack(alignment: .leading, spacing: 8) {
                             HStack {
                                 Text(modSource3.displayName).frame(width: 100, alignment: .leading).font(.subheadline).foregroundStyle(.secondary)
                                 Slider(value: .init(get: { Double(keyzone.filterModDepth3) }, set: { keyzone.filterModDepth3 = Int8($0); onChange() }), in: -50...50, step: 1)
                                 Text("\(keyzone.filterModDepth3)").frame(width: 35).font(.system(.caption, design: .monospaced))
                             }
-                            Text("How much this source shapes the filter (±50). Source is set in Program Settings (shared by every keygroup).")
-                                .font(.caption2).foregroundStyle(.secondary).padding(.top, 2).padding(.leading, 100)
+                            Text("\(modSource3.helpText) Range is ±50; the source itself is set once in Program Settings, shared by every keygroup.")
+                                .font(.caption2).foregroundStyle(.secondary)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .fixedSize(horizontal: false, vertical: true)
+                                .padding(.top, 2).padding(.bottom, 4)
                         }
-                        VStack(alignment: .leading, spacing: 6) {
+                        VStack(alignment: .leading, spacing: 8) {
                             HStack {
                                 Text("Filter Trim").frame(width: 100, alignment: .leading).font(.subheadline).foregroundStyle(.secondary)
                                 Slider(value: .init(get: { Double(keyzone.filterOffset) }, set: { keyzone.filterOffset = Int8($0); onChange() }), in: -50...50, step: 1)
                                 Text("\(keyzone.filterOffset)").frame(width: 35).font(.system(.caption, design: .monospaced))
                             }
                             Text("Small ±50 adjustment on top of Cutoff, for matching tone between adjacent keygroups.")
-                                .font(.caption2).foregroundStyle(.secondary).padding(.top, 2).padding(.leading, 100)
+                                .font(.caption2).foregroundStyle(.secondary)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .fixedSize(horizontal: false, vertical: true)
+                                .padding(.top, 2).padding(.bottom, 4)
                         }
                     }
                 }
                 InfoCard(title: "ENV2 — Shaping The Filter") {
                     VStack(alignment: .leading, spacing: 10) {
                         Text("Controls how the filter cutoff changes over time. ENV2 is a 4-stage Rate/Level envelope: R1→L1, R2→L2, R3→L3 (sustain), R4→L4. Works with the filter mod depth above. (Manual p.107)")
-                            .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                            .font(.caption).foregroundStyle(.secondary)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .fixedSize(horizontal: false, vertical: true)
                         HStack(alignment: .center, spacing: 12) {
                             AdsrView(
                                 attack: Binding(get: { keyzone.env2R1 }, set: { keyzone.env2R1 = $0; onChange() }),
@@ -1389,7 +1267,7 @@ struct KeyzoneEditorView: View {
                                 keyzone.env2R3 = AkaiKeyzoneDefaults.env2R3; keyzone.env2L3 = AkaiKeyzoneDefaults.env2L3
                                 keyzone.env2R4 = AkaiKeyzoneDefaults.env2R4; keyzone.env2L4 = AkaiKeyzoneDefaults.env2L4
                                 onChange()
-                            } label: { Label("Reset", systemImage: "arrow.counterclockwise").font(.system(size: 11)) }
+                            } label: { Label("Reset to Akai Defaults", systemImage: "arrow.counterclockwise").font(.system(size: 11)) }
                             .buttonStyle(.bordered).controlSize(.small).tint(.blue)
                             .help("Reset ENV2 to hardware defaults: R1=\(AkaiKeyzoneDefaults.env2R1) L1=\(AkaiKeyzoneDefaults.env2L1) R2=\(AkaiKeyzoneDefaults.env2R2) L2=\(AkaiKeyzoneDefaults.env2L2) R3=\(AkaiKeyzoneDefaults.env2R3) L3=\(AkaiKeyzoneDefaults.env2L3) R4=\(AkaiKeyzoneDefaults.env2R4) L4=\(AkaiKeyzoneDefaults.env2L4)")
                             Spacer()
@@ -1537,23 +1415,16 @@ struct ProgramListView: View {
             return
         }
         if accessing { url.stopAccessingSecurityScopedResource() }
-        guard wavData.count > 44,
-              wavData[0..<4] == Data("RIFF".utf8),
-              wavData[8..<12] == Data("WAVE".utf8) else {
-            dropError = "\(url.lastPathComponent) is not a valid WAV file."
+        let decoded: WAVImport.Decoded
+        do { decoded = try WAVImport.decode(wavData) }
+        catch {
+            dropError = "\(url.lastPathComponent): \(error.localizedDescription)"
             showDropError = true
             return
         }
-        var offset = 12; var sampleRate = 44100; var numChannels = 1
-        var pcmData = Data()
-        while offset + 8 <= wavData.count {
-            let id = String(bytes: wavData[offset..<offset+4], encoding: .ascii) ?? ""
-            let size = Int(wavData.readLE32(at: offset + 4)); offset += 8
-            if id == "fmt " { numChannels = Int(wavData.readLE16(at: offset+2)); sampleRate = Int(wavData.readLE32(at: offset+4)) }
-            else if id == "data" { pcmData = wavData.subdata(in: offset..<min(offset+size, wavData.count)) }
-            offset += size + (size % 2)
-        }
-        guard !pcmData.isEmpty else { return }
+        let pcmData = decoded.pcm
+        let sampleRate = decoded.sampleRate
+        let numChannels = decoded.channels
         let rawName = url.deletingPathExtension().lastPathComponent
         let programName = AkaiDiskImage.sanitizeName(String(rawName.prefix(12)))
         let loFi = lowQualityImport
@@ -1579,7 +1450,7 @@ struct ProgramListView: View {
                 let prog = try diskImage.createProgram(name: programName)
                 let kz = AkaiProgramKeyzone(
                     sampleName: sample.header.name,
-                    lowKey: 24, highKey: 127, rootNote: 60,
+                    lowKey: 24, highKey: UInt8(PianoKeyboardView.visibleEndNote), rootNote: 60,
                     tuneOffset: 0, fineTune: 0, volume: 99, pan: 0,
                     filterOffset: 0, filterCutoff: 99, filterKeyFollow: 0,
                     filterResonance: 0, filterModDepth1: 0,
@@ -1625,6 +1496,7 @@ struct ProgramListView: View {
             return
         }
         let loFi = lowQualityImport
+        var usedNames = Set(diskImage.samples.map { $0.header.name })
         DispatchQueue.global(qos: .userInitiated).async {
             var keyzones: [AkaiProgramKeyzone] = []
             var nextNote = 36
@@ -1634,21 +1506,12 @@ struct ProgramListView: View {
                 defer { if accessing { url.stopAccessingSecurityScopedResource() } }
                 do {
                     guard let wavData = try? Data(contentsOf: url),
-                          wavData.count > 44,
-                          wavData[0..<4] == Data("RIFF".utf8),
-                          wavData[8..<12] == Data("WAVE".utf8) else { continue }
-                    var offset = 12; var sampleRate = 44100; var numChannels = 1
-                    var pcmData = Data()
-                    while offset + 8 <= wavData.count {
-                        let id = String(bytes: wavData[offset..<offset+4], encoding: .ascii) ?? ""
-                        let size = Int(wavData.readLE32(at: offset + 4)); offset += 8
-                        if id == "fmt " { numChannels = Int(wavData.readLE16(at: offset+2)); sampleRate = Int(wavData.readLE32(at: offset+4)) }
-                        else if id == "data" { pcmData = wavData.subdata(in: offset..<min(offset+size, wavData.count)) }
-                        offset += size + (size % 2)
-                    }
-                    guard !pcmData.isEmpty else { continue }
+                          let decoded = try? WAVImport.decode(wavData) else { continue }
+                    let pcmData = decoded.pcm
+                    let sampleRate = decoded.sampleRate
+                    let numChannels = decoded.channels
                     let baseName = url.deletingPathExtension().lastPathComponent
-                    var monoData: Data; let monoName: String
+                    var monoData: Data; var monoName: String
                     if numChannels >= 2 {
                         let (left, _) = AkaiDiskImage.deinterleaveStereo(pcmData, channels: numChannels)
                         monoData = left
@@ -1657,6 +1520,7 @@ struct ProgramListView: View {
                         monoData = pcmData
                         monoName = AkaiDiskImage.sanitizeName(String(baseName.prefix(12)))
                     }
+                    monoName = AkaiDiskImage.disambiguateSampleName(monoName, usedNames: &usedNames)
                     let finalRate: UInt32
                     if loFi {
                         let (loPCM, loRate) = AkaiDiskImage.applyLoFi(pcm: monoData, fromRate: sampleRate)
@@ -1666,19 +1530,18 @@ struct ProgramListView: View {
                         name: monoName, sampleRate: finalRate,
                         numChannels: 1, pcmData: monoData)
                     let note = UInt8(min(nextNote, 127))
-                    var patchedSample = sample
-                    patchedSample.header.midiRootNote = note
-                    diskImage.applySampleEdits(patchedSample)
+                    var patched = sample; patched.header.midiRootNote = note
+                    diskImage.applySampleEdits(patched)
                     keyzones.append(AkaiProgramKeyzone(
                         sampleName: sample.header.name,
-                        lowKey: note, highKey: note, rootNote: note,
+                        lowKey: note, highKey: note, rootNote: 60,
                         tuneOffset: 0, fineTune: 0, volume: 99, pan: 0,
                         filterOffset: 0, filterCutoff: 99, filterKeyFollow: 0,
                         filterResonance: 0, filterModDepth1: 0,
                         filterModDepth2: 0, filterModDepth3: 0,
                         rightSampleName: "", rightPan: 50,
-                        playbackMode: .noLoop, velocityLow: 0, velocityHigh: 127,
-                        env1Attack: 0, env1Decay: 0, env1Sustain: 99, env1Release: 0))
+                        playbackMode: .sample, velocityLow: 0, velocityHigh: 127,
+                        env1Attack: 0, env1Decay: 0, env1Sustain: 99, env1Release: 0, pitchMode: 0))
                     nextNote += 1
                 } catch {
                     hitLimit = true

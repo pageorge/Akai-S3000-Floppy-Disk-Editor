@@ -89,6 +89,14 @@ To build from source: **Xcode 15** or later.
 
 ## Tips & Tricks
 
+### Global settings are saved to disk
+
+The S3000XL saves its global settings (master transpose, fine tune, MIDI channel assignments, etc.) into **blocks 0–4** of the floppy when you do SAVE → ALL or SAVE → GLOBALS. When you load a disk, these settings are restored — including any transpose or tuning that was active when the disk was last saved.
+
+**If samples play back at the wrong speed or pitch after loading a disk:** check the global TRANSPOSE and FINE TUNE settings (TUNE/MIDI button). A non-zero transpose saved to disk will affect all playback. Reset to zero and save back to the disk to fix it.
+
+The app preserves blocks 0–4 faithfully when saving — it never modifies global settings. New disks created by the app initialise these blocks with hardware-captured factory defaults, byte-for-byte matching a freshly formatted S3000XL disk, ensuring correct global settings from the start.
+
 ### How to create a new program on the S3000XL
 
 There's no separate "blank new program" function — every new program is made by copying an existing one (most simply, the built-in default TEST PROGRAM):
@@ -96,6 +104,24 @@ There's no separate "blank new program" function — every new program is made b
 1. Go to EDIT PROGRAM → SINGLE
 2. Press **NAME**, type your new program name (up to 12 characters, uppercase only), press **ENT**
 3. Press **COPY** — this duplicates the current program under your new name
+
+### How to create a drum program in the app
+
+1. Right-click **Programs** in the sidebar → **Create Drum Program**
+2. Drag WAV files from Finder onto the program — each file lands on its own key starting at C1, with the sample root automatically set to match the pad key so TRACK pitch plays at unity
+3. Or drag existing sidebar samples onto the program — you'll be prompted before the sample root is changed (since rkey is shared across all programs using that sample)
+4. Pitch bend works on drum programs (TRACK mode) — ensure your controller is not on MIDI channel 10 if bend doesn't respond, as some controllers strip bend from that channel by convention
+
+### Sample root note and drum pitch
+
+The sample's **root key** (`rkey`, shown as "Root Note" in the sample detail view) tells the S3000 which pitch to play the sample at unity in TRACK mode. For drums:
+- The app automatically sets `rkey` to match the pad's trigger key (e.g. C1 for the first pad)
+- This means each pad plays its sample at recorded pitch regardless of where it sits on the keyboard
+- `rkey` is stored on the **sample**, not the keyzone — if the same sample is used by two different drum pads, the second drag will prompt you before changing it
+
+### Lo-fi / Convert to 22k
+
+The "Convert to 22k" toggle in the Samples header downsamples imported WAVs from 44.1kHz to 22.05kHz, roughly halving their disk footprint. Use it when you need to fit more samples on one floppy. The bandwidth byte is automatically set to match the sample rate.
 
 ### How to use Multis
 
@@ -124,9 +150,10 @@ Sources: [Midi-In/akaiutil](https://github.com/Midi-In/akaiutil), [keirf/GreaseW
 
 | Offset | Field | Notes |
 |---|---|---|
-| `0x0000` | `file[64]` | Floppy-header directory copy. Slot 0 = S3000 volume sentinel (type `0xFF`). |
+| `0x0000` | `file[64]` | 64 × 24-byte floppy-header entries. Each entry: name[12] (Akai-encoded volume name), `00 00 04 0B` tag, type byte (`0xFF` for slot 0 = volume sentinel, `0x00` for others), byte 18 = `0x10` (undocumented, **hardware-confirmed**), osver `0x11`. |
 | `0x0600` | `fatblk[1600][2]` | FAT: 16-bit LE per block. |
 | `0x1280` | `label` | Volume name (12 bytes, Akai-encoded). |
+| `0x1292` | Global settings | 8 bytes of global state (`01 00 00 00 32 09 0C FF`). **Hardware-confirmed** — leaving these zero causes the Akai to load corrupt global settings (e.g. wrong transpose) when the disk is first written back. App seeds new disks with correct factory values. |
 
 ### Live volume directory
 
@@ -165,18 +192,18 @@ Starts at **block 5**, 510 × 24-byte entries, spans 12 blocks.
 | Offset | Field | Notes |
 |---|---|---|
 | `0x00` | `blockid` | `0x03`. |
-| `0x01` | `bandw` | `0x00`=10kHz, `0x01`=20kHz. |
-| `0x02` | `rkey` | MIDI root key. |
+| `0x01` | `bandw` | `0x00`=10kHz (≤22kHz), `0x01`=20kHz (≥33kHz). App derives this from `srate` automatically. |
+| `0x02` | `rkey` | MIDI root key. In TRACK pitch mode, the sample plays at unity when triggered at this key. For drum pads the app sets this to match the pad's trigger key. |
 | `0x03`–`0x0E` | `name[12]` | Akai-encoded. |
-| `0x10` | `lnum` | Number of loops. |
+| `0x10` | `lnum` | Number of active loops. Must be `1` when a loop is set, `0` otherwise. **Hardware-confirmed:** factory samples with a loop have `lnum=1`; writing `0` with valid loop points causes incorrect playback. |
 | `0x13` | `pmode` | `0x00`=Loop, `0x01`=Loop Until Release, `0x02`=No Loop, `0x03`=Play to End. |
 | `0x14` | `ctune` | Cents tune, signed. |
 | `0x15` | `stune` | Semitone tune, signed. |
 | `0x16`–`0x19` | `locat[4]` | Sampler-managed address. |
 | `0x1A`–`0x1D` | `slen[4]` | Number of samples. |
-| `0x1E`–`0x21` | `start[4]` | Trim start marker. Not modeled — app treats buffer as starting at 0. |
+| `0x1E`–`0x21` | `start[4]` | Playback start point (TRIM page). App models this — shown as a draggable white marker on the waveform view, independent of loop points. |
 | `0x22`–`0x25` | `end[4]` | Trim end marker. Not modeled. |
-| `0x26`–`0x85` | `loop[8]` | 8 × 12 bytes: `at[4]`, `flen[2]`, `len[4]`, `time[2]`. `at` is the loop's **right-hand boundary** (return-to point) — region is `[at-len, at)`. Confirmed against factory SAWTOOTH sample on real hardware: `at=192, len=168, flen=36831` displayed as `lng: 168.562` (`len + flen/65536`). `flen` read for rounding, written back as 0. |
+| `0x26`–`0x85` | `loop[8]` | 8 × 12 bytes: `at[4]`, `flen[2]`, `len[4]`, `time[2]`. `at` is the loop's **right-hand boundary** (return-to point) — region is `[at-len, at)`. Confirmed against factory SAWTOOTH sample on real hardware: `at=192, len=168, flen=36831` displayed as `lng: 168.562` (`len + flen/65536`). `flen` read for rounding, written back as 0. `time`: `9999`=HOLD (loop indefinitely, displays as "HOLD" on panel), `0`=OFF (no loop). **Hardware-confirmed** — factory samples use `9999`; the app writes `9999` when looping, `0` otherwise. **Critical:** for NoLoop samples ALL 8 slot `time` fields must be `0`. Writing `9999` in any slot (even slots 1–7) causes the Akai to loop the sample regardless of `pmode` — this manifests as the sample playing at half speed or dragging. App writes `0` in all slots for NoLoop imports; when looping, the active loop is replicated into slots 0–3. |
 | `0x88`–`0x89` | `stpaira[2]` | Stereo-pair partner address; `0xFFFF`=none. |
 | `0x8A`–`0x8B` | `srate[2]` | Sample rate Hz, 16-bit LE. |
 | `0xC0`+ | audio | 16-bit signed LE PCM, mono. |
@@ -212,6 +239,7 @@ Starts at **block 5**, 510 × 24-byte entries, spans 12 blocks.
 | `0x00` | `blockid` | `0x02`. |
 | `0x03` | `keylo` | Low MIDI key. |
 | `0x04` | `keyhi` | High MIDI key. |
+| `0x84` | `pitchMode` | `0x00`=TRACK (pitch follows keyboard, pitch bend works), `0x01`=CONST (always plays at C3 regardless of key, ignores pitch bend). **Hardware-confirmed.** App uses TRACK for all programs. Note: keyzone root note is **not** stored in the keygroup — pitch reference is the sample's own `rkey`. |
 | `0x07` | Frequency (filter cutoff) | 0–99. **Hardware-confirmed.** |
 | `0x08` | Key Follow | Signed. Factory default is 0 (not the manual's stated +12). **Hardware-confirmed.** |
 | `0x0C` | ENV1 Attack | 0–99. **Hardware-confirmed** kg+0x0C. |
@@ -307,6 +335,14 @@ File type `0xED` (`'m'+0x80`). akaiutil documents only the file-type byte and de
 ```bash
 gw read --format=akai.1600 my_disk.img --drive=B
 ```
+
+### Writing a floppy with GreaseWeazle
+
+```bash
+gw write --format=akai.1600 my_disk.img --drive=B
+```
+
+The app automatically passes `--tracks=c=0-N` when writing, where N is the last cylinder containing data. This skips writing empty tracks and can reduce write time by up to 68% for sparse disks.
 
 ---
 

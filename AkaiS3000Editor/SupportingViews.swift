@@ -1,5 +1,114 @@
 import SwiftUI
 
+// MARK: - Scroll / drag / click capture
+
+/// A transparent overlay that reports raw scroll-wheel / trackpad deltas, mouse
+/// drags, and clicks back to SwiftUI, all from a single AppKit view. SwiftUI has
+/// no native hook for raw wheel events, and layering a separate SwiftUI drag
+/// gesture on top of a scroll-catching NSView steals the scroll events — so one
+/// NSView owns all three interactions here to avoid them fighting.
+///
+/// It sits ABOVE the waveform canvas but BELOW the loop handles in the ZStack,
+/// so a drag starting on a loop handle still moves the handle (the handle view
+/// is hit first), while a drag anywhere else pans.
+struct WaveformInteractionCatcher: NSViewRepresentable {
+    /// (deltaY, cursorX, viewWidth). Positive deltaY = scroll up → zoom in.
+    let onScroll: (CGFloat, CGFloat, CGFloat) -> Void
+    /// (translationX, viewWidth) during a plain horizontal drag — pans.
+    let onDrag: (CGFloat, CGFloat) -> Void
+    /// Called once when a drag ends (or a click completes) so pan state can reset.
+    let onDragEnded: () -> Void
+    /// (cursorX, viewWidth) for a click that didn't move far — set the marker.
+    let onClick: (CGFloat, CGFloat) -> Void
+    /// (startX, currentX, viewWidth) during an OPTION-drag — live rubber-band
+    /// selection. Reported continuously so the marquee can be drawn.
+    let onSelect: (CGFloat, CGFloat, CGFloat) -> Void
+    /// (startX, endX, viewWidth) when an OPTION-drag ends — commit zoom to range.
+    let onSelectEnded: (CGFloat, CGFloat, CGFloat) -> Void
+
+    func makeNSView(context: Context) -> CatcherView {
+        let v = CatcherView()
+        v.apply(onScroll: onScroll, onDrag: onDrag, onDragEnded: onDragEnded,
+                onClick: onClick, onSelect: onSelect, onSelectEnded: onSelectEnded)
+        return v
+    }
+
+    func updateNSView(_ nsView: CatcherView, context: Context) {
+        nsView.apply(onScroll: onScroll, onDrag: onDrag, onDragEnded: onDragEnded,
+                     onClick: onClick, onSelect: onSelect, onSelectEnded: onSelectEnded)
+    }
+
+    final class CatcherView: NSView {
+        private var onScroll: ((CGFloat, CGFloat, CGFloat) -> Void)?
+        private var onDrag: ((CGFloat, CGFloat) -> Void)?
+        private var onDragEnded: (() -> Void)?
+        private var onClick: ((CGFloat, CGFloat) -> Void)?
+        private var onSelect: ((CGFloat, CGFloat, CGFloat) -> Void)?
+        private var onSelectEnded: ((CGFloat, CGFloat, CGFloat) -> Void)?
+
+        private var mouseDownX: CGFloat = 0
+        private var movedFar = false
+        /// True when the current drag began with Option held — a zoom-to-region
+        /// marquee rather than a pan.
+        private var selecting = false
+
+        func apply(onScroll: @escaping (CGFloat, CGFloat, CGFloat) -> Void,
+                   onDrag: @escaping (CGFloat, CGFloat) -> Void,
+                   onDragEnded: @escaping () -> Void,
+                   onClick: @escaping (CGFloat, CGFloat) -> Void,
+                   onSelect: @escaping (CGFloat, CGFloat, CGFloat) -> Void,
+                   onSelectEnded: @escaping (CGFloat, CGFloat, CGFloat) -> Void) {
+            self.onScroll = onScroll
+            self.onDrag = onDrag
+            self.onDragEnded = onDragEnded
+            self.onClick = onClick
+            self.onSelect = onSelect
+            self.onSelectEnded = onSelectEnded
+        }
+
+        override func scrollWheel(with event: NSEvent) {
+            // Prefer the precise (trackpad) delta; fall back to the coarse wheel
+            // delta for a physical mouse. Only the vertical component drives zoom.
+            let dy = event.hasPreciseScrollingDeltas ? event.scrollingDeltaY : event.deltaY
+            guard dy != 0 else { return }
+            let local = convert(event.locationInWindow, from: nil)
+            onScroll?(dy, local.x, bounds.width)
+        }
+
+        override func mouseDown(with event: NSEvent) {
+            mouseDownX = convert(event.locationInWindow, from: nil).x
+            movedFar = false
+            // Option held at press = zoom-to-region marquee for this whole drag.
+            selecting = event.modifierFlags.contains(.option)
+        }
+
+        override func mouseDragged(with event: NSEvent) {
+            let x = convert(event.locationInWindow, from: nil).x
+            let dx = x - mouseDownX
+            if abs(dx) > 4 { movedFar = true }
+            guard movedFar else { return }
+            if selecting {
+                onSelect?(mouseDownX, x, bounds.width)
+            } else {
+                onDrag?(dx, bounds.width)
+            }
+        }
+
+        override func mouseUp(with event: NSEvent) {
+            let x = convert(event.locationInWindow, from: nil).x
+            if selecting {
+                if movedFar { onSelectEnded?(mouseDownX, x, bounds.width) }
+                // A near-zero Option-click does nothing (no region).
+            } else if !movedFar {
+                onClick?(x, bounds.width)
+            }
+            onDragEnded?()
+            movedFar = false
+            selecting = false
+        }
+    }
+}
+
 // MARK: - Waveform View
 
 struct WaveformView: View {
@@ -9,6 +118,9 @@ struct WaveformView: View {
     let loopStart: Binding<Double>?
     let loopEnd: Binding<Double>?
     let playhead: Double
+    /// Optional play-start marker, in FRAMES. Click the waveform to set it;
+    /// playback (in SampleDetailView) begins from here. nil = start of sample.
+    let playStart: Binding<Double?>?
     @State private var waveformPoints: [CGFloat] = []
     /// Per-bucket signed min/max of the actual samples (normalised −1..1), so the
     /// drawn shape is the real waveform (sine looks like a sine, square like a
@@ -16,15 +128,48 @@ struct WaveformView: View {
     @State private var waveMin: [CGFloat] = []
     @State private var waveMax: [CGFloat] = []
 
+    /// The visible sample window, in FRAMES: [viewStart, viewEnd). Defaults to
+    /// the whole sample and is narrowed/widened by scroll-to-zoom. All x-axis
+    /// math (waveform buckets, loop region, handles, playhead) is expressed
+    /// relative to this window so zooming just changes what maps to [0, width].
+    @State private var viewStart: Double = 0
+    @State private var viewEnd: Double = 0
+    /// Set once the first real window is established, so we don't keep resetting
+    /// the zoom on every layout pass — only on first appear and on sample change.
+    @State private var didInitWindow = false
+
+    /// Smallest zoom window, in frames — stops zoom-in from collapsing to a
+    /// single sample (which would just show one flat bar).
+    private let minVisibleFrames: Double = 16
+
+    /// Pan state: the visible window's start frame captured at drag begin, so
+    /// the whole gesture pans relative to where it started (no drift).
+    @State private var panAnchorStart: Double? = nil
+
+    /// Latest known view width, captured from GeometryReader, so the key-event
+    /// monitor (which has no geometry of its own) can zoom with the right width.
+    @State private var lastWidth: CGFloat = 0
+    /// Whether the pointer is currently over this waveform. The arrow-key zoom
+    /// only acts while hovering, so it doesn't hijack arrows meant for the
+    /// sidebar list when the mouse is elsewhere.
+    @State private var isHovering = false
+    /// The local key monitor handle, removed on disappear.
+    @State private var keyMonitor: Any? = nil
+
+    /// Live rubber-band selection (Option-drag), as x-pixels [start, current].
+    /// nil when not selecting. On release the range is committed as the new zoom.
+    @State private var selectionX: (CGFloat, CGFloat)? = nil
+
     init(audioData: Data, numSamples: Int = 0, loopEnabled: Bool = false,
          loopStart: Binding<Double>? = nil, loopEnd: Binding<Double>? = nil,
-         playhead: Double = 0) {
+         playhead: Double = 0, playStart: Binding<Double?>? = nil) {
         self.audioData = audioData
         self.numSamples = numSamples
         self.loopEnabled = loopEnabled
         self.loopStart = loopStart
         self.loopEnd = loopEnd
         self.playhead = playhead
+        self.playStart = playStart
     }
 
     /// The canonical sample count (slen) passed in from the header — the same
@@ -32,6 +177,170 @@ struct WaveformView: View {
     /// x-axis and loop-region scaling, so the drawn loop region matches playback.
     private var frameCount: Int {
         numSamples
+    }
+
+    /// Width of the current visible window in frames (guards against a zero/
+    /// unset window before the first layout).
+    private var visibleSpan: Double {
+        let span = viewEnd - viewStart
+        return span > 0 ? span : Double(max(frameCount, 1))
+    }
+
+    /// Map a sample frame to an x-pixel within the current visible window.
+    private func frameToX(_ frame: Double, width: CGFloat) -> CGFloat {
+        CGFloat((frame - viewStart) / visibleSpan) * width
+    }
+
+    /// Map an x-pixel back to a sample frame within the current visible window.
+    private func xToFrame(_ x: CGFloat, width: CGFloat) -> Double {
+        viewStart + Double(max(0, min(1, x / max(width, 1)))) * visibleSpan
+    }
+
+    /// Establish or reset the visible window to the whole sample.
+    private func resetWindow() {
+        viewStart = 0
+        viewEnd = Double(max(frameCount, 1))
+        didInitWindow = true
+    }
+
+    /// Handle one scroll tick: zoom about the cursor. Positive delta = zoom in.
+    /// The frame under the cursor is held fixed so the waveform grows/shrinks
+    /// around the pointer, then the window is clamped to [0, frameCount] with a
+    /// minimum span.
+    private func zoom(delta: CGFloat, cursorX: CGFloat, width: CGFloat) {
+        guard frameCount > 0, width > 0 else { return }
+        let total = Double(frameCount)
+        // Current window, defaulting to the whole sample if not yet set.
+        var start = didInitWindow ? viewStart : 0
+        var end = didInitWindow ? viewEnd : total
+        let span = max(end - start, 1)
+
+        // Frame currently under the cursor — the fixed point of the zoom.
+        let cursorFrac = Double(max(0, min(1, cursorX / width)))
+        let anchorFrame = start + cursorFrac * span
+
+        // Exponential zoom: each notch scales the span by a small factor. Sign of
+        // delta chooses in/out; magnitude gives smooth trackpad response. Scroll
+        // direction is flipped from the OS default here by request: scrolling up
+        // (delta>0) zooms OUT, scrolling down zooms IN.
+        let step = Double(delta) * 0.01
+        let scale = exp(step)                // delta>0 (up) -> scale>1 -> zoom out
+        var newSpan = span * scale
+        newSpan = max(minVisibleFrames, min(total, newSpan))
+
+        // Keep the anchor frame under the cursor: newStart so that
+        // anchorFrame = newStart + cursorFrac * newSpan.
+        var newStart = anchorFrame - cursorFrac * newSpan
+        var newEnd = newStart + newSpan
+
+        // Clamp to the sample bounds without changing the span.
+        if newStart < 0 { newStart = 0; newEnd = newSpan }
+        if newEnd > total { newEnd = total; newStart = total - newSpan }
+        if newStart < 0 { newStart = 0 }
+
+        start = newStart; end = newEnd
+        viewStart = start; viewEnd = end
+        didInitWindow = true
+        computeWaveform(width: width)
+    }
+
+    /// Zoom by an explicit factor about a given frame (used by keyboard zoom,
+    /// where there's no cursor). factor<1 zooms in, factor>1 zooms out. The
+    /// anchor frame stays put; the window is clamped to [0, frameCount].
+    private func zoomBy(factor: Double, anchorFrame: Double, width: CGFloat) {
+        guard frameCount > 0, width > 0 else { return }
+        let total = Double(frameCount)
+        let span = visibleSpan
+        let anchor = max(0, min(total, anchorFrame))
+        let anchorFrac = span > 0 ? (anchor - viewStart) / span : 0.5
+        var newSpan = span * factor
+        newSpan = max(minVisibleFrames, min(total, newSpan))
+        var newStart = anchor - anchorFrac * newSpan
+        var newEnd = newStart + newSpan
+        if newStart < 0 { newStart = 0; newEnd = newSpan }
+        if newEnd > total { newEnd = total; newStart = total - newSpan }
+        if newStart < 0 { newStart = 0 }
+        viewStart = newStart; viewEnd = newEnd
+        didInitWindow = true
+        computeWaveform(width: width)
+    }
+
+    /// Keyboard zoom: up = zoom in, down = zoom out, anchored to the play-start
+    /// marker (or the centre of the current view if no marker is set). Exposed
+    /// (non-private) so SampleDetailView's key handler can call it.
+    func keyboardZoom(zoomIn: Bool, width: CGFloat) {
+        let anchor = playStart?.wrappedValue ?? (viewStart + visibleSpan / 2)
+        zoomBy(factor: zoomIn ? 0.6 : 1.0 / 0.6, anchorFrame: anchor, width: width)
+    }
+
+    /// Keyboard pan: left/right arrows nudge the visible window by a fraction of
+    /// its span. No effect when fully zoomed out (nowhere to pan).
+    func keyboardPan(right: Bool) {
+        guard frameCount > 0 else { return }
+        let total = Double(frameCount)
+        let span = visibleSpan
+        guard span < total else { return }          // fully zoomed out
+        let stepFrames = span * 0.2 * (right ? 1 : -1)
+        var newStart = viewStart + stepFrames
+        newStart = max(0, min(total - span, newStart))
+        viewStart = newStart
+        viewEnd = newStart + span
+        computeWaveform(width: lastWidth)
+    }
+
+    /// Zoom the visible window to a pixel range selected by Option-drag. The two
+    /// x-positions map to frames in the CURRENT window; the smaller becomes the
+    /// new start, the larger the new end. To avoid over-zooming, a too-narrow
+    /// drag is ignored (nothing happens) rather than snapping to an extreme zoom,
+    /// and the resulting window is never allowed below a comfortable floor.
+    private func zoomToRange(startX: CGFloat, endX: CGFloat, width: CGFloat) {
+        guard frameCount > 0, width > 0 else { return }
+        // Ignore accidental hair-thin selections: a drag under ~24px shouldn't
+        // zoom at all (it would jump to an extreme close-up).
+        let pixelSpan = abs(endX - startX)
+        guard pixelSpan >= 24 else { return }
+
+        let total = Double(frameCount)
+        let a = xToFrame(min(startX, endX), width: width)
+        let b = xToFrame(max(startX, endX), width: width)
+        var newStart = max(0, min(a, b))
+        var newEnd = min(total, max(a, b))
+        // Don't zoom in tighter than a comfortable floor. Use a larger floor than
+        // the scroll/keyboard minimum so drag-zoom lands somewhere readable
+        // rather than on a handful of samples.
+        let dragFloor = max(minVisibleFrames, min(total, 128))
+        if newEnd - newStart < dragFloor {
+            let mid = (newStart + newEnd) / 2
+            newStart = max(0, mid - dragFloor / 2)
+            newEnd = min(total, newStart + dragFloor)
+            newStart = max(0, newEnd - dragFloor)
+        }
+        viewStart = newStart
+        viewEnd = newEnd
+        didInitWindow = true
+        computeWaveform(width: width)
+    }
+
+    /// Pan the visible window horizontally by a pixel translation, relative to
+    /// the window captured at the start of the drag. Positive translation drags
+    /// the content right (reveals earlier frames), so the window moves left.
+    /// Clamped to [0, frameCount] without changing the span.
+    private func pan(translationX: CGFloat, width: CGFloat) {
+        guard frameCount > 0, width > 0 else { return }
+        let total = Double(frameCount)
+        let span = visibleSpan
+        // Anchor the pan to the window start at gesture begin.
+        if panAnchorStart == nil { panAnchorStart = viewStart }
+        let anchor = panAnchorStart ?? viewStart
+        // Convert the pixel drag into a frame offset. Dragging right (positive)
+        // should move the window's start DOWN (earlier), so subtract.
+        let framesPerPixel = span / Double(width)
+        var newStart = anchor - Double(translationX) * framesPerPixel
+        // Clamp so the window stays within [0, total] and keeps its span.
+        newStart = max(0, min(total - span, newStart))
+        viewStart = newStart
+        viewEnd = newStart + span
+        computeWaveform(width: width)
     }
 
     var body: some View {
@@ -77,6 +386,55 @@ struct WaveformView: View {
                     }
                     .allowsHitTesting(false)
 
+                    // Scroll / drag / click capture. A single AppKit view owns
+                    // all three so they don't fight (a separate SwiftUI drag layer
+                    // on top would steal the scroll events). Sits ABOVE the
+                    // waveform canvas but BELOW the loop handles, so a drag that
+                    // starts on a handle moves the handle, while a drag elsewhere
+                    // pans and a click sets the play-start marker.
+                    WaveformInteractionCatcher(
+                        onScroll: { dy, cursorX, width in
+                            zoom(delta: dy, cursorX: cursorX, width: width)
+                        },
+                        onDrag: { translationX, width in
+                            pan(translationX: translationX, width: width)
+                        },
+                        onDragEnded: {
+                            panAnchorStart = nil
+                            selectionX = nil
+                        },
+                        onClick: { cursorX, width in
+                            let frame = xToFrame(cursorX, width: width)
+                            playStart?.wrappedValue = max(0, min(Double(frameCount), frame))
+                        },
+                        onSelect: { startX, currentX, _ in
+                            selectionX = (startX, currentX)
+                        },
+                        onSelectEnded: { startX, endX, width in
+                            selectionX = nil
+                            zoomToRange(startX: startX, endX: endX, width: width)
+                        }
+                    )
+                    .help("Scroll to zoom · drag to pan · ⌥-drag to zoom into a region · click to set play-start")
+
+                    // Rubber-band selection overlay during an ⌥-drag. Purely a
+                    // visual guide; the actual zoom happens on release.
+                    if let sel = selectionX {
+                        let x0 = min(sel.0, sel.1)
+                        let x1 = max(sel.0, sel.1)
+                        Rectangle()
+                            .fill(Color.accentColor.opacity(0.2))
+                            .frame(width: max(0, x1 - x0), height: geo.size.height)
+                            .offset(x: x0)
+                            .overlay(
+                                Rectangle()
+                                    .strokeBorder(Color.accentColor.opacity(0.6), lineWidth: 1)
+                                    .frame(width: max(0, x1 - x0), height: geo.size.height)
+                                    .offset(x: x0)
+                            )
+                            .allowsHitTesting(false)
+                    }
+
                     if loopEnabled, frameCount > 0,
                        let startBinding = loopStart, let endBinding = loopEnd {
                         let w = geo.size.width
@@ -87,8 +445,10 @@ struct WaveformView: View {
                         // left of E and the highlighted region never wraps off the
                         // right edge — matching what's actually heard.
                         let le = min(endBinding.wrappedValue, Double(frameCount))
-                        let startX = CGFloat(ls / Double(frameCount)) * w
-                        let endX   = CGFloat(le / Double(frameCount)) * w
+                        // Positions are relative to the visible window now, so the
+                        // loop markers track the zoom.
+                        let startX = frameToX(ls, width: w)
+                        let endX   = frameToX(le, width: w)
                         let regionW = max(0, endX - startX)
 
                         Rectangle()
@@ -103,10 +463,9 @@ struct WaveformView: View {
                             .offset(x: startX)
                             .gesture(DragGesture(minimumDistance: 1)
                                 .onChanged { value in
-                                    let frac = max(0, min(1, value.location.x / w))
-                                    let newVal = frac * Double(frameCount)
+                                    let newVal = xToFrame(value.location.x, width: w)
                                     if newVal < endBinding.wrappedValue - 1 {
-                                        startBinding.wrappedValue = newVal
+                                        startBinding.wrappedValue = max(0, newVal)
                                     }
                                 }
                             )
@@ -118,27 +477,127 @@ struct WaveformView: View {
                             .offset(x: endX - 14)
                             .gesture(DragGesture(minimumDistance: 1)
                                 .onChanged { value in
-                                    let frac = max(0, min(1, value.location.x / w))
-                                    let newVal = frac * Double(frameCount)
+                                    let newVal = xToFrame(value.location.x, width: w)
                                     if newVal > startBinding.wrappedValue + 1 {
-                                        endBinding.wrappedValue = newVal
+                                        endBinding.wrappedValue = min(Double(frameCount), newVal)
                                     }
                                 }
                             )
                     }
 
+                    // Play-start marker: the frame playback begins from, set by
+                    // clicking the waveform OR dragging this marker. Drawn only
+                    // when set and within the visible window.
+                    if let ps = playStart?.wrappedValue {
+                        let psX = frameToX(ps, width: geo.size.width)
+                        if psX >= 0 && psX <= geo.size.width {
+                            let w = geo.size.width
+                            ZStack(alignment: .top) {
+                                Rectangle()
+                                    .fill(Color.white)
+                                    .frame(width: 1.5, height: geo.size.height)
+                                Image(systemName: "triangle.fill")
+                                    .font(.system(size: 7))
+                                    .rotationEffect(.degrees(90))
+                                    .foregroundStyle(.white)
+                                    .offset(y: -1)
+                            }
+                            // A wider transparent hit area around the 1.5px line so
+                            // it's grabbable, matching the loop handles. Dragging
+                            // moves the play-start; clicking the waveform elsewhere
+                            // still sets it via the interaction catcher below.
+                            .frame(width: 14, height: geo.size.height, alignment: .top)
+                            .contentShape(Rectangle())
+                            .offset(x: psX - 7)
+                            .gesture(DragGesture(minimumDistance: 1)
+                                .onChanged { value in
+                                    let newVal = xToFrame(value.location.x, width: w)
+                                    playStart?.wrappedValue = max(0, min(Double(frameCount), newVal))
+                                }
+                            )
+                            .cursor(.resizeLeftRight)
+                        }
+                    }
+
                     if playhead > 0 {
-                        Rectangle()
-                            .fill(Color.white.opacity(0.8))
-                            .frame(width: 1.5, height: geo.size.height)
-                            .offset(x: playhead * geo.size.width)
-                            .allowsHitTesting(false)
+                        // playhead is a 0..1 fraction of the WHOLE sample; convert
+                        // to a frame, then into the visible window's x-space.
+                        let playFrame = playhead * Double(max(frameCount, 1))
+                        let playX = frameToX(playFrame, width: geo.size.width)
+                        // Only draw it when it's actually within the visible window.
+                        if playX >= 0 && playX <= geo.size.width {
+                            Rectangle()
+                                .fill(Color.white.opacity(0.8))
+                                .frame(width: 1.5, height: geo.size.height)
+                                .offset(x: playX)
+                                .allowsHitTesting(false)
+                        }
+                    }
+
+                    // Zoom hint / reset: only shown once zoomed in. Double-click
+                    // anywhere (or this pill) to zoom back out to the whole sample.
+                    if didInitWindow && (viewStart > 0 || viewEnd < Double(frameCount)) {
+                        Button {
+                            resetWindow(); computeWaveform(width: geo.size.width)
+                        } label: {
+                            Label("Fit", systemImage: "arrow.left.and.right")
+                                .font(.system(size: 10, weight: .semibold))
+                                .padding(.horizontal, 6).padding(.vertical, 3)
+                                .background(.regularMaterial, in: Capsule())
+                        }
+                        .buttonStyle(.plain)
+                        .padding(6)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
+                        .help("Zoom out to the whole sample")
                     }
                 }
             }
-            .onAppear { computeWaveform(width: geo.size.width) }
-            .onChange(of: geo.size.width) { _, newWidth in computeWaveform(width: newWidth) }
-            .onChange(of: audioData) { _, _ in computeWaveform(width: geo.size.width) }
+            .onAppear {
+                if !didInitWindow { resetWindow() }
+                lastWidth = geo.size.width
+                computeWaveform(width: geo.size.width)
+                installKeyMonitor()
+            }
+            .onChange(of: geo.size.width) { _, newWidth in
+                lastWidth = newWidth
+                computeWaveform(width: newWidth)
+            }
+            .onChange(of: audioData) { _, _ in
+                // New sample — reset the zoom to show all of it.
+                resetWindow()
+                computeWaveform(width: geo.size.width)
+            }
+            .onHover { inside in isHovering = inside }
+            .onDisappear {
+                if let m = keyMonitor { NSEvent.removeMonitor(m); keyMonitor = nil }
+            }
+        }
+    }
+
+    /// Install a local key monitor for arrow-up/down zoom. Only acts while the
+    /// pointer is over this waveform, so it never steals arrow keys from the
+    /// sidebar list (whose own monitor navigates the sample/program lists). When
+    /// it handles a key it returns nil to consume the event, so the sidebar
+    /// monitor — registered earlier at app launch — never sees it.
+    private func installKeyMonitor() {
+        guard keyMonitor == nil else { return }
+        keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
+            guard isHovering else { return event }
+            // 126 = up (zoom in), 125 = down (zoom out),
+            // 123 = left (pan left), 124 = right (pan right).
+            if event.keyCode == 126 {
+                keyboardZoom(zoomIn: true, width: lastWidth); return nil
+            }
+            if event.keyCode == 125 {
+                keyboardZoom(zoomIn: false, width: lastWidth); return nil
+            }
+            if event.keyCode == 123 {
+                keyboardPan(right: false); return nil
+            }
+            if event.keyCode == 124 {
+                keyboardPan(right: true); return nil
+            }
+            return event
         }
     }
 
@@ -147,6 +606,11 @@ struct WaveformView: View {
         let requestedBuckets = Int(width * 2)
         guard requestedBuckets > 0 else { return }
         let localData = audioData
+        // Snapshot the visible window on the main thread; default to the whole
+        // sample if it hasn't been initialised yet.
+        let totalFramesAll = localData.count / 2
+        let winStart = didInitWindow ? Int(viewStart.rounded(.down)) : 0
+        let winEnd = didInitWindow ? Int(viewEnd.rounded(.up)) : totalFramesAll
 
         DispatchQueue.global(qos: .userInitiated).async {
             let totalFrames = localData.count / 2
@@ -156,37 +620,41 @@ struct WaveformView: View {
                 }
                 return
             }
-            // Never use more buckets than there are samples, otherwise most
-            // buckets map to an empty fractional span (startSample==endSample)
-            // and render as a flat line. For short samples (e.g. 256), one bucket
-            // per sample gives the truest shape; the Shape interpolates to width.
-            let buckets = min(requestedBuckets, totalFrames)
-            // Spread the WHOLE sample across ALL buckets (same total-frame
-            // denominator as the loop region, so they line up). For each bucket
+            // Clamp the visible window to the real buffer.
+            let lo = max(0, min(winStart, totalFrames - 1))
+            let hi = max(lo + 1, min(winEnd, totalFrames))
+            let windowFrames = hi - lo
+            // Never use more buckets than there are samples IN THE WINDOW,
+            // otherwise most buckets map to an empty fractional span
+            // (startSample==endSample) and render as a flat line. For a tightly
+            // zoomed window this means one bucket per sample — the truest shape.
+            let buckets = min(requestedBuckets, windowFrames)
+            guard buckets > 0 else { return }
+            // Spread the VISIBLE window across ALL buckets. For each bucket
             // capture the signed MIN and MAX sample value, so the drawn band is
             // the actual waveform shape (sine, square, saw) rather than an
             // absolute-value envelope.
             var mins: [CGFloat] = []; mins.reserveCapacity(buckets)
             var maxs: [CGFloat] = []; maxs.reserveCapacity(buckets)
             for b in 0..<buckets {
-                let startSample = (b * totalFrames) / buckets
-                var endSample = ((b + 1) * totalFrames) / buckets
+                let startSample = lo + (b * windowFrames) / buckets
+                var endSample = lo + ((b + 1) * windowFrames) / buckets
                 if endSample <= startSample { endSample = startSample + 1 }
                 endSample = min(endSample, totalFrames)
-                var lo: Int32 = Int32.max
-                var hi: Int32 = Int32.min
+                var loV: Int32 = Int32.max
+                var hiV: Int32 = Int32.min
                 for s in startSample..<endSample {
                     let byteIdx = s * 2
                     if byteIdx + 1 < localData.count {
                         let v = Int32(Int16(bitPattern:
                             UInt16(localData[byteIdx]) | (UInt16(localData[byteIdx + 1]) << 8)))
-                        if v < lo { lo = v }
-                        if v > hi { hi = v }
+                        if v < loV { loV = v }
+                        if v > hiV { hiV = v }
                     }
                 }
-                if lo == Int32.max { lo = 0; hi = 0 }
-                mins.append(CGFloat(lo) / 32768.0)
-                maxs.append(CGFloat(hi) / 32768.0)
+                if loV == Int32.max { loV = 0; hiV = 0 }
+                mins.append(CGFloat(loV) / 32768.0)
+                maxs.append(CGFloat(hiV) / 32768.0)
             }
 
             DispatchQueue.main.async {
@@ -458,15 +926,54 @@ struct InfoCard<Content: View>: View {
     @ViewBuilder let content: () -> Content
 
     var body: some View {
-        GroupBox {
-            content().padding(8)
-        } label: {
+        // Deliberately NOT a GroupBox. GroupBox doesn't reliably measure/
+        // propagate height for dynamic content — confirmed twice now: once
+        // with the Keyzones List (which needed a fixed frame to scroll within
+        // but GroupBox grew it unbounded instead), and again here, where a
+        // caption that wraps to 3 lines was getting clipped because GroupBox
+        // under-measured the content's real height. A plain VStack always
+        // sizes to exactly what its children report, no surprises. spacing:8
+        // on the inner VStack matches GroupBox's old default stacking gap, so
+        // callers passing several sibling views (e.g. multiple InfoRows) keep
+        // the same visual spacing as before.
+        VStack(alignment: .leading, spacing: 6) {
             Text(title)
                 .font(.headline.weight(.semibold))
                 .foregroundStyle(.primary)
-                .padding(.bottom, 2)
+            // Each top-level row of `content` is forced to the card's full width
+            // (see FullWidthRows). That single rule is what makes every control,
+            // caption and label inside a card behave consistently: intrinsic
+            // controls still lay out normally, but multi-line Text is given a
+            // bounded width so it WRAPS instead of taking its ideal single-line
+            // width and clipping at the card edge. Callers therefore don't need
+            // to sprinkle `.frame(maxWidth: .infinity)` on every caption.
+            _VariadicView.Tree(FullWidthRows(spacing: 8)) {
+                content()
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(10)
+            .background(RoundedRectangle(cornerRadius: 6).fill(Color(nsColor: .controlBackgroundColor).opacity(0.4)))
+            .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(Color.secondary.opacity(0.2)))
         }
-        .padding(4)
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
+/// Lays out each top-level child of an InfoCard as its own full-width, leading-
+/// aligned row. Because every row is offered (and fills) the card's full width,
+/// multi-line Text inside a card wraps to the available width instead of taking
+/// its ideal single-line width and clipping — so callers get correct wrapping
+/// for free, without per-caption `.frame(maxWidth: .infinity)`.
+private struct FullWidthRows: _VariadicView_MultiViewRoot {
+    var spacing: CGFloat = 8
+
+    @ViewBuilder
+    func body(children: _VariadicView.Children) -> some View {
+        VStack(alignment: .leading, spacing: spacing) {
+            ForEach(children) { child in
+                child.frame(maxWidth: .infinity, alignment: .leading)
+            }
+        }
     }
 }
 
@@ -980,7 +1487,7 @@ struct EnvSlider: View {
                 Text(caption)
                     .font(.caption2)
                     .foregroundStyle(.secondary)
-                    .padding(.leading, 60)
+                    .frame(maxWidth: .infinity, alignment: .leading)
                     .fixedSize(horizontal: false, vertical: true)
             }
         }
@@ -989,6 +1496,32 @@ struct EnvSlider: View {
 
 struct DiskInfoView: View {
     @ObservedObject var diskImage: AkaiDiskImage
+
+    /// One parameter where the S3000XL Operator's Manual states a default
+    /// value that real hardware byte-diff testing found to be different.
+    /// Populated ONLY from confirmed hardware evidence (a photographed LCD
+    /// screen or an isolated byte-diff capture) — never guessed — since this
+    /// table exists specifically to be trustworthy when the manual and the
+    /// real machine disagree.
+    struct DefaultDiscrepancy: Identifiable {
+        let id = UUID()
+        let parameter: String
+        let manual: String
+        let hardware: String
+        let note: String
+    }
+
+    /// Confirmed discrepancies between the manual and real hardware. Add a row
+    /// here only once a specific reading has been confirmed (photo or byte-diff)
+    /// — see the doc comment above.
+    static let knownDefaultDiscrepancies: [DefaultDiscrepancy] = [
+        DefaultDiscrepancy(
+            parameter: "Filter Key Follow",
+            manual: "+12 (p.97: “+12 is the default”)",
+            hardware: "0 (fresh keygroup, byte-diff confirmed)",
+            note: "A real, never-touched keygroup was photographed at +00 — the manual's stated default doesn't match a genuinely fresh unit."
+        )
+    ]
 
     var body: some View {
         ScrollView {
@@ -1030,6 +1563,42 @@ struct DiskInfoView: View {
                         InfoRow(label: "Sectors/Track",  value: "10")
                         InfoRow(label: "Tracks",         value: "80 × 2")
                         InfoRow(label: "Total Capacity", value: "1.64 MB")
+                    }
+                }
+
+                if !Self.knownDefaultDiscrepancies.isEmpty {
+                    InfoCard(title: "Default Discrepancies") {
+                        VStack(alignment: .leading, spacing: 10) {
+                            Text("Cases where the S3000XL Operator's Manual states one default value, but real hardware (byte-diff testing or a photographed fresh unit) shows something different.")
+                                .font(.caption).foregroundStyle(.secondary)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .fixedSize(horizontal: false, vertical: true)
+                            HStack(alignment: .top) {
+                                Text("Parameter").frame(width: 130, alignment: .leading)
+                                Text("Manual Says").frame(maxWidth: .infinity, alignment: .leading)
+                                Text("Hardware Shows").frame(maxWidth: .infinity, alignment: .leading)
+                            }
+                            .font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+                            Divider()
+                            ForEach(Array(Self.knownDefaultDiscrepancies.enumerated()), id: \.element.id) { idx, d in
+                                VStack(alignment: .leading, spacing: 3) {
+                                    HStack(alignment: .top) {
+                                        Text(d.parameter).font(.system(.caption, design: .monospaced))
+                                            .frame(width: 130, alignment: .leading)
+                                        Text(d.manual).font(.caption)
+                                            .frame(maxWidth: .infinity, alignment: .leading)
+                                        Text(d.hardware).font(.caption).foregroundStyle(.orange)
+                                            .frame(maxWidth: .infinity, alignment: .leading)
+                                    }
+                                    if !d.note.isEmpty {
+                                        Text(d.note).font(.caption2).foregroundStyle(.tertiary)
+                                            .frame(maxWidth: .infinity, alignment: .leading)
+                                            .fixedSize(horizontal: false, vertical: true)
+                                    }
+                                }
+                                if idx != Self.knownDefaultDiscrepancies.count - 1 { Divider() }
+                            }
+                        }
                     }
                 }
 

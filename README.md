@@ -471,6 +471,90 @@ Keygroup 0x85-88  Ohsaki: constant pitch zones 1-4 (0=track, 1=const)
 
 ---
 
+### Field knowledge cross-reference
+
+Status codes: `agree`=all sources agree, `our finding`=not in Ohsaki or manual, `dispute`=we disagree with a source, `not modelled`=known but not implemented, `?`=uncertain
+
+```
+PROGRAM HEADER
+
+offset  ohsaki              manual    this project              status
+------  ------              ------    ------------              ------
+0x10    MIDI channel        yes       confirmed *               agree
+0x11    polyphony           yes       confirmed *               agree
+0x12    priority            yes       confirmed *               agree
+0x15    octave shift ±2     -         we write bend down here   dispute ?
+0x17    stereo level        yes       confirmed *               agree
+0x19    loudness            yes       confirmed * (default 99)  agree / manual wrong default
+0x1a    velocity > loud     yes       confirmed *               agree
+0x27    bend up 0-24        yes       confirmed *               agree
+0x28    pressure > pitch    yes       confirmed * (default 0)   agree
+0x2a    # of keygroups      yes       confirmed *               agree
+0x3d    voice assign        yes       confirmed *               agree
+0x49    -                   -         default 2, unknown        our finding ?
+0x4a    -                   -         bend mode NORMAL/HELD *   our finding
+0x54    -                   -         filter mod source 1 *     our finding
+0x55    -                   -         filter mod source 2 *     our finding
+0x56    -                   -         filter mod source 3 *     our finding
+0x18    stereo pan          yes       not modelled              not modelled
+0x1b-c  key/pressure>loud   yes       not modelled              not modelled
+0x1d-f  pan LFO             yes       not modelled              not modelled
+0x20-6  LFO/mod params      yes       not modelled              not modelled
+0x29    kg crossfade        yes       not modelled              not modelled
+0x38    echo output         yes       not modelled              not modelled
+0x39    modwheel pan        yes       not modelled              not modelled
+0x3a    start coherence     yes       not modelled              not modelled
+0x3b    LFO de-sync         yes       not modelled              not modelled
+0x3c    pitch law           yes       not modelled              not modelled
+0x3e-40 soft pedal          yes       not modelled              not modelled
+0x41-42 tune offset         yes       not modelled              not modelled
+0x43-45 key > LFO           yes       not modelled              not modelled
+0x46-47 output scale        yes       not modelled              not modelled
+
+KEYGROUP
+
+offset  ohsaki              manual    this project              status
+------  ------              ------    ------------              ------
+0x03    keyrange low        yes       confirmed *               agree
+0x04    keyrange high       yes       confirmed *               agree
+0x07    filter freq         yes       confirmed *               agree
+0x08    key > filter        yes       confirmed * (default 0)   agree / manual wrong default
+0x0c-f  amp ADSR            yes       all confirmed *           agree
+0x14-17 filter ENV2         yes       all confirmed *           agree
+0x20-21 internal            yes       must be 0xffff *          agree / extended (silence bug)
+0x84    attack hold loop    yes       we write pitchMode here   dispute ?
+0x85-88 const pitch zones   yes       not yet tested            dispute ?
+0x95    -                   -         resonance 0-15 *          our finding
+0x97    -                   -         filter mod depth 1 *      our finding
+0x98    -                   -         filter mod depth 2 *      our finding
+0x99    -                   -         filter mod depth 3 *      our finding
+0x9c-9f -                   -         ENV2 levels/rates *       our finding
+0x05-06 tune offset         yes       not modelled              not modelled
+0x09-0b vel/pres/env>filt   yes       not modelled              not modelled
+0x10-13 vel/key > amp       yes       not modelled              not modelled
+0x18-1b vel/key > filter    yes       not modelled              not modelled
+0x1c    vel > filter env    yes       not modelled              not modelled
+0x1d    envelope > pitch    yes       not modelled              not modelled
+0x83    fixed rate detune   yes       not modelled              not modelled
+0x89-8c output offset       yes       not modelled              not modelled
+0x8d-94 vel > sample start  yes       not modelled              not modelled
+
+SAMPLE HEADER
+
+offset  ohsaki              manual    this project              status
+------  ------              ------    ------------              ------
+0x01    bandwidth           yes       confirmed * (derived)     agree
+0x02    root key            yes       confirmed *               agree
+0x10    # active loops      yes       confirmed * (lnum)        agree
+0x13    playback mode       yes       confirmed *               agree
+0x1a-1d data length         yes       confirmed *               agree
+0x1e-21 play start          yes       confirmed * (draggable)   agree
+0x26-85 loop slots [8]      yes       confirmed * + critical    agree / extended
+0x8a-8b sample rate         yes       confirmed *               agree
+```
+
+---
+
 ### Reading a floppy with GreaseWeazle
 
 ```bash

@@ -2,7 +2,7 @@
 
 ![Akai S3000 Editor Logo](AkaiS3000Editor/Assets.xcassets/AppIcon.appiconset/icon_128x128@2x.png)
 
-This is a personal macOS project that allows me to read and write Akai S3000XL floppy disks using a UI that is super easy and powerful: quickly create programs, then drag and drop WAV files into program or drum key group configs with filter and loop settings, then save to an .img file. For reading and editing Akai S3000 floppy disk images (.img), I use the AMAZING [Greaseweazle](https://github.com/keirf/greaseweazle) floppy-to-USB-C card.
+This is a personal macOS project that allows me to read and write Akai S3000XL floppy disks using a UI that is super easy and powerful: quickly create programs, then drag and drop WAV files into keyzones with filter and loop settings, then save to an .img file. For reading and editing Akai S3000 floppy disk images (.img), I use the AMAZING [Greaseweazle](https://github.com/keirf/greaseweazle) floppy-to-USB-C card.
 
 My app is built with SwiftUI — no dependencies — so it should run on most modern Macs. You will need to edit permissions in Settings to trust it, as it's not on the App Store yet!
 
@@ -41,7 +41,7 @@ My app is built with SwiftUI — no dependencies — so it should run on most mo
   </tr>  
   <tr>    
     <td valign="top">
-      <h3>Create or clone keyzones, create a drum program by dragging in multiple drum samples at once. Set filter mods and ADSR graph</p>
+      <h3>Create or clone keyzones, drag samples in and choose single-key or full-keyboard layout. Set filter mods and ADSR graph</p>
       <img src="screenshots/keyzones-filter-adsr.png" width="100%">
     </td>
   </tr>
@@ -105,25 +105,26 @@ There's no separate "blank new program" function — every new program is made b
 2. Press **NAME**, type your new program name (up to 12 characters, uppercase only), press **ENT**
 3. Press **COPY** — this duplicates the current program under your new name
 
-### How to create a drum program in the app
+### How to assign samples to keyzones
 
-1. Right-click **Programs** in the sidebar → **Create Drum Program**
-2. Drag WAV files from Finder onto the program — each file lands on its own key starting at C1, with the sample root automatically set to match the pad key so TRACK pitch plays at unity
-3. Or drag existing sidebar samples onto the program — you'll be prompted before the sample root is changed (since rkey is shared across all programs using that sample)
-4. Pitch bend works on drum programs (TRACK mode) — ensure your controller is not on MIDI channel 10 if bend doesn't respond, as some controllers strip bend from that channel by convention
+Drag a WAV file (or folder of WAVs) onto a program in the main view. On the first drag, the app asks:
 
-### Sample root note and drum pitch
+- **Single Key (C1, C#1, D1…)** — each sample maps to its own key starting at C1. Ideal for one-shots where you want each sound on a separate trigger key.
+- **Full Keyboard (divide evenly)** — the keyboard range (C0–G8) is divided evenly across all samples. Ideal for pitched instruments.
 
-The sample's **root key** (`rkey`, shown as "Root Note" in the sample detail view) tells the S3000 which pitch to play the sample at unity in TRACK mode. For drums:
-- The app automatically sets `rkey` to match the pad's trigger key (e.g. C1 for the first pad)
-- This means each pad plays its sample at recorded pitch regardless of where it sits on the keyboard
-- `rkey` is stored on the **sample**, not the keyzone — if the same sample is used by two different drum pads, the second drag will prompt you before changing it
+This choice is remembered for the session. Subsequent drags onto the same program follow the same layout automatically.
+
+### Sample root note
+
+The sample's **root key** (`rkey`) tells the S3000 which pitch to play the sample at unity in TRACK mode. For single-key layouts, the app automatically sets `rkey` to match the trigger key (e.g. C1 for the first key) so each key plays its sample at recorded pitch.
+
+`rkey` is stored on the **sample**, not the keyzone — if the same sample is used by two different keyzones on different keys, changing the root for one affects all uses of that sample.
 
 ### Clone Sample (shared PCM)
 
 Right-click any sample in the sidebar → **Clone Sample**. This creates a second directory entry pointing to the same audio data on disk — no PCM bytes are duplicated, so the clone costs only a tiny directory entry (effectively free in terms of disk space).
 
-Why this is powerful: the S3000 has no per-keyzone start or loop point — every keyzone referencing a sample uses the same trim and loop settings. If you want different parts of a long sample (e.g. a breakbeat) to play on different keys, you'd normally have to duplicate the entire audio. Clone Sample sidesteps this: make several clones of the same sample, set a different start point or loop on each clone, then assign each clone to its own keyzone. You get multiple independent playback positions from a single copy of the audio on disk.
+Why this is powerful: the S3000 has no per-keyzone start or loop point — every keyzone referencing a sample uses the same trim and loop settings. If you want different parts of a long sample (e.g. a break or loop) to play on different keys, you'd normally have to duplicate the entire audio. Clone Sample sidesteps this: make several clones of the same sample, set a different start point or loop on each clone, then assign each clone to its own keyzone. You get multiple independent playback positions from a single copy of the audio on disk.
 
 ### Lo-fi / Convert to 22k
 
@@ -139,200 +140,334 @@ The S3000XL holds only one multi in memory at a time, but any number may be save
 
 ## Technical Reference: Akai S3000 Disk Format
 
-Sources: [Midi-In/akaiutil](https://github.com/Midi-In/akaiutil), [keirf/GreaseWeazle](https://github.com/keirf/greaseweazle), Akai S3000XL Operator's Manual, and direct hardware byte-diff testing.
+Sources: [Ohsaki/akaitools](https://lsnl.jp/~ohsaki/software/akaitools/S3000-format.html), [Midi-In/akaiutil](https://github.com/Midi-In/akaiutil), [keirf/GreaseWeazle](https://github.com/keirf/greaseweazle), Akai S3000XL Operator’s Manual, and direct hardware byte-diff testing on a real S3000XL.
 
-### Physical layout
+All numbers little-endian. Akai character encoding: `0–9`=digits, `10`=space, `11–36`=A–Z, `37`=#, `38`=+, `39`=-, `40`=.
 
-| | `akai.1600` (HD) | `akai.800` (LD) |
-|---|---|---|
-| Cylinders | 80 | 80 |
-| Heads | 2 | 1 |
-| Sectors/track | 10 | 10 |
-| Bytes/sector | 1024 | 1024 |
-| Total blocks | 1600 | 800 |
-| Data rate | 500 kbps (MFM HD) | 250 kbps (MFM DD) |
+Key: `C`=byte, `v`=2-byte signed, `An`=n-byte Akai string, `x`=internal/sampler-managed, `*`=hardware-confirmed by this project, `?`=disputed or uncertain
 
-### Floppy header (`akai_flhhead_s`) — blocks 0–4
+---
 
-| Offset | Field | Notes |
-|---|---|---|
-| `0x0000` | `file[64]` | 64 × 24-byte floppy-header entries. Each entry: name[12] (Akai-encoded volume name), `00 00 04 0B` tag, type byte (`0xFF` for slot 0 = volume sentinel, `0x00` for others), byte 18 = `0x10` (undocumented, **hardware-confirmed**), osver `0x11`. |
-| `0x0600` | `fatblk[1600][2]` | FAT: 16-bit LE per block. |
-| `0x1280` | `label` | Volume name (12 bytes, Akai-encoded). |
-| `0x1292` | Global settings | 8 bytes of global state (`01 00 00 00 32 09 0C FF`). **Hardware-confirmed** — leaving these zero causes the Akai to load corrupt global settings (e.g. wrong transpose) when the disk is first written back. App seeds new disks with correct factory values. |
+### Physical layout (floppy)
 
-### Live volume directory
+```
+akai.1600 (HD)   80 cylinders × 2 heads × 10 sectors × 1024 bytes = 1,638,400 bytes = 1600 blocks
+akai.800  (DD)   80 cylinders × 1 head  × 10 sectors × 1024 bytes =   819,200 bytes =  800 blocks
+```
 
-Starts at **block 5**, 510 × 24-byte entries, spans 12 blocks.
+---
 
-### FAT codes
+### Disk structure
 
-| Code | Meaning |
-|---|---|
-| `0x0000` | Free |
-| `0x4000` | System (header + directory) |
-| `0xC000` | End of file chain |
-| other | Next block number (16-bit LE) |
+```
+block 0–4     floppy header (akai_flhhead_s)
+block 5–16    volume directory (510 × 24-byte entries, spans 12 blocks)
+block 17+     file data (FAT-chained)
+```
 
-### Volume directory entry — 24 bytes
+#### Floppy header block 0 — 64 × 24-byte slots
 
-| Offset | Field | Notes |
-|---|---|---|
-| `0x00`–`0x0B` | `name[12]` | Akai-encoded. |
-| `0x0C`–`0x0F` | `tag[4]` | S3000 free = `0x00`. |
-| `0x10` | `type` | `0x00`=free, `0xF3`=sample, `0xF0`=program, `0xED`=multi. |
-| `0x11`–`0x13` | `size[3]` | 24-bit LE, total bytes incl. header. |
-| `0x14`–`0x15` | `start[2]` | 16-bit LE start block. |
-| `0x16`–`0x17` | `osver[2]` | Samples=`0x0000`; programs=`0x1100`. |
+```
+00-0b    A12   volume name (Akai-encoded, repeated in every slot)
+0c-0d    C2    00 00
+0e-0f    C2    04 0b  (tag)
+10       C     ff=slot 0 (volume sentinel), 00=other slots
+12       C     10     (undocumented field, hardware-confirmed *)
+17       C     11     (osver)
+```
 
-### Other file types (not decoded or edited)
+#### Global settings — block 4 offset 0x292
 
-| Type byte | Name | Created by |
-|---|---|---|
-| `0x74` | Take List (TL1) | SAVE → SONG |
-| `0x78` | Effects File | SAVE → EFFECTS |
-| `0x64` | Drum Inputs | SAVE → DRUM |
+```
+292-299  C8    01 00 00 00 32 09 0c ff   factory defaults *
+                                          leaving zero → corrupt transpose on load
+```
 
-### Sample header (`akai_sample3000_s`) — 0xC0 bytes, audio follows
+#### FAT — one 16-bit LE entry per block
 
-| Offset | Field | Notes |
-|---|---|---|
-| `0x00` | `blockid` | `0x03`. |
-| `0x01` | `bandw` | `0x00`=10kHz (≤22kHz), `0x01`=20kHz (≥33kHz). App derives this from `srate` automatically. |
-| `0x02` | `rkey` | MIDI root key. In TRACK pitch mode, the sample plays at unity when triggered at this key. For drum pads the app sets this to match the pad's trigger key. |
-| `0x03`–`0x0E` | `name[12]` | Akai-encoded. |
-| `0x10` | `lnum` | Number of active loops. Must be `1` when a loop is set, `0` otherwise. **Hardware-confirmed:** factory samples with a loop have `lnum=1`; writing `0` with valid loop points causes incorrect playback. |
-| `0x13` | `pmode` | `0x00`=Loop, `0x01`=Loop Until Release, `0x02`=No Loop, `0x03`=Play to End. |
-| `0x14` | `ctune` | Cents tune, signed. |
-| `0x15` | `stune` | Semitone tune, signed. |
-| `0x16`–`0x19` | `locat[4]` | Sampler-managed address. |
-| `0x1A`–`0x1D` | `slen[4]` | Number of samples. |
-| `0x1E`–`0x21` | `start[4]` | Playback start point (TRIM page). App models this — shown as a draggable white marker on the waveform view, independent of loop points. |
-| `0x22`–`0x25` | `end[4]` | Trim end marker. Not modeled. |
-| `0x26`–`0x85` | `loop[8]` | 8 × 12 bytes: `at[4]`, `flen[2]`, `len[4]`, `time[2]`. `at` is the loop's **right-hand boundary** (return-to point) — region is `[at-len, at)`. Confirmed against factory SAWTOOTH sample on real hardware: `at=192, len=168, flen=36831` displayed as `lng: 168.562` (`len + flen/65536`). `flen` read for rounding, written back as 0. `time`: `9999`=HOLD (loop indefinitely, displays as "HOLD" on panel), `0`=OFF (no loop). **Hardware-confirmed** — factory samples use `9999`; the app writes `9999` when looping, `0` otherwise. **Critical:** for NoLoop samples ALL 8 slot `time` fields must be `0`. Writing `9999` in any slot (even slots 1–7) causes the Akai to loop the sample regardless of `pmode` — this manifests as the sample playing at half speed or dragging. App writes `0` in all slots for NoLoop imports; when looping, the active loop is replicated into slots 0–3. |
-| `0x88`–`0x89` | `stpaira[2]` | Stereo-pair partner address; `0xFFFF`=none. |
-| `0x8A`–`0x8B` | `srate[2]` | Sample rate Hz, 16-bit LE. |
-| `0xC0`+ | audio | 16-bit signed LE PCM, mono. |
+```
+0000    free
+4000    system (reserved)
+c000    end of file chain
+other   next block number
+```
 
-### Program header (`akai_program3000_s`) — 0xC0 bytes, keygroups follow
+#### Volume directory entry — 24 bytes
 
-| Offset | Field | Notes |
-|---|---|---|
-| `0x00` | `blockid` | `0x01`. |
-| `0x01`–`0x02` | `kg1a[2]` | Keygroup 1 address, sampler-managed. |
-| `0x03`–`0x0E` | `name[12]` | Akai-encoded. |
-| `0x10` | `midich1` | `0xFF`=Omni, else 0-indexed channel. |
-| `0x13` | `keylo` | Program-level low key. |
-| `0x14` | `keyhi` | Program-level high key. |
-| `0x15` | Bend Range Down | 0–24 semitones. **Hardware-confirmed.** Written together with `0x27`. |
-| `0x16` | `auxch1` | `0xFF`=off. |
-| `0x17` | Stereo Level | 0–99. Main L/R output level. `0x00` = silent on main outs. Default 99. **Hardware-confirmed.** |
-| `0x19` | Basic Loudness | 0–99. Base loudness before velocity sensitivity. `0x00` = silent. Default 99. **Hardware-confirmed.** |
-| `0x27` | Bend Range Up | 0–24 semitones. **Hardware-confirmed.** Written together with `0x15`. |
-| `0x28` | Pressure Bend | −12 to +12, signed byte (`0xF4`=-12). Default 0. **Hardware-confirmed.** |
-| `0x29` | `kgxf` | Keygroup crossfade enable. |
-| `0x2A` | `kgnum` | Number of keygroups — must match actual count in file. |
-| `0x49` | Unknown | Default 2. Not yet isolated — possibly pressure bend direction or a related field. |
-| `0x4A` | Bend Mode | NORMAL=0, HELD=1. **Hardware-confirmed.** |
-| `0x54` | Filter mod source #1 | Index 0–13. Default 5 (Velocity). Program-wide. **Hardware-confirmed.** |
-| `0x55` | Filter mod source #2 | Default 8 (Lfo2). Program-wide. **Hardware-confirmed.** |
-| `0x56` | Filter mod source #3 | Default 10 (Env2). Program-wide. **Hardware-confirmed.** |
+```
+00-0b    A12   file name
+0c-0f    C4    tag (S3000 free = 00)
+10       C     file type:
+                 f3 = S3000 sample
+                 f0 = S3000 program
+                 ed = multi
+                 64 = drum inputs (SAVE→DRUM)
+                 78 = effects file
+                 74 = take list
+11-13    C3    file size in bytes (24-bit LE)
+14-15    C2    start block
+16-17    C2    osver (samples=0000, programs=1100)
+```
 
-### Program keygroup (`akai_program3000kg_s`) — 0xC0 bytes each, from file offset `0xC0`
+---
 
-| Offset | Field | Notes |
-|---|---|---|
-| `0x00` | `blockid` | `0x02`. |
-| `0x03` | `keylo` | Low MIDI key. |
-| `0x04` | `keyhi` | High MIDI key. |
-| `0x84` | `pitchMode` | `0x00`=TRACK (pitch follows keyboard, pitch bend works), `0x01`=CONST (always plays at C3 regardless of key, ignores pitch bend). **Hardware-confirmed.** App uses TRACK for all programs. Note: keyzone root note is **not** stored in the keygroup — pitch reference is the sample's own `rkey`. |
-| `0x07` | Frequency (filter cutoff) | 0–99. **Hardware-confirmed.** |
-| `0x08` | Key Follow | Signed. Factory default is 0 (not the manual's stated +12). **Hardware-confirmed.** |
-| `0x0C` | ENV1 Attack | 0–99. **Hardware-confirmed** kg+0x0C. |
-| `0x0D` | ENV1 Decay | 0–99. **Hardware-confirmed** kg+0x0D. |
-| `0x0E` | ENV1 Sustain | 0–99. **Hardware-confirmed** kg+0x0E. |
-| `0x0F` | ENV1 Release | 0–99. **Hardware-confirmed** kg+0x0F. |
-| `0x14` | ENV2 Rate 1 | 0–99. Default 0. **Hardware-confirmed.** |
-| `0x15` | ENV2 Rate 3 | 0–99. Default 50. **Hardware-confirmed.** |
-| `0x16` | ENV2 Level 3 (sustain) | 0–99. Default 99. **Hardware-confirmed.** |
-| `0x17` | ENV2 Rate 4 (release) | 0–99. Default 45. **Hardware-confirmed.** |
-| `0x20`–`0x21` | `dummy2[1]/[2]` | Must be `0xFFFF`. These are the last 2 bytes of akaiutil's `dummy2[3]` field (at kg+0x1F–0x21, just before the velocity zones at 0x22). **Hardware-confirmed by byte-diff against working real programs** — programs written with `0x0000` here caused zone 1 to be silent (the hardware reads the zone 1 sample name starting 2 bytes late, missing it entirely). Always write `0xFFFF`. |
-| `0x95` | Resonance | 0–15. **Hardware-confirmed.** Outside akaiutil's documented struct. |
-| `0x97` | Filter mod depth #1 (Velocity→Freq) | ±50, signed. **Hardware-confirmed.** |
-| `0x98` | Filter mod depth #2 (Lfo2→Freq) | ±50, signed. **Hardware-confirmed.** |
-| `0x99` | Filter mod depth #3 (Env2→Freq) | ±50, signed. **Hardware-confirmed.** |
-| `0x9C` | ENV2 Level 1 | 0–99. Default 99. **Hardware-confirmed.** |
-| `0x9D` | ENV2 Rate 2 | 0–99. Default 50. **Hardware-confirmed.** |
-| `0x9E` | ENV2 Level 2 | 0–99. Default 99. **Hardware-confirmed.** |
-| `0x9F` | ENV2 Level 4 | 0–99. Default 0. **Hardware-confirmed.** |
-| `0x22`, `+0x18`, `+0x30`, `+0x48` | 4 × velocity zones | 0x18 bytes each. |
+### Sample file (type f3)
 
-### Velocity zone — 0x18 bytes
+```
+0000-00bf    sample header
+00c0-        PCM data (16-bit signed LE mono)
+```
 
-| Offset | Field | Notes |
-|---|---|---|
-| `0x00`–`0x0B` | `sname[12]` | Sample name, Akai-encoded. |
-| `0x0C` | `vello` | Low velocity. |
-| `0x0D` | `velhi` | High velocity. |
-| `0x0E` | `ctune` | Cents tune, signed. |
-| `0x0F` | `stune` | Semitone tune, signed. |
-| `0x10` | `loud` | Loudness offset. |
-| `0x11` | `filter` | Filter cutoff trim, ±50 signed. Layered on top of keygroup Frequency. |
-| `0x12` | `pan` | Pan, signed. |
-| `0x13` | `pmode` | `0x00`=Sample's Setting, `0x01`=Loop, `0x02`=Loop Until Release, `0x03`=No Loop, `0x04`=Play to End. |
-| `0x16`–`0x17` | `shdra[2]` | Sample header address; `0xFFFF`=none. |
+#### Sample header — 0xc0 bytes
 
-Zone 1 = primary sample. Zone 2 = stereo right channel (same keygroup — manual p.51–52: left/right assigned to zones 1/2 in one keygroup, panned hard left/right). Zones 3–4 unused.
+```
+00       C     03  (S3000 block id)
+01       C     bandwidth: 0=10kHz (≤22kHz), 1=20kHz (≥33kHz)  *derived from srate
+02       C     original pitch / root key (24-127 = C0-G8)  *
+03-0e    A12   sample name
+0f       C     80 = sample rate valid
+10       C     # of active loops (lnum): 0=none, 1=looping  *must match pmode
+11       C     first active loop (internal)
+12       C     dummy
+13       C     playback type: 0=loop, 1=loop until release, 2=no loop, 3=play to end
+14       C     pitch offset cents / 256 (fine tune)
+15       C     pitch offset semitones
+16-19    x4    data absolute start address (sampler RAM, internal)
+1a-1d    C4    data length in samples (slen)
+1e-21    C4    play start address (TRIM start, draggable in app *)
+22-25    C4    play end address
+26-85           8 loop slots, each 12 bytes:
+  +00-03  C4    loop at  (right-hand boundary; region is [at-len, at) )
+  +04-05  C2    loop len decimal / 65536 (flen, read for rounding, written as 0)
+  +06-09  C4    loop len
+  +0a-0b  C2    loop time: 0=off, 9999=hold, 1-9998=ms
+                  * ALL 8 slots must be 0 for no-loop; 9999 in any slot forces loop
+                  * app replicates active loop into slots 0-3 when looping
+86-87    C2    dummy
+88-89    x2    stereo partner address (0xffff=none)
+8a-8b    C2    sample rate in Hz
+8c       C     hold loop tune offset
+8d-bf           reserved / unknown
+```
 
-### Filter mod sources
+---
 
-14 options, raw index 0–13, confirmed by cycling through all options on real hardware:
+### Program file (type f0)
 
-`No Source` · `Modwheel` · `Bend` · `Pressure` · `External` · `Velocity` · `Key` · `Lfo1` · `Lfo2` · `Env1` · `Env2` · `!Modwheel` · `!Bend` · `!External`
+```
+0000-00bf    program common data
+00c0-017f    keygroup 1
+0180-023f    keygroup 2
+  ...
+```
 
-Sources at `0x54`/`0x55`/`0x56` are program-wide despite appearing per-keygroup on the FILT page. Only depth amounts (`0x97`/`0x98`/`0x99`) are per-keygroup.
+#### Program common data — 0xc0 bytes
 
-**All ENV1 and ENV2 offsets are now hardware byte-diff confirmed.** ENV2 has a non-linear layout — rates and levels are split across two regions (`0x14`–`0x17` and `0x9C`–`0x9F`). Stereo zone setup (zones 1+2 in one keygroup, panned L50/R50) confirmed working on real hardware.
+```
+00       C     01  (program block id)
+01-02    x2    1st keygroup address (internal)
+03-0e    A12   program name
+0f       C  0  MIDI program number (0-127)
+10       C  0  MIDI channel (0-15, ff=omni)  *
+11       C 31  polyphony (value = voices-1, so 31=32 voices)  *
+12       C  1  priority: 0=low, 1=normal, 2=high, 3=hold  *
+13       C 24  play range low (24-127 = C0-G8)
+14       C127  play range high
+15       C  0  play octave shift ±2  [Ohsaki] / bend range down 0-24 [our use] ?
+16       C ff  individual output (0-7, ff=off)
+17       C 99  stereo level 0-99  *
+18       C  0  stereo pan
+19       C 80  loudness 0-99  *
+1a       C 20  velocity > loud  *
+1b       C  0  key > loud
+1c       C  0  pressure > loud
+1d       C  0  pan LFO rate
+1e       C 99  pan depth
+1f       C  0  pan LFO delay
+20       C  0  key > pan position
+21       C 50  LFO speed
+22       C  0  LFO fixed depth
+23       C  0  LFO delay
+24       C 30  modwheel > depth
+25       C  0  pressure > depth
+26       C  0  velocity > depth
+27       C  2  bendwheel > pitch (bend up 0-24)  *
+28       C  0  pressure > pitch  *
+29       C  0  keygroup crossfade (0=off, 1=on)
+2a       C  #  # of keygroups (1-99)  *
+2b       C n/a temporary program number (internal)
+2c-37    C12   key temperament
+38       C  0  echo output level (0=off, 1=on)
+39       C  0  modwheel pan amount
+3a       C  0  sample start coherence (0=off, 1=on)
+3b       C  0  LFO de-sync (0=off, 1=on)
+3c       C  0  pitch law
+3d       C  0  voice assign: 0=oldest, 1=quietest  *
+3e       C 10  soft pedal loudness reduction
+3f       C 10  soft pedal attack stretch
+40       C 10  soft pedal filter close
+41-42    v  0  tune offset
+43       C  0  key > LFO rate
+44       C  0  key > LFO depth
+45       C  0  key > LFO delay
+46       C 50  voice output scale
+47       C  0  stereo output scale
+48-bf           reserved / unknown
+49       C  2  unknown, default 2  ?
+4a       C  0  bend mode: 0=normal, 1=held  *
+54       C  5  filter mod source #1 (0-13, see below)  *
+55       C  8  filter mod source #2  *
+56       C 10  filter mod source #3  *
+```
 
-### Akai character encoding
+#### Keygroup — 0xc0 bytes each
 
-| Code | Char | Code | Char |
-|---|---|---|---|
-| `0`–`9` | `'0'`–`'9'` | `37` | `'#'` |
-| `10` | `' '` | `38` | `'+'` |
-| `11`–`36` | `'A'`–`'Z'` | `39` | `'-'` |
-| | | `40` | `'.'` |
+```
+00       C  2  keygroup block id
+01-02    x2    next keygroup address (internal)
+03       C 24  keyrange low  *
+04       C127  keyrange high  *
+05-06    v  0  tune offset
+07       C 99  filter freq. 0-99  *
+08       C  0  key > filter freq. (factory default 0, not manual’s +12)  *
+09       C  0  velocity > filter freq.
+0a       C  0  pressure > filter freq.
+0b       C  0  envelope > filter freq.
+0c       C 25  amp. attack  *
+0d       C 50  amp. decay  *
+0e       C 99  amp. sustain  *
+0f       C 45  amp. release  *
+10       C  0  velocity > amp. attack
+11       C  0  velocity > amp. release
+12       C  0  off velocity > amp. release
+13       C  0  key > decay & release
+14       C  0  filter attack (ENV2 rate 1)  *
+15       C 50  filter decay (ENV2 rate 3)  *
+16       C 99  filter sustain (ENV2 level 3)  *
+17       C 45  filter release (ENV2 rate 4)  *
+18       C  0  velocity > filter attack
+19       C  0  velocity > filter release
+1a       C  0  off velocity > filter release
+1b       C  0  key > decay & release
+1c       C 25  velocity > filter envelope output
+1d       C  0  envelope > pitch
+1e       C  1  velocity zone crossfade (0=off, 1=on)
+1f       C n/a # of velocity zones (internal)
+20-21    C2n/a internal  *must be 0xffff or zone 1 is silent
+22-82           4 velocity zones (0x18 bytes each, see below)
+83       C  0  fixed rate detune
+84       C  0  attack hold until loop  [Ohsaki] / pitchMode TRACK/CONST [our use]  ?
+85-88    C4 0  constant pitch zones 1-4: 0=track, 1=const  [Ohsaki]
+89-8c    C4 0  output number offset zones 1-4
+8d-94    v4 0  velocity > sample start zones 1-4
+95       C  0  resonance 0-15  *
+96-bf           reserved / unknown
+97       C  0  vel. > filter freq. (filter mod depth #1)  *
+98       C  0  pres. > filter freq. (filter mod depth #2)  *
+99       C  0  env. > filter freq. (filter mod depth #3)  *
+9c       C 99  ENV2 level 1  *
+9d       C 50  ENV2 rate 2  *
+9e       C 99  ENV2 level 2  *
+9f       C  0  ENV2 level 4  *
+```
 
-### MULTI files (`0xED`) — 16 parts, all confirmed
+#### Velocity zone — 0x18 bytes (4 zones at keygroup offsets 0x22, 0x3a, 0x52, 0x6a)
 
-File type `0xED` (`'m'+0x80`). akaiutil documents only the file-type byte and default name — no struct exists. All offsets confirmed by isolated hardware byte-diff tests.
+```
+00-0b    A12   sample name
+0c       C  0  velocity low
+0d       C127  velocity high
+0e       C  0  tune offset cents / 256
+0f       C  0  tune offset semitones
+10       C  0  loudness offset
+11       C  0  filter freq. offset
+12       C  0  pan offset
+13       C  0  loop mode: 0=sample setting, 1=loop, 2=loop until release,
+                           3=no loop, 4=play to end
+14-15    C2    reserved
+16-17    x2    sample header block address (internal)
 
-**File structure:** 4096 bytes = 0x400-byte header + 16 × 0xC0-byte part records.
+Zone 1 = primary sample. Zone 2 = stereo right channel (panned hard L/R).
+Zones 3-4 unused in this app.
+```
 
-**Multi-level header (`0x000`–`0x3FF`):**
+#### Filter mod sources (0x54-0x56, index 0-13)
 
-| Offset | Field | Notes |
-|---|---|---|
-| `0x000`–`0x002` | Preamble | 3 bytes `0x00`. |
-| `0x003`–`0x00E` | Internal name | 12 bytes, Akai-encoded. The Akai reads this field (not the directory entry name) when displaying the loaded multi's name in memory. |
-| `0x00F`–`0x3FF` | Unknown | Not investigated. Preserved, never written. |
+```
+ 0  No Source    7  Key
+ 1  Modwheel     8  Lfo1
+ 2  Bend         9  Lfo2
+ 3  Pressure    10  Env1
+ 4  External    11  Env2
+ 5  Velocity    12  !Modwheel
+ 6  (unused)    13  !Bend      14  !External
+```
 
-**Part N base:** `0x400 + (N-1) × 0xC0`. Stride confirmed via Part 2 test.
+---
 
-| Offset from part base | Field | Notes |
-|---|---|---|
-| `+0x00` | Record marker | `0x01`. |
-| `+0x01`–`+0x02` | Program link pointer | Sampler-managed. Not written. |
-| `+0x03`–`+0x0E` | Program name | 12 bytes, Akai-encoded. **Hardware-confirmed** Parts 1 and 2. |
-| `+0x0F` | Padding | Unknown. |
-| `+0x10` | Channel | 0-indexed. **Hardware-confirmed.** |
-| `+0x11`–`+0x16` | Unknown | 6 bytes. Preserved, never written. |
-| `+0x17` | Level | 0–99. **Hardware-confirmed.** |
-| `+0x18` | Pan | Signed. **Hardware-confirmed.** |
-| `+0x19`–`+0x70` | Unknown | 88 bytes. Likely OUT/TUNE/RNGE/PRIO fields. Preserved, never written. |
-| `+0x71` | FX bus | 0=OFF, 1=FX1, 2=FX2, 3=RV3, 4=RV4. OFF/FX1 **hardware-confirmed**; others inferred from cycle order. |
-| `+0x72` | Send | 0–99. **Hardware-confirmed.** |
-| `+0xBE`–`+0xBF` | End link pointer | `0xFFFF` = unassigned. **Hardware-confirmed.** Written as `0xFFFF` for all empty parts on create — `0x0000` causes the hardware to resolve to the wrong multi on load. Sampler-managed once a program is assigned. |
+### Multi file (type ed)
+
+```
+0000-03ff    multi header
+0400-04bf    part 1
+04c0-057f    part 2
+  ...        (16 parts, 0xc0 bytes each)
+```
+
+#### Multi header
+
+```
+000-002    C3    00 00 00
+003-00e    A12   internal name (Akai reads this, not the directory entry name)  *
+00f-3ff           unknown, preserved
+```
+
+#### Part record — 0xc0 bytes (base = 0x400 + (N-1) * 0xc0)
+
+```
++00      C     01  (record marker)
++01-02   x2    program link pointer (internal)
++03-0e   A12   program name  *
++0f      C     padding
++10      C     MIDI channel 0-indexed  *
++11-16   C6    unknown, preserved
++17      C 99  level 0-99  *
++18      C     pan signed  *
++19-70   C88   unknown (OUT/TUNE/RNGE/PRIO), preserved
++71      C     FX bus: 0=off, 1=FX1, 2=FX2, 3=RV3, 4=RV4  *
++72      C     FX send 0-99  *
++be-bf   C2    end link pointer: ffff=unassigned  *must be ffff or wrong multi loads
+```
+
+---
+
+### Default discrepancies (manual vs hardware)
+
+```
+Filter Key Follow    manual says +12    hardware shows 0   *
+Loudness             manual says 80     hardware shows 99  *  (program-level)
+Velocity > Loud      manual says 20     hardware shows 99  *
+```
+
+---
+
+### Cross-reference: disputed or unconfirmed offsets
+
+```
+Program 0x15   Ohsaki: play octave shift ±2
+               This app: bend range down 0-24
+               Status: not yet hardware-confirmed  ?
+
+Keygroup 0x84  Ohsaki: attack hold until loop
+               This app: pitchMode TRACK/CONST
+               Ohsaki also notes "84??" next to 0x85-88 constant pitch
+               Status: hardware-confirmed TRACK/CONST works at 0x84 *
+                       but Ohsaki’s 0x85-88 layout not yet tested  ?
+
+Keygroup 0x85-88  Ohsaki: constant pitch zones 1-4 (0=track, 1=const)
+               This app: writes pitchMode at 0x84 only (zone 1)
+               Status: zones 2-4 pitch mode unverified  ?
+```
 
 ---
 
@@ -366,6 +501,7 @@ The app automatically passes `--tracks=c=0-N` when writing, where N is the last 
 - [GreaseWeazle](https://github.com/keirf/greaseweazle)
 - [akaiutil (Midi-In)](https://github.com/Midi-In/akaiutil)
 - [akai-fs (dialtr)](https://github.com/dialtr/akai-fs)
+- [AKAI S3000 Series Disk and File Format](https://lsnl.jp/~ohsaki/software/akaitools/S3000-format.html) — reverse-engineered format reference by Hiroyuki Ohsaki (1993), covering disk structure, FAT, volume entries, sample headers, program and keygroup layouts in detail
 - [Akai S3000XL Wikipedia](https://en.wikipedia.org/wiki/Akai_S3000XL)
 
 ---

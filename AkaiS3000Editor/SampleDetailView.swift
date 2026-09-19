@@ -3,6 +3,7 @@ import AVFoundation
 
 struct SampleDetailView: View {
     let sample: AkaiSample
+    var selectedSampleIDs: Set<UUID> = []
     @ObservedObject var diskImage: AkaiDiskImage
 
     @State private var editedRootNote: Int
@@ -32,8 +33,9 @@ struct SampleDetailView: View {
     @State private var editedName: String = ""
     @FocusState private var nameFieldFocused: Bool
 
-    init(sample: AkaiSample, diskImage: AkaiDiskImage) {
+    init(sample: AkaiSample, selectedSampleIDs: Set<UUID> = [], diskImage: AkaiDiskImage) {
         self.sample = sample
+        self.selectedSampleIDs = selectedSampleIDs
         self.diskImage = diskImage
         _editedRootNote = State(initialValue: Int(sample.header.midiRootNote))
         _editedFineTune = State(initialValue: Double(sample.header.fineTune))
@@ -129,6 +131,12 @@ struct SampleDetailView: View {
                         Text("Sample · \(formatSize(Int(sample.directoryEntry.size)))")
                             .font(.subheadline)
                             .foregroundStyle(.secondary)
+                        if selectedSampleIDs.count > 1 {
+                            Text("Editing \(selectedSampleIDs.count) samples — changes apply to all selected")
+                                .font(.caption).foregroundStyle(.white)
+                                .padding(.horizontal, 8).padding(.vertical, 3)
+                                .background(Capsule().fill(Color.accentColor))
+                        }
                     }
                     Spacer()
                     Button { exportWAV() } label: {
@@ -573,11 +581,25 @@ struct SampleDetailView: View {
         return s
     }
 
-    /// Push current edits into the in-memory image so a global Save All persists
-    /// them even if the per-sample Save button wasn't used. Does not write a file.
+    /// Push current edits into the in-memory image for all selected samples.
+    /// Fields are applied relative to the change made on the primary sample.
     private func commitEditsToImage() {
         isDirty = true
-        diskImage.applySampleEdits(editedSample())
+        let primary = editedSample()
+        diskImage.applySampleEdits(primary)
+        // Apply to all other selected samples too.
+        let others = selectedSampleIDs.subtracting([sample.id])
+        for id in others {
+            guard var s = diskImage.samples.first(where: { $0.id == id }) else { continue }
+            s.header.midiRootNote = primary.header.midiRootNote
+            s.header.fineTune = primary.header.fineTune
+            s.header.semitoneTune = primary.header.semitoneTune
+            s.header.playbackMode = primary.header.playbackMode
+            s.header.loopStart = primary.header.loopStart
+            s.header.loopEnd = primary.header.loopEnd
+            s.header.sampleStart = primary.header.sampleStart
+            diskImage.applySampleEdits(s)
+        }
     }
 
     private func beginRename() {

@@ -6,6 +6,7 @@ struct ContentView: View {
     @ObservedObject var greaseweazle: GreaseweazleRunner
     @State private var selectedTab: SidebarTab = .samples
     @State private var selectedSampleID: UUID? = nil
+    @State private var selectedSampleIDs: Set<UUID> = []
     @State private var selectedProgramID: UUID? = nil
     @State private var selectedMultiID: UUID? = nil
     @State private var showingAlert = false
@@ -56,6 +57,7 @@ struct ContentView: View {
                 greaseweazle: greaseweazle,
                 selectedTab: $selectedTab,
                 selectedSampleID: $selectedSampleID,
+                selectedSampleIDs: $selectedSampleIDs,
                 selectedProgramID: $selectedProgramID,
                 selectedMultiID: $selectedMultiID
             )
@@ -81,8 +83,12 @@ struct ContentView: View {
                         case .samples:
                             if let id = selectedSampleID,
                                let sample = diskImage.samples.first(where: { $0.id == id }) {
-                                SampleDetailView(sample: sample, diskImage: diskImage)
-                                    .id(id)
+                                SampleDetailView(
+                                    sample: sample,
+                                    selectedSampleIDs: selectedSampleIDs,
+                                    diskImage: diskImage
+                                )
+                                .id(id)
                             } else {
                                 SampleListView(diskImage: diskImage, selectedSampleID: $selectedSampleID)
                             }

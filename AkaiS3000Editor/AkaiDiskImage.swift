@@ -329,17 +329,8 @@ struct AkaiProgramKeyzone {
     /// SMP1 pitch mode — kg+0x84. CONFIRMED BY REAL HARDWARE BYTE-DIFF:
     /// isolated test changing ONLY SMP1 PITCH TRACK→CONST produced exactly
     /// one changed byte at kg+0x84: 0x00 (TRACK) → 0x01 (CONST).
-    /// TRACK: pitch follows keyboard (melodic use). CONST: pitch locked to
-    /// recorded pitch regardless of note played (required for drums — without
-    /// it, samples play back at wrong speed/pitch).
-    var pitchMode: UInt8 = 0   // default TRACK (0x00) — pitch follows the keyboard, correct
-                               // for most melodic/general keyzone creation. Drum-specific
-                               // import paths (DrumPresetDropZone, folder-drop batch imports)
-                               // explicitly override this to 1 (CONST) at their call sites,
-                               // since one-shot drum samples need a fixed, unpitched playback
-                               // speed regardless of which key triggers them — relying on this
-                               // default alone previously caused drum samples to play back at
-                               // the wrong speed.
+    /// TRACK: pitch follows keyboard. CONST: pitch locked to recorded pitch.
+    var pitchMode: UInt8 = 0   // default TRACK (0x00)
 }
 
 /// The full set of modulation sources selectable for any of the 3 filter
@@ -488,7 +479,7 @@ struct AkaiProgram {
     var polyphony: UInt8          // hdr+0x11, 0-indexed (value = voices - 1), range 0–31
     var priority: AkaiProgramPriority       // hdr+0x12, hardware-confirmed
     var reassignment: AkaiProgramReassignment   // hdr+0x3D, hardware-confirmed
-    var bendRange: UInt8
+    var bendRange: UInt8      // stored at both 0x27 (up) and 0x15 (down)
     /// Master "stereo level" — program header offset `0x17`, 0–99. The OUTPUT
     /// LEVELS page's level of the program at the main L/R stereo outs (manual,
     /// p.66): "By setting this field to 00, you may use this parameter to mix a
@@ -532,14 +523,7 @@ struct AkaiProgram {
     var filterModSource3: AkaiFilterModSource
     var rawData: Data
 
-    /// Heuristic: a program is treated as a DRUM KIT when ANY of its keyzones is
-    /// mapped to a single key (lowKey == highKey) — the shape produced by "Create
-    /// Drum Program" / drum imports. A program can be mixed (some single-key drum
-    /// zones alongside full-range melodic zones) and still counts as a drum kit
-    /// under this rule. This is a live computed classification from the keyzones,
-    /// NOT an on-disk flag: the S3000 format has no program sub-type field, so
-    /// there's nothing to persist and nothing that could break round-tripping on
-    /// real hardware. An empty program (no keyzones) is not a drum kit.
+    /// True when any keyzone is single-key (lowKey == highKey).
     var isDrumKit: Bool {
         keyzones.contains { $0.lowKey == $0.highKey }
     }
@@ -748,14 +732,6 @@ class AkaiDiskImage: ObservableObject {
     /// and bow out so keystrokes reach the field instead of triggering shortcuts.
     @Published var isEditingText = false
 
-    /// Session-only set of program names created as drum programs this session.
-    /// Not persisted — the S3000 format has no drum-program flag, so once an
-    /// empty drum program is saved and reloaded the only indicator is its
-    /// keyzones being single-key. This covers the window between creation and
-    /// the first keyzone being dragged in.
-    var drumProgramNames: Set<String> = []
-
-    func isDrumProgram(name: String) -> Bool { drumProgramNames.contains(name) }
 
     /// True whenever a Program's keyzone list has an active selection —
     /// ProgramDetailView sets this true/false as selectedKeyzoneIndices changes.
@@ -1091,13 +1067,10 @@ class AkaiDiskImage: ObservableObject {
         let rawMidi = fileData.count > 0x10 ? fileData[0x10] : 0xff
         let midiChannel: UInt8 = rawMidi == 0xff ? 0 : rawMidi &+ 1
         let keygroupCount = fileData.count > 0x2A ? fileData[0x2A] : 0
-        let octave: UInt8 = {
-            // bendRange is stored at 0x27 (up) and 0x15 (down). Take the max
-            // so old disks that only had 0x27 set still parse correctly.
-            let up   = fileData.count > 0x27 ? fileData[0x27] : 0
-            let down = fileData.count > 0x15 ? fileData[0x15] : 0
-            return max(up, down)
-        }()
+        let octave: UInt8 = max(
+            fileData.count > 0x27 ? fileData[0x27] : 2,
+            fileData.count > 0x15 ? fileData[0x15] : 0
+        )
         // Polyphony @ hdr+0x11: 0-indexed (0=1 voice, 31=32 voices). Default 32 voices.
         let rawPoly = fileData.count > 0x11 ? fileData[0x11] : 31
         let polyphony: UInt8 = rawPoly &+ 1
@@ -1232,7 +1205,8 @@ class AkaiDiskImage: ObservableObject {
         file[0x10] = 0xFF                        // midich1 = OMNI
         file[0x13] = 24                         // keylo (matches hardware default)
         file[0x14] = 127                        // keyhi
-        file[0x15] = 2                          // oct (bend range) — hardware default is 2 semitones
+        file[0x15] = 0                          // bend down — hardware default is 0 (factory TEST PROGRAM confirmed)
+        file[0x27] = 2                          // bend up — hardware default is 2 semitones
         file[0x16] = 0xFF                        // auxch1 = OFF
         file[0x17] = 99                         // stereo level (OUTPUT LEVELS page) — confirmed offset; 0 = silent!
         file[0x19] = 99                         // basic loudness (OUTPUT LEVELS page) — confirmed offset; real factory default is 80, but 99 matches "to 99 for both" request
@@ -1293,8 +1267,7 @@ class AkaiDiskImage: ObservableObject {
             rawEntry: entryBytes, diskOffset: dirSlot)
         let program = AkaiProgram(name: name, keyzones: [],
             midiChannel: 0, polyphony: 32, priority: .norm, reassignment: .oldest,
-            bendRange: 2,
-            stereoLevel: 99, basicLoudness: 99,
+            bendRange: 2, stereoLevel: 99, basicLoudness: 99,
             filterModSource1: .velocity, filterModSource2: .lfo2, filterModSource3: .env2,
             rawData: file)
         let progFile = AkaiProgramFile(directoryEntry: dirEntry, program: program,
@@ -1318,78 +1291,6 @@ class AkaiDiskImage: ObservableObject {
     /// every program save), so the on-disk layout is the ordinary, hardware-
     /// validated program format — nothing non-standard.
     @discardableResult
-    func createDrumProgram(name rawName: String = "NEW DRUMS") throws -> AkaiProgramFile {
-        guard var data = imageData else { throw AkaiError.noImageLoaded }
-        let name = uniqueProgramName(basedOn: rawName)
-
-        // No seed keyzone — the user drags samples in after creation. Drum-ness
-        // is remembered in drumProgramNames for this session so the drag path
-        // knows to create single-key zones even before any keyzone exists.
-        let file = buildProgramFileData(
-            name: name, midiChannel: 0, bendRange: 2,
-            stereoLevel: 99, basicLoudness: 99,
-            polyphony: 32, priority: .norm, reassignment: .oldest,
-            filterModSource1: .velocity, filterModSource2: .lfo2, filterModSource3: .env2,
-            keyzones: [])
-
-        let bs = AkaiDiskFormat.blockSize
-        let blocksNeeded = (file.count + bs - 1) / bs
-        guard let blocks = findFreeBlocks(count: blocksNeeded, data: data) else {
-            throw AkaiError.diskFull("Not enough space on the disk to create a program.")
-        }
-        guard let dirSlot = findFreeDirectorySlot(data: data) else {
-            throw AkaiError.dataError("Disk directory is full")
-        }
-
-        for i in 0..<blocks.count {
-            let value: UInt16 = (i == blocks.count - 1) ? AkaiDiskFormat.fatEnd : UInt16(blocks[i + 1])
-            setFatValue(block: blocks[i], value: value, data: &data)
-        }
-        for (i, block) in blocks.enumerated() {
-            let srcStart = i * bs
-            let srcEnd = min(srcStart + bs, file.count)
-            let dstStart = block * bs
-            guard dstStart + bs <= data.count else { throw AkaiError.dataError("Block out of range") }
-            let chunk = file[srcStart..<srcEnd]
-            let padded = chunk + Data(repeating: 0, count: bs - (srcEnd - srcStart))
-            data.replaceSubrange(dstStart..<dstStart + bs, with: padded)
-        }
-
-        let startBlock = blocks[0]
-        let totalSize = UInt32(file.count)
-        var entryBytes = Data(repeating: 0, count: AkaiDiskFormat.dirEntrySize)
-        let nameBytes = akaiBytes(from: name, length: 12)
-        for (i, b) in nameBytes.enumerated() { entryBytes[i] = b }
-        entryBytes[16] = AkaiDiskFormat.ftypeProgram
-        entryBytes[17] = UInt8(totalSize & 0xFF)
-        entryBytes[18] = UInt8((totalSize >> 8) & 0xFF)
-        entryBytes[19] = UInt8((totalSize >> 16) & 0xFF)
-        entryBytes[20] = UInt8(startBlock & 0xFF)
-        entryBytes[21] = UInt8((startBlock >> 8) & 0xFF)
-        entryBytes[22] = 0x00; entryBytes[23] = 0x11   // osver 0x1100 (v17.00)
-        data.replaceSubrange(dirSlot..<dirSlot + AkaiDiskFormat.dirEntrySize, with: entryBytes)
-
-        imageData = data
-        freeBlocks = countFreeBlocks(data: data)
-
-        let dirEntry = AkaiDirectoryEntry(
-            name: name, fileType: AkaiDiskFormat.ftypeProgram,
-            startBlock: UInt16(startBlock), size: totalSize,
-            rawEntry: entryBytes, diskOffset: dirSlot)
-        let program = AkaiProgram(name: name, keyzones: [],
-            midiChannel: 0, polyphony: 32, priority: .norm, reassignment: .oldest,
-            bendRange: 2,
-            stereoLevel: 99, basicLoudness: 99,
-            filterModSource1: .velocity, filterModSource2: .lfo2, filterModSource3: .env2,
-            rawData: file)
-        let progFile = AkaiProgramFile(directoryEntry: dirEntry, program: program,
-                                       offset: startBlock * bs)
-        programs.append(progFile)
-        drumProgramNames.insert(name)   // remember it's a drum program this session
-        hasUnsavedChanges = true
-        return progFile
-    }
-
     // MARK: - WAV Export
 
     func exportSampleAsWAV(sample: AkaiSample) throws -> Data {
@@ -1631,13 +1532,16 @@ class AkaiDiskImage: ObservableObject {
     /// model and sets hasUnsavedChanges (persist via Save).
     @discardableResult
     func addImportedSample(name rawName: String, sampleRate: UInt32,
-                           numChannels: Int, pcmData: Data) throws -> AkaiSample {
+                           numChannels: Int, pcmData: Data,
+                           forceName: Bool = false) throws -> AkaiSample {
         // Serialise on diskQueue so concurrent imports don't read stale imageData
         // and clobber each other's FAT chains or directory entries.
         return try diskQueue.sync {
         guard var data = imageData else { throw AkaiError.noImageLoaded }
 
-        let name = uniqueSampleName(basedOn: rawName.isEmpty ? "NEW SAMPLE" : rawName)
+        let name = forceName
+            ? Self.sanitizeName(rawName.isEmpty ? "NEW SAMPLE" : rawName)
+            : uniqueSampleName(basedOn: rawName.isEmpty ? "NEW SAMPLE" : rawName)
         let numSamples = UInt32(pcmData.count) / UInt32(max(1, numChannels)) / 2
         let header = buildSampleHeader(name: name, sampleRate: sampleRate,
                                        numSamples: numSamples, rootNote: 60)
@@ -1784,6 +1688,22 @@ class AkaiDiskImage: ObservableObject {
     /// Generate a unique 12-char Akai sample name based on `base`, avoiding any
     /// name already present in the directory. Tries "<base> 2", "<base> 3", …,
     /// trimming the base so the suffix fits within 12 characters.
+    /// Returns a unique base name (up to 10 chars) for a stereo pair, ensuring
+    /// neither baseName+"-L" nor baseName+"-R" conflicts with existing samples.
+    func uniqueSampleBaseName(_ base: String) -> String {
+        let existing = Set(samples.map { $0.header.name.trimmingCharacters(in: .whitespaces) })
+        var candidate = String(Self.sanitizeNamePreservingEnd(base, maxLen: 10))
+        var suffix = 2
+        while existing.contains(candidate + "-L") || existing.contains(candidate + "-R") {
+            let num = String(suffix)
+            let trimmed = Self.sanitizeNamePreservingEnd(base, maxLen: 10 - num.count)
+            candidate = trimmed + num
+            suffix += 1
+            if suffix > 99 { break }
+        }
+        return candidate
+    }
+
     private func uniqueSampleName(basedOn base: String) -> String {
         let existing = Set(samples.map { $0.header.name })
         let cleanBase = Self.sanitizeName(base)
@@ -3158,10 +3078,9 @@ class AkaiDiskImage: ObservableObject {
         file[0x12] = priority.rawValue
         file[0x13] = 0                            // program-level keylo
         file[0x14] = 127                          // program-level keyhi
-        // Bend range — up @ hdr+0x27, down @ hdr+0x15. Hardware-confirmed.
-        // Single UI control writes both simultaneously.
-        file[0x15] = bendRange   // bend down
-        file[0x27] = bendRange   // bend up
+        // Bend range — written to both 0x27 (up) and 0x15 (down).
+        file[0x15] = bendRange
+        file[0x27] = bendRange
         file[0x16] = 0xFF                          // auxch1 = OFF
         file[0x17] = stereoLevel                  // OUTPUT LEVELS "stereo level" — confirmed offset; 0 = total silence on main outs
         file[0x19] = basicLoudness                 // OUTPUT LEVELS "basic loudness" — confirmed offset; 0 = total silence regardless of velocity

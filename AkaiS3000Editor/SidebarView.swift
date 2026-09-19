@@ -5,16 +5,13 @@ struct SidebarView: View {
     @ObservedObject var greaseweazle: GreaseweazleRunner
     @Binding var selectedTab: ContentView.SidebarTab
     @Binding var selectedSampleID: UUID?
+    @Binding var selectedSampleIDs: Set<UUID>
     @Binding var selectedProgramID: UUID?
     @Binding var selectedMultiID: UUID?
 
     @State private var sampleToDelete: AkaiSample? = nil
     @State private var showDeleteConfirm = false
     @State private var deleteKeyMonitor: Any? = nil
-    /// Multi-selection set for batch operations. The single `selectedSampleID`
-    /// still drives the detail view; this set tracks the broader selection.
-    @State private var selectedSampleIDs: Set<UUID> = []
-    /// Anchor for shift-click range selection (last plain-clicked row).
     @State private var selectionAnchorID: UUID? = nil
     @State private var showBatchDeleteConfirm = false
     @State private var cloneSpaceAlert = false
@@ -232,20 +229,6 @@ struct SidebarView: View {
     private func createProgram() {
         do {
             let prog = try diskImage.createProgram()
-            selectedTab = .programs
-            selectedProgramID = prog.id
-        } catch {
-            cloneSpaceMessage = error.localizedDescription
-            cloneSpaceAlert = true
-        }
-    }
-
-    /// Create a new drum program instantly (no picker), seeded with one
-    /// single-key C1 keyzone so it reads as — and persists as — a drum kit.
-    /// Mirrors createProgram(). See AkaiDiskImage.createDrumProgram.
-    private func createDrumProgram() {
-        do {
-            let prog = try diskImage.createDrumProgram()
             selectedTab = .programs
             selectedProgramID = prog.id
         } catch {
@@ -807,7 +790,6 @@ struct SidebarView: View {
                 ForEach(diskImage.programs) { prog in
                     SidebarProgramRow(
                         program: prog,
-                        isDrumOverride: diskImage.isDrumProgram(name: prog.program.name.isEmpty ? prog.directoryEntry.name : prog.program.name),
                         isSelected: selectedProgramIDs.contains(prog.id)
                             || (selectedProgramIDs.isEmpty && selectedProgramID == prog.id),
                         selectedCount: selectedProgramIDs.count,
@@ -821,8 +803,7 @@ struct SidebarView: View {
                         },
                         onCreate: { createProgram() },
                         onClone: { cloneProgram(prog) },
-                        onCreatePreset: { createPresetFromSample() },
-                        onCreateDrumPreset: { createDrumPresetFromFolder() }
+                        onCreatePreset: { createPresetFromSample() }
                     )
                 }
             }
@@ -858,9 +839,6 @@ struct SidebarView: View {
             .contextMenu {
                 Button { createProgram() } label: {
                     Label("Create Program", systemImage: "plus.square.on.square")
-                }
-                Button { createDrumProgram() } label: {
-                    Label("Create Drum Program", systemImage: drumKitSymbol)
                 }
             }
         }
@@ -984,13 +962,6 @@ struct SidebarView: View {
 internal let greaseweazlePurple = Color(red: 0.55, green: 0.50, blue: 0.80)
 
 private let akaiRed = Color(red: 0.91, green: 0, blue: 0.11)
-/// Brown accent used to distinguish drum-kit programs (all single-key keyzones)
-/// from melodic/piano programs (purple). Shared by the sidebar row and the
-/// program detail header.
-let akaiDrumBrown = Color(red: 0.55, green: 0.36, blue: 0.20)
-/// SF Symbol used for drum-kit programs — a 3×3 pad grid reads as an MPC/drum
-/// machine, versus `pianokeys` for melodic programs.
-let drumKitSymbol = "circle.grid.3x3.fill"
 
 struct SidebarSampleRow: View {
     let sample: AkaiSample
@@ -1067,7 +1038,6 @@ struct SidebarSampleRow: View {
 
 struct SidebarProgramRow: View {
     let program: AkaiProgramFile
-    var isDrumOverride: Bool = false
     let isSelected: Bool
     var selectedCount: Int = 0
     let onTap: () -> Void
@@ -1075,21 +1045,15 @@ struct SidebarProgramRow: View {
     var onCreate: () -> Void = {}
     var onClone: () -> Void = {}
     var onCreatePreset: () -> Void = {}
-    var onCreateDrumPreset: () -> Void = {}
 
     private var displayName: String {
         program.program.name.isEmpty ? program.directoryEntry.name : program.program.name
     }
 
-    /// Drum kits get a brown pad-grid look; melodic programs stay purple pianokeys.
-    private var isDrum: Bool { program.program.isDrumKit || isDrumOverride }
-    private var accent: Color { isDrum ? akaiDrumBrown : .purple }
-    private var iconName: String { isDrum ? drumKitSymbol : "pianokeys.inverse" }
-
     var body: some View {
         HStack(spacing: 8) {
-            Image(systemName: iconName)
-                .foregroundStyle(isSelected ? .white : accent)
+            Image(systemName: "pianokeys.inverse")
+                .foregroundStyle(isSelected ? .white : .purple)
                 .font(.system(size: 14))
             VStack(alignment: .leading, spacing: 1) {
                 Text(displayName)
@@ -1104,7 +1068,7 @@ struct SidebarProgramRow: View {
         .padding(.vertical, 3)
         .padding(.horizontal, 8)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(RoundedRectangle(cornerRadius: 6).fill(isSelected ? accent : Color.clear))
+        .background(RoundedRectangle(cornerRadius: 6).fill(isSelected ? Color.purple : Color.clear))
         .listRowInsets(EdgeInsets(top: 2, leading: 4, bottom: 2, trailing: 4))
         .contentShape(Rectangle())
         .onTapGesture { onTap() }
@@ -1118,9 +1082,6 @@ struct SidebarProgramRow: View {
             }
             Button(action: onCreatePreset) {
                 Label("Create Preset from Sample", systemImage: "square.and.arrow.down.on.square")
-            }
-            Button(action: onCreateDrumPreset) {
-                Label("Create Drum Preset from Folder", systemImage: "folder.badge.plus")
             }
             Divider()
             Button(role: .destructive, action: onDelete) {

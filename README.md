@@ -140,7 +140,7 @@ The S3000XL holds only one multi in memory at a time, but any number may be save
 
 ## Technical Reference: Akai S3000 Disk Format
 
-Sources: [Ohsaki/akaitools](https://lsnl.jp/~ohsaki/software/akaitools/S3000-format.html), [Midi-In/akaiutil](https://github.com/Midi-In/akaiutil), [keirf/GreaseWeazle](https://github.com/keirf/greaseweazle), Akai S3000XL Operator’s Manual, and direct hardware byte-diff testing on a real S3000XL.
+Sources: [Ohsaki/akaitools](https://lsnl.jp/~ohsaki/software/akaitools/S3000-format.html), [Midi-In/akaiutil](https://github.com/Midi-In/akaiutil), [dialtr/akai-fs](https://github.com/dialtr/akai-fs), [keirf/GreaseWeazle](https://github.com/keirf/greaseweazle), Akai S3000XL Operator’s Manual, and direct hardware byte-diff testing on a real S3000XL.
 
 All numbers little-endian. Akai character encoding: `0–9`=digits, `10`=space, `11–36`=A–Z, `37`=#, `38`=+, `39`=-, `40`=.
 
@@ -475,82 +475,84 @@ Keygroup 0x85-88  Ohsaki: constant pitch zones 1-4 (0=track, 1=const)
 
 Status codes: `agree`=all sources agree, `our finding`=not in Ohsaki or manual, `dispute`=we disagree with a source, `not modelled`=known but not implemented, `?`=uncertain
 
+Sources: [Ohsaki/akaitools](https://lsnl.jp/~ohsaki/software/akaitools/S3000-format.html) · [Midi-In/akaiutil](https://github.com/Midi-In/akaiutil) · [dialtr/akai-fs](https://github.com/dialtr/akai-fs) · Akai S3000XL Operator’s Manual · hardware byte-diff testing
+
 ```
 PROGRAM HEADER
 
-offset  ohsaki              manual    this project              status
-------  ------              ------    ------------              ------
-0x10    MIDI channel        yes       confirmed *               agree
-0x11    polyphony           yes       confirmed *               agree
-0x12    priority            yes       confirmed *               agree
-0x15    octave shift ±2     -         we write bend down here   dispute ?
-0x17    stereo level        yes       confirmed *               agree
-0x19    loudness            yes       confirmed * (default 99)  agree / manual wrong default
-0x1a    velocity > loud     yes       confirmed *               agree
-0x27    bend up 0-24        yes       confirmed *               agree
-0x28    pressure > pitch    yes       confirmed * (default 0)   agree
-0x2a    # of keygroups      yes       confirmed *               agree
-0x3d    voice assign        yes       confirmed *               agree
-0x49    -                   -         default 2, unknown        our finding ?
-0x4a    -                   -         bend mode NORMAL/HELD *   our finding
-0x54    -                   -         filter mod source 1 *     our finding
-0x55    -                   -         filter mod source 2 *     our finding
-0x56    -                   -         filter mod source 3 *     our finding
-0x18    stereo pan          yes       not modelled              not modelled
-0x1b-c  key/pressure>loud   yes       not modelled              not modelled
-0x1d-f  pan LFO             yes       not modelled              not modelled
-0x20-6  LFO/mod params      yes       not modelled              not modelled
-0x29    kg crossfade        yes       not modelled              not modelled
-0x38    echo output         yes       not modelled              not modelled
-0x39    modwheel pan        yes       not modelled              not modelled
-0x3a    start coherence     yes       not modelled              not modelled
-0x3b    LFO de-sync         yes       not modelled              not modelled
-0x3c    pitch law           yes       not modelled              not modelled
-0x3e-40 soft pedal          yes       not modelled              not modelled
-0x41-42 tune offset         yes       not modelled              not modelled
-0x43-45 key > LFO           yes       not modelled              not modelled
-0x46-47 output scale        yes       not modelled              not modelled
+offset  akaiutil  akai-fs   ohsaki              manual    this project              status
+------  --------  -------   ------              ------    ------------              ------
+0x10    yes       yes       MIDI channel        yes       confirmed *               agree
+0x11    yes       yes       polyphony           yes       confirmed *               agree
+0x12    yes       yes       priority            yes       confirmed *               agree
+0x15    -         -         octave shift ±2     -         we write bend down here   dispute ?
+0x17    yes       yes       stereo level        yes       confirmed *               agree
+0x19    yes       yes       loudness            yes       confirmed * (default 99)  agree / manual wrong default
+0x1a    yes       yes       velocity > loud     yes       confirmed *               agree
+0x27    yes       yes       bend up 0-24        yes       confirmed *               agree
+0x28    -         -         pressure > pitch    yes       confirmed * (default 0)   agree
+0x2a    yes       yes       # of keygroups      yes       confirmed *               agree
+0x3d    yes       -         voice assign        yes       confirmed *               agree
+0x49    -         -         -                   -         default 2, unknown        our finding ?
+0x4a    -         -         -                   -         bend mode NORMAL/HELD *   our finding
+0x54    -         -         -                   -         filter mod source 1 *     our finding
+0x55    -         -         -                   -         filter mod source 2 *     our finding
+0x56    -         -         -                   -         filter mod source 3 *     our finding
+0x18    yes       -         stereo pan          yes       not modelled              not modelled
+0x1b-c  -         -         key/pressure>loud   yes       not modelled              not modelled
+0x1d-f  -         -         pan LFO             yes       not modelled              not modelled
+0x20-6  -         -         LFO/mod params      yes       not modelled              not modelled
+0x29    -         -         kg crossfade        yes       not modelled              not modelled
+0x38    -         -         echo output         yes       not modelled              not modelled
+0x39    -         -         modwheel pan        yes       not modelled              not modelled
+0x3a    -         -         start coherence     yes       not modelled              not modelled
+0x3b    -         -         LFO de-sync         yes       not modelled              not modelled
+0x3c    -         -         pitch law           yes       not modelled              not modelled
+0x3e-40 -         -         soft pedal          yes       not modelled              not modelled
+0x41-42 -         -         tune offset         yes       not modelled              not modelled
+0x43-45 -         -         key > LFO           yes       not modelled              not modelled
+0x46-47 -         -         output scale        yes       not modelled              not modelled
 
 KEYGROUP
 
-offset  ohsaki              manual    this project              status
-------  ------              ------    ------------              ------
-0x03    keyrange low        yes       confirmed *               agree
-0x04    keyrange high       yes       confirmed *               agree
-0x07    filter freq         yes       confirmed *               agree
-0x08    key > filter        yes       confirmed * (default 0)   agree / manual wrong default
-0x0c-f  amp ADSR            yes       all confirmed *           agree
-0x14-17 filter ENV2         yes       all confirmed *           agree
-0x20-21 internal            yes       must be 0xffff *          agree / extended (silence bug)
-0x84    attack hold loop    yes       we write pitchMode here   dispute ?
-0x85-88 const pitch zones   yes       not yet tested            dispute ?
-0x95    -                   -         resonance 0-15 *          our finding
-0x97    -                   -         filter mod depth 1 *      our finding
-0x98    -                   -         filter mod depth 2 *      our finding
-0x99    -                   -         filter mod depth 3 *      our finding
-0x9c-9f -                   -         ENV2 levels/rates *       our finding
-0x05-06 tune offset         yes       not modelled              not modelled
-0x09-0b vel/pres/env>filt   yes       not modelled              not modelled
-0x10-13 vel/key > amp       yes       not modelled              not modelled
-0x18-1b vel/key > filter    yes       not modelled              not modelled
-0x1c    vel > filter env    yes       not modelled              not modelled
-0x1d    envelope > pitch    yes       not modelled              not modelled
-0x83    fixed rate detune   yes       not modelled              not modelled
-0x89-8c output offset       yes       not modelled              not modelled
-0x8d-94 vel > sample start  yes       not modelled              not modelled
+offset  akaiutil  akai-fs   ohsaki              manual    this project              status
+------  --------  -------   ------              ------    ------------              ------
+0x03    yes       yes       keyrange low        yes       confirmed *               agree
+0x04    yes       yes       keyrange high       yes       confirmed *               agree
+0x07    yes       yes       filter freq         yes       confirmed *               agree
+0x08    yes       -         key > filter        yes       confirmed * (default 0)   agree / manual wrong default
+0x0c-f  yes       yes       amp ADSR            yes       all confirmed *           agree
+0x14-17 yes       -         filter ENV2         yes       all confirmed *           agree
+0x20-21 yes       -         internal            yes       must be 0xffff *          agree / extended (silence bug)
+0x84    yes       -         attack hold loop    yes       we write pitchMode here   dispute ?
+0x85-88 yes       -         const pitch zones   yes       not yet tested            dispute ?
+0x95    -         -         -                   -         resonance 0-15 *          our finding
+0x97    -         -         -                   -         filter mod depth 1 *      our finding
+0x98    -         -         -                   -         filter mod depth 2 *      our finding
+0x99    -         -         -                   -         filter mod depth 3 *      our finding
+0x9c-9f -         -         -                   -         ENV2 levels/rates *       our finding
+0x05-06 yes       -         tune offset         yes       not modelled              not modelled
+0x09-0b yes       -         vel/pres/env>filt   yes       not modelled              not modelled
+0x10-13 -         -         vel/key > amp       yes       not modelled              not modelled
+0x18-1b -         -         vel/key > filter    yes       not modelled              not modelled
+0x1c    -         -         vel > filter env    yes       not modelled              not modelled
+0x1d    -         -         envelope > pitch    yes       not modelled              not modelled
+0x83    yes       -         fixed rate detune   yes       not modelled              not modelled
+0x89-8c -         -         output offset       yes       not modelled              not modelled
+0x8d-94 -         -         vel > sample start  yes       not modelled              not modelled
 
 SAMPLE HEADER
 
-offset  ohsaki              manual    this project              status
-------  ------              ------    ------------              ------
-0x01    bandwidth           yes       confirmed * (derived)     agree
-0x02    root key            yes       confirmed *               agree
-0x10    # active loops      yes       confirmed * (lnum)        agree
-0x13    playback mode       yes       confirmed *               agree
-0x1a-1d data length         yes       confirmed *               agree
-0x1e-21 play start          yes       confirmed * (draggable)   agree
-0x26-85 loop slots [8]      yes       confirmed * + critical    agree / extended
-0x8a-8b sample rate         yes       confirmed *               agree
+offset  akaiutil  akai-fs   ohsaki              manual    this project              status
+------  --------  -------   ------              ------    ------------              ------
+0x01    yes       yes       bandwidth           yes       confirmed * (derived)     agree
+0x02    yes       yes       root key            yes       confirmed *               agree
+0x10    yes       -         # active loops      yes       confirmed * (lnum)        agree
+0x13    yes       yes       playback mode       yes       confirmed *               agree
+0x1a-1d yes       yes       data length         yes       confirmed *               agree
+0x1e-21 yes       -         play start          yes       confirmed * (draggable)   agree
+0x26-85 yes       yes       loop slots [8]      yes       confirmed * + critical    agree / extended
+0x8a-8b yes       yes       sample rate         yes       confirmed *               agree
 ```
 
 ---

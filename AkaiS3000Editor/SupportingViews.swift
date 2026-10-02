@@ -121,6 +121,9 @@ struct WaveformView: View {
     /// Optional play-start marker, in FRAMES. Click the waveform to set it;
     /// playback (in SampleDetailView) begins from here. nil = start of sample.
     let playStart: Binding<Double?>?
+    /// When true (lnum=4, 0x12≠0), a shaded region is shown before the loop
+    /// end to indicate the hardware has applied a crossfade to the PCM.
+    let crossfadeActive: Bool
     @State private var waveformPoints: [CGFloat] = []
     /// Per-bucket signed min/max of the actual samples (normalised −1..1), so the
     /// drawn shape is the real waveform (sine looks like a sine, square like a
@@ -162,7 +165,8 @@ struct WaveformView: View {
 
     init(audioData: Data, numSamples: Int = 0, loopEnabled: Bool = false,
          loopStart: Binding<Double>? = nil, loopEnd: Binding<Double>? = nil,
-         playhead: Double = 0, playStart: Binding<Double?>? = nil) {
+         playhead: Double = 0, playStart: Binding<Double?>? = nil,
+         crossfadeActive: Bool = false) {
         self.audioData = audioData
         self.numSamples = numSamples
         self.loopEnabled = loopEnabled
@@ -170,6 +174,7 @@ struct WaveformView: View {
         self.loopEnd = loopEnd
         self.playhead = playhead
         self.playStart = playStart
+        self.crossfadeActive = crossfadeActive
     }
 
     /// The canonical sample count (slen) passed in from the header — the same
@@ -456,6 +461,45 @@ struct WaveformView: View {
                             .frame(width: regionW, height: geo.size.height)
                             .offset(x: startX)
                             .allowsHitTesting(false)
+
+                        // Crossfade region: shaded diagonal-stripe overlay
+                        // before the loop end, showing where the hardware
+                        // has baked a crossfade into the PCM. Width = 5%
+                        // of visible span (approximate since length isn't
+                        // stored on disk). Read-only — we can't edit it.
+                        if crossfadeActive {
+                            let xfWidth = max(4, regionW * 0.12)
+                            Canvas { ctx, size in
+                                // Diagonal stripe fill
+                                let stripeSpacing: CGFloat = 6
+                                let stripeColor = Color.orange.opacity(0.45)
+                                var path = Path()
+                                let h = size.height
+                                let w = size.width
+                                var x: CGFloat = -h
+                                while x < w + h {
+                                    path.move(to: CGPoint(x: x, y: 0))
+                                    path.addLine(to: CGPoint(x: x + h, y: h))
+                                    x += stripeSpacing
+                                }
+                                ctx.stroke(path, with: .color(stripeColor), lineWidth: 2)
+                                // Solid tint
+                                ctx.fill(Path(CGRect(x: 0, y: 0, width: w, height: h)),
+                                         with: .color(Color.orange.opacity(0.12)))
+                            }
+                            .frame(width: xfWidth, height: geo.size.height)
+                            .offset(x: endX - xfWidth)
+                            .allowsHitTesting(false)
+                            .overlay(
+                                Text("Xf")
+                                    .font(.system(size: 9, weight: .bold))
+                                    .foregroundStyle(.orange)
+                                    .padding(.bottom, 4)
+                                    .frame(maxHeight: .infinity, alignment: .bottom)
+                                    .offset(x: endX - xfWidth / 2 - endX + xfWidth)
+                                , alignment: .bottom
+                            )
+                        }
 
                         // Loop start handle — bar on its leading edge, at loopStart.
                         LoopHandle(color: .green, label: "S", barEdge: .leading)

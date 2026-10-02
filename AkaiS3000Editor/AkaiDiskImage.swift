@@ -179,10 +179,10 @@ enum AkaiSamplePlaybackMode: UInt8, CaseIterable, Identifiable {
 
     var displayName: String {
         switch self {
-        case .loop:       return "Loop In Release"
-        case .loopNotRel: return "Loop Until Release"
-        case .noLoop:     return "No Loop"
-        case .toEnd:      return "Play to End"
+        case .loop:       return "Loop In Release (keeps looping after key released, fades out)"
+        case .loopNotRel: return "Loop Until Release (stops looping when key released, plays tail)"
+        case .noLoop:     return "No Loop (plays once, fades out on key release)"
+        case .toEnd:      return "Play to End (always plays full sample, ignores loop points and key release)"
         }
     }
 
@@ -192,13 +192,13 @@ enum AkaiSamplePlaybackMode: UInt8, CaseIterable, Identifiable {
     var explanation: String {
         switch self {
         case .loop:
-            return "Loops between the start/end points, and keeps looping through the envelope's Release stage after the key is lifted — the loop only stops once Release has fully faded out. Every new sample starts in this mode."
+            return "Loops between the loop start and end points continuously. After the key is released, the loop keeps running through the amp envelope's Release stage until the sound fades to silence."
         case .loopNotRel:
-            return "Loops between the start/end points while the key is held. On key-up, looping stops and any recorded audio after the loop point plays through once as the real tail — rather than fading via the envelope's Release stage."
+            return "Loops between the loop start and end points while the key is held. When the key is released, looping stops and any audio after the loop point plays through once as a natural tail before stopping."
         case .noLoop:
-            return "Plays straight through once, no looping, for as long as the key is held. If the key is released early, the envelope's Release stage kicks in and the sound decays; if the audio itself is shorter than the note, it simply finishes early."
+            return "Plays straight through from start to end with no looping. If the key is released before the sample ends, the amp envelope's Release stage fades the sound out."
         case .toEnd:
-            return "Always plays the entire sample through to the end from a single trigger or key press — the key doesn't need to be held for its full length. Loop points and key-up are ignored entirely. Built for drum hits triggered from a keyboard, sequencer, or trigger unit."
+            return "Plays the entire sample from start to end regardless of key release or loop points. Releasing the key has no effect — the sample always plays to completion. Ideal for one-shots and drum hits."
         }
     }
 }

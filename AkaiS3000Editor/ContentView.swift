@@ -15,6 +15,7 @@ struct ContentView: View {
     @State private var toast: ToastData?
     @State private var pendingOpenAction: (() -> Void)? = nil
     @State private var showingUnsavedChangesConfirm = false
+    @State private var showingEmuImport = false
 
     @State private var isContentReady = true
 
@@ -144,6 +145,21 @@ struct ContentView: View {
         }
         .onReceive(NotificationCenter.default.publisher(for: .createDiskImage)) { _ in
             createDiskImage()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .importEmuDisks)) { _ in
+            if diskImage.isLoaded {
+                showingEmuImport = true
+            } else {
+                alertMessage = "Open or create an Akai disk image first — the E-mu presets are imported into it."
+                showingAlert = true
+            }
+        }
+        .sheet(isPresented: $showingEmuImport) {
+            EmuImportSheet(diskImage: diskImage) { message in
+                selectedTab = .programs
+                selectedProgramID = nil
+                toast = ToastData(message: message)
+            }
         }
         .onChange(of: selectedTab) { _, _ in
             if !greaseweazle.isBusy { greaseweazle.clearLog() }

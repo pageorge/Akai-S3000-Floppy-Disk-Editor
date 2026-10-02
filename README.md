@@ -138,6 +138,71 @@ The S3000XL holds only one multi in memory at a time, but any number may be save
 
 ---
 
+## E-mu ESI Conversion
+
+**File → Import E-mu ESI Disks… (⇧⌘I)** imports presets from E-mu ESI-32 / ESI-2000 / ESI-4000 and Emulator IIIX disks into the open Akai disk as programs and samples.
+
+1. Open (or create) the Akai disk image you want to import into.
+2. Choose the E-mu disk images: a floppy set of 1.44 MB `.img` files, or a single `.esi` / `.e3x` bank file. Picking just disk 1 is enough — the rest of the set is found automatically if it's in the same folder (disks are matched by their headers, not their file names).
+3. Tick the presets you want. The sheet shows the keygroups, samples and KB each preset needs, and whether the selection fits on the Akai disk.
+4. Import. Shared samples are only imported once.
+
+An ESI bank often spans several floppies and won't fit on one 1.6 MB Akai disk, so pick a few presets at a time. **Downsample to 22.05 kHz** roughly halves the space needed.
+
+### What gets converted
+
+```
+E-mu ESI                          Akai S3000
+--------                          ----------
+stereo sample                     -L / -R sample pair in one keygroup (zones 1 + 2)
+loop + loop in release            Loop In Release
+loop                              Loop Until Release
+no loop                           No Loop
+zone original key                 sample root key (rkey); other keys → keygroup tune
+run of keys sharing a note zone   one keygroup (low/high key)
+primary layer                     keygroup with the preset's primary velocity range
+secondary layer                   overlapping keygroup with the secondary velocity range
+zone tuning (cents)               keygroup semitone + fine tune
+zone level 0-127                  keygroup loudness 0-99
+zone pan 0-127                    keygroup pan ±50 (stereo pairs: hard L/R)
+non-transpose flag                pitch CONST
+loop-disable flag                 keygroup playback No Loop
+amp envelope A/D/S/R              ENV1, scaled 0-127 → 0-99  ? (approximate)
+bend range                        program bend range
+```
+
+**Not converted:** filters, LFOs, auxiliary envelope, preset links (layered preset chains), crossfade/switch note-zone options. Programs are capped at 99 keygroups. Original Emulator III (non-X) floppies aren't supported — their layout is undocumented.
+
+**Status:** the E-mu reading side follows published, library-verified research (below). The Akai mapping is this project's own and is **not yet hardware-confirmed** — in particular the envelope scaling is a straight linear rescale between two non-linear tables, so attack/release times will likely need adjusting.
+
+### E-mu format notes
+
+```
+Floppy set   raw 1.44 MB images (1,474,560 bytes), everything BIG-endian (68k memory dump)
+  disk hdr   00 identifier[16]  ("EMU SI-32 v3" = ESI, "EMULATOR 3X" = EIIIX)
+             10 bank name[16]   24 u32 = 1   28 u32 disk number   2c u32 total disks
+  payload    bytes 0x200- of each disk, concatenated in disk order
+             bank record  (bank-file offset B = payload offset B - 0x4c)
+             ESI:   sample header table (1000 x 92 bytes), then PCM
+             EIIIX: PCM, then sample header table
+  quirks     zone flag byte stored bit-mirrored; sample addresses carry a bank flag
+             in bit 26; loop end points one frame past the loop
+
+Bank file    .esi / .e3x, same structures but LITTLE-endian, header in front of each sample
+  0x17ca     preset table (257 entries)      0x1bd2   sample table (1000 entries)
+  0x2b72     preset area: 142-byte preset + 4-byte note zones + 48-byte zones
+```
+
+### Sources
+
+- [ConvertWithMoss](https://github.com/git-moss/ConvertWithMoss) by Jürgen Moßgraber — open-source multisample converter with Emulator III/IIIX/ESI support. The basis for this importer.
+- [EIII_FORMAT.md](https://github.com/git-moss/ConvertWithMoss/blob/main/documentation/design/EIII_FORMAT.md) — the bank and floppy-set format, verified against the E-mu EIIIX / ESI-4000 library CD-ROMs and the E-mu and Sweetwater floppy libraries.
+- [Emulator3FloppySet.java](https://github.com/git-moss/ConvertWithMoss/blob/main/src/main/java/de/mossgrabers/convertwithmoss/format/emu/emulator3/Emulator3FloppySet.java) — the floppy-set reader the Swift parser is ported from.
+- [emu3bm](https://github.com/dagargo/emu3bm) by David García Goñi — the original reverse-engineering of Emulator III banks that the format doc builds on.
+- [E-mu ESi factory floppy collection](https://archive.org/details/e-mu-esi-floppy-collection-v-1.-7z) (Internet Archive) — ESi factory and Sweetwater floppy sets, useful test material.
+
+---
+
 ## Technical Reference: Akai S3000 Disk Format
 
 Sources: [Ohsaki/akaitools](https://lsnl.jp/~ohsaki/software/akaitools/S3000-format.html), [Midi-In/akaiutil](https://github.com/Midi-In/akaiutil), [dialtr/akai-fs](https://github.com/dialtr/akai-fs), [keirf/GreaseWeazle](https://github.com/keirf/greaseweazle), Akai S3000XL Operator’s Manual, and direct hardware byte-diff testing on a real S3000XL.
@@ -480,79 +545,89 @@ Sources: [Ohsaki/akaitools](https://lsnl.jp/~ohsaki/software/akaitools/S3000-for
 ```
 PROGRAM HEADER
 
-offset  akaiutil  akai-fs   ohsaki              manual    this project              status
-------  --------  -------   ------              ------    ------------              ------
-0x10    yes       yes       MIDI channel        yes       confirmed *               agree
-0x11    yes       yes       polyphony           yes       confirmed *               agree
-0x12    yes       yes       priority            yes       confirmed *               agree
-0x15    -         -         octave shift ±2     -         we write bend down here   dispute ?
-0x17    yes       yes       stereo level        yes       confirmed *               agree
-0x19    yes       yes       loudness            yes       confirmed * (default 99)  agree / manual wrong default
-0x1a    yes       yes       velocity > loud     yes       confirmed *               agree
-0x27    yes       yes       bend up 0-24        yes       confirmed *               agree
-0x28    -         -         pressure > pitch    yes       confirmed * (default 0)   agree
-0x2a    yes       yes       # of keygroups      yes       confirmed *               agree
-0x3d    yes       -         voice assign        yes       confirmed *               agree
-0x49    -         -         -                   -         default 2, unknown        our finding ?
-0x4a    -         -         -                   -         bend mode NORMAL/HELD *   our finding
-0x54    -         -         -                   -         filter mod source 1 *     our finding
-0x55    -         -         -                   -         filter mod source 2 *     our finding
-0x56    -         -         -                   -         filter mod source 3 *     our finding
-0x18    yes       -         stereo pan          yes       not modelled              not modelled
-0x1b-c  -         -         key/pressure>loud   yes       not modelled              not modelled
-0x1d-f  -         -         pan LFO             yes       not modelled              not modelled
-0x20-6  -         -         LFO/mod params      yes       not modelled              not modelled
-0x29    -         -         kg crossfade        yes       not modelled              not modelled
-0x38    -         -         echo output         yes       not modelled              not modelled
-0x39    -         -         modwheel pan        yes       not modelled              not modelled
-0x3a    -         -         start coherence     yes       not modelled              not modelled
-0x3b    -         -         LFO de-sync         yes       not modelled              not modelled
-0x3c    -         -         pitch law           yes       not modelled              not modelled
-0x3e-40 -         -         soft pedal          yes       not modelled              not modelled
-0x41-42 -         -         tune offset         yes       not modelled              not modelled
-0x43-45 -         -         key > LFO           yes       not modelled              not modelled
-0x46-47 -         -         output scale        yes       not modelled              not modelled
+offset  akaiutil                  ohsaki              manual              this project              status
+------  --------                  ------              ------              ------------              ------
+0x10    midich1                   MIDI channel        MIDI channel        confirmed *               agree
+0x11    polyphony (in s1000)      polyphony           polyphony           confirmed *               agree
+0x12    priority (in s1000)       priority            priority            confirmed *               agree
+0x15    oct                       octave shift ±2     -                   we write bend down here   dispute ?
+0x17    stereo level (in s1000)   stereo level        stereo level        confirmed *               agree
+0x19    loudness (in s1000)       loudness            basic loudness      confirmed * (default 99)  agree / manual wrong default
+0x1a    velocity > loud           velocity > loud     vel > loud          confirmed *               agree
+0x27    -                         bend up 0-24        bendwheel up        confirmed *               agree
+0x28    -                         pressure > pitch    pressure > pitch    confirmed * (default 0)   agree
+0x29    kgxf                      kg crossfade        kg crossfade        not modelled              not modelled
+0x2a    kgnum                     # of keygroups      # of keygroups      confirmed *               agree
+0x3d    -                         voice assign        reassignment        confirmed *               agree
+0x49    -                         -                   -                   default 2, unknown        our finding ?
+0x4a    -                         -                   -                   bend mode NORMAL/HELD *   our finding
+0x54    -                         -                   -                   filter mod source 1 *     our finding
+0x55    -                         -                   -                   filter mod source 2 *     our finding
+0x56    -                         -                   -                   filter mod source 3 *     our finding
+0x18    -                         stereo pan          stereo pan          not modelled              not modelled
+0x1b-c  -                         key/pressure>loud   key/pres > loud     not modelled              not modelled
+0x1d-f  -                         pan LFO             pan LFO rate/depth  not modelled              not modelled
+0x20-6  -                         LFO/mod params      LFO speed/depth     not modelled              not modelled
+0x38    -                         echo output         echo output level   not modelled              not modelled
+0x39    -                         modwheel pan        mod > pan           not modelled              not modelled
+0x3a    -                         start coherence     start coherence     not modelled              not modelled
+0x3b    -                         LFO de-sync         LFO de-sync         not modelled              not modelled
+0x3c    -                         pitch law           pitch law           not modelled              not modelled
+0x3e-40 -                         soft pedal          soft pedal          not modelled              not modelled
+0x41-42 -                         tune offset         tune                not modelled              not modelled
+0x43-45 -                         key > LFO           key > LFO           not modelled              not modelled
+0x46-47 -                         output scale        output scale        not modelled              not modelled
 
 KEYGROUP
 
-offset  akaiutil  akai-fs   ohsaki              manual    this project              status
-------  --------  -------   ------              ------    ------------              ------
-0x03    yes       yes       keyrange low        yes       confirmed *               agree
-0x04    yes       yes       keyrange high       yes       confirmed *               agree
-0x07    yes       yes       filter freq         yes       confirmed *               agree
-0x08    yes       -         key > filter        yes       confirmed * (default 0)   agree / manual wrong default
-0x0c-f  yes       yes       amp ADSR            yes       all confirmed *           agree
-0x14-17 yes       -         filter ENV2         yes       all confirmed *           agree
-0x20-21 yes       -         internal            yes       must be 0xffff *          agree / extended (silence bug)
-0x84    yes       -         attack hold loop    yes       we write pitchMode here   dispute ?
-0x85-88 yes       -         const pitch zones   yes       not yet tested            dispute ?
-0x95    -         -         -                   -         resonance 0-15 *          our finding
-0x97    -         -         -                   -         filter mod depth 1 *      our finding
-0x98    -         -         -                   -         filter mod depth 2 *      our finding
-0x99    -         -         -                   -         filter mod depth 3 *      our finding
-0x9c-9f -         -         -                   -         ENV2 levels/rates *       our finding
-0x05-06 yes       -         tune offset         yes       not modelled              not modelled
-0x09-0b yes       -         vel/pres/env>filt   yes       not modelled              not modelled
-0x10-13 -         -         vel/key > amp       yes       not modelled              not modelled
-0x18-1b -         -         vel/key > filter    yes       not modelled              not modelled
-0x1c    -         -         vel > filter env    yes       not modelled              not modelled
-0x1d    -         -         envelope > pitch    yes       not modelled              not modelled
-0x83    yes       -         fixed rate detune   yes       not modelled              not modelled
-0x89-8c -         -         output offset       yes       not modelled              not modelled
-0x8d-94 -         -         vel > sample start  yes       not modelled              not modelled
+offset  akaiutil                  ohsaki              manual              this project              status
+------  --------                  ------              ------              ------------              ------
+0x03    keylo                     keyrange low        key range low       confirmed *               agree
+0x04    keyhi                     keyrange high       key range high      confirmed *               agree
+0x05-06 ctune/stune               tune offset         tune                not modelled              not modelled
+0x07    filter                    filter freq         frequency           confirmed *               agree
+0x08    -                         key > filter        key follow          confirmed * (default 0)   agree / manual wrong default
+0x09-0b -                         vel/pres/env>filt   vel/pres/env > fil  not modelled              not modelled
+0x0c    amp attack (in s1000kg)   amp ADSR            attack              confirmed *               agree
+0x0d    amp decay                 amp ADSR            decay               confirmed *               agree
+0x0e    amp sustain               amp ADSR            sustain             confirmed *               agree
+0x0f    amp release               amp ADSR            release             confirmed *               agree
+0x10-13 -                         vel/key > amp       vel/key > amp       not modelled              not modelled
+0x14-17 -                         filter ENV2         ENV2 attack/decay   confirmed *               agree
+0x1e    velxf                     vel zone crossfade  vel zone xfade      not modelled              not modelled
+0x1f-21 dummy2[3]                 internal            -                   must be 0xffff *          agree / extended (silence bug)
+0x22+   velzone[4]                velocity zones      velocity zones      zone 1 *, zone 2 stereo   agree
+0x83    -                         fixed rate detune   -                   not modelled              not modelled
+0x84    -                         attack hold loop    -                   we write pitchMode here   dispute ?
+0x85-88 pconst[4]                 const pitch zones   TRACK/CONST         not yet tested            dispute ?
+0x89-8c auxchoff[4]               output offset       -                   not modelled              not modelled
+0x8d-94 -                         vel > sample start  -                   not modelled              not modelled
+0x95    -                         -                   resonance           resonance 0-15 *          our finding
+0x97    -                         -                   mod depth 1         filter mod depth 1 *      our finding
+0x98    -                         -                   mod depth 2         filter mod depth 2 *      our finding
+0x99    -                         -                   mod depth 3         filter mod depth 3 *      our finding
+0x9c-9f -                         -                   -                   ENV2 levels/rates *       our finding
 
 SAMPLE HEADER
 
-offset  akaiutil  akai-fs   ohsaki              manual    this project              status
-------  --------  -------   ------              ------    ------------              ------
-0x01    yes       yes       bandwidth           yes       confirmed * (derived)     agree
-0x02    yes       yes       root key            yes       confirmed *               agree
-0x10    yes       -         # active loops      yes       confirmed * (lnum)        agree
-0x13    yes       yes       playback mode       yes       confirmed *               agree
-0x1a-1d yes       yes       data length         yes       confirmed *               agree
-0x1e-21 yes       -         play start          yes       confirmed * (draggable)   agree
-0x26-85 yes       yes       loop slots [8]      yes       confirmed * + critical    agree / extended
-0x8a-8b yes       yes       sample rate         yes       confirmed *               agree
+offset  akaiutil                  ohsaki              manual              this project              status
+------  --------                  ------              ------              ------------              ------
+0x01    bandw                     bandwidth           bandwidth           confirmed * (derived)     agree
+0x02    rkey                      root key            original pitch      confirmed *               agree
+0x10    lnum                      # active loops      -                   confirmed * (lnum)        agree
+0x11    lfirst                    first active loop   -                   internal, not written     agree
+0x13    pmode                     playback type       playback type       confirmed *               agree
+0x14    ctune                     pitch offset/256    tune cents          confirmed *               agree
+0x15    stune                     pitch offset        tune semitones      confirmed *               agree
+0x16-19 locat[4]                  data abs. address   -                   internal, not written *   agree
+0x1a-1d slen[4]                   data length         length              confirmed *               agree
+0x1e-21 start[4]                  play start          start               confirmed * (draggable)   agree
+0x22-25 end[4]                    play end            end                 not modelled              not modelled
+0x26-85 loop[8]                   loop slots [8]      loop at/lng/time    confirmed * + critical    agree / extended
+0x86-87 dummy3[2]                 dummy               -                   not written               agree
+0x88-89 stpaira[2]                stereo partner      -                   0xffff = none *           agree
+0x8a-8b srate[2]                  sample rate         sample rate         confirmed *               agree
+0x8c    hltoff                    hold loop tune off  -                   not modelled              not modelled
 ```
 
 ---
@@ -578,6 +653,7 @@ The app automatically passes `--tracks=c=0-N` when writing, where N is the last 
 - **[Midi-In / akaiutil](https://github.com/Midi-In/akaiutil)** — definitive reference for S1000/S3000 character encoding, FAT structure, and file types.
 - **[dialtr / akai-fs](https://github.com/dialtr/akai-fs)** — filesystem parsing, WAV export logic, and sample header layout.
 - **[keirf / GreaseWeazle](https://github.com/keirf/greaseweazle)** — the hardware and software that makes reading real Akai floppies on modern hardware possible.
+- **[git-moss / ConvertWithMoss](https://github.com/git-moss/ConvertWithMoss)** and **[dagargo / emu3bm](https://github.com/dagargo/emu3bm)** — the E-mu Emulator III / ESI format research behind the E-mu importer.
 - **The original Akai S3000XL Operator's Manual** — parameter semantics, ranges, and behaviour.
 
 ---
@@ -589,6 +665,10 @@ The app automatically passes `--tracks=c=0-N` when writing, where N is the last 
 - [akai-fs (dialtr)](https://github.com/dialtr/akai-fs)
 - [AKAI S3000 Series Disk and File Format](https://lsnl.jp/~ohsaki/software/akaitools/S3000-format.html) — reverse-engineered format reference by Hiroyuki Ohsaki (1993), covering disk structure, FAT, volume entries, sample headers, program and keygroup layouts in detail
 - [Akai S3000XL Wikipedia](https://en.wikipedia.org/wiki/Akai_S3000XL)
+- [ConvertWithMoss](https://github.com/git-moss/ConvertWithMoss) — multisample converter, including E-mu Emulator III/IIIX/ESI banks and floppy sets
+- [E-mu EIII bank format (EIII_FORMAT.md)](https://github.com/git-moss/ConvertWithMoss/blob/main/documentation/design/EIII_FORMAT.md)
+- [emu3bm (dagargo)](https://github.com/dagargo/emu3bm) — Emulator III bank manager
+- [E-mu ESi factory floppy collection](https://archive.org/details/e-mu-esi-floppy-collection-v-1.-7z)
 
 ---
 

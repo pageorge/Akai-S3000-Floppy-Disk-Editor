@@ -1,0 +1,191 @@
+AKAI S3000 Series Disk and File Format
+Hiroyuki Ohsaki (ohsaki[atmark]lsnl.jp)
+July 18, 2019 / Version 1.0
+
+Source: https://lsnl.jp/~ohsaki/software/akaitools/S3000-format.html
+Archived: September 2026 by AkaiS3000Editor project
+
+The following is the disk and file formats of AKAI S3000 series samplers.
+Analysed in 1993, resulting in akaitools -- utilities for AKAI S-series samplers
+(S1000/S1100/S2800/S3000/S3200/CD3000/S2000/S3000XL/S3200XL).
+
+Block size: 0x2000 (8192 bytes).
+AKAI encoded strings: tr/\x00-\x28/0-9 A-Z#+-./ (perl)
+All numbers little-endian.
+
+--- DISK LAYOUT ---
+
+0000-00c9  disk information
+00ca-0709  volume entry (16 bytes * 100)
+070a-      file allocation table (FAT)
+6000-      file entry of volume 1
+
+--- FAT CODES ---
+
+0040  reserved
+0080  reserved (second file entry; S3000 only)
+00c0  end of file
+0000  free
+others  next block
+
+--- VOLUME ENTRY (16 bytes) ---
+
+00-0b  volume name (AKAI encoded)
+0c-0d  volume type (0=inactive, 1=S1000, 3=S3000)
+0e-0f  volume start (in blocks)
+
+--- FILE ENTRY ---
+
+00-0b  file name (AKAI encoded)
+0c-0f  ??
+10     file type
+11-13  file size (bytes)
+14-15  start block
+16-17  ??
+
+file types:
+  64=drum  70=S1000-program  71=QL  73=S1000-sample
+  78=effect  f0=S3000-program  f3=S3000-sample
+
+--- SAMPLE HEADER (0x00-0xbd) ---
+
+00     sample header id (1=S1000, 3=S3000)
+01     bandwidth (0=10khz, 1=20khz)
+02     original pitch (24-127 = C0-G8)
+03-0e  name (AKAI encoded)
+0f     sample rate valid (80=yes)
+10     # of active loops (internal)
+11     first active loop (internal)
+12     dummy
+13     playback type (0=loop, 1=loop until release, 2=no loop, 3=play to end)
+14     pitch offset (decimal) / 256
+15     pitch offset
+16-19  data absolute start address (internal)
+1a-1d  data length (samples)
+1e-21  play relative start address
+22-25  play relative end address
+26-29  (1) loop at
+2a-2b  (1) loop len (decimal) / 65536
+2c-2f  (1) loop len
+30-31  (1) loop times (0=no loop, 1-9998=msec, 9999=hold)
+  :
+7a-7d  (8) loop at
+7e-7f  (8) loop len (decimal) / 65536
+80-83  (8) loop len
+84-85  (8) loop times
+86-87  dummy
+88-89  address of stereo partner (internal)
+8a-8b  sample rate in Hz
+8c     hold loop tune offset
+8d-bd  ??
+
+--- PROGRAM COMMON DATA (0x00-0xbf) ---
+
+00     C   1  program header id
+01-02  x2 n/a 1st keygroup address (internal)
+03-0e  a12    program name
+0f     C   0  MIDI program number (0-127)
+10     C   0  MIDI channel (0-15, ff=omni)
+11     C  31  polyphony (1-32)
+12     C   1  priority (0=low, 1=normal, 2=high, 3=hold)
+13     C  24  play range low
+14     C 127  play range high
+15     C   0  play octave (keyboard) shift (+/-2)
+16     C 255  individual output (0-7, ff=off)
+17     C  99  stereo level
+18     C   0  stereo pan
+19     C  80  loudness
+1a     C  20  velocity > loud
+1b     C   0  key > loud
+1c     C   0  pressure > loud
+1d     C   0  pan LFO rate
+1e     C  99  pan depth
+1f     C   0  pan LFO delay
+20     C   0  key > pan position
+21     C  50  LFO speed
+22     C   0  LFO fixed depth
+23     C   0  LFO delay
+24     C  30  modwheel > depth
+25     C   0  pressure > depth
+26     C   0  velocity > depth
+27     C   2  bendwheel > pitch
+28     C   0  pressure > pitch
+29     C   0  keygroup crossfade (0=off, 1=on)
+2a     C   #  # of keygroups
+2b     C n/a  temporary program number (internal)
+2c-37  C12    key temperament
+38     C   0  echo output level
+39     C   0  modwheel pan amount
+3a     C   0  sample start coherence
+3b     C   0  LFO de-sync
+3c     C   0  pitch law
+3d     C   0  voice assign algorithm (0=oldest, 1=quietest)
+3e     C  10  soft pedal loudness reduction
+3f     C  10  soft pedal attack stretch
+40     C  10  soft pedal filter close
+41-42  v   0  tune offset
+43     C   0  key > LFO rate
+44     C   0  key > LFO depth
+45     C   0  key > LFO delay
+46     C  50  voice output scale
+47     C   0  stereo output scale
+48-bf          unknown
+
+--- KEYGROUP (0xc0 bytes each) ---
+
+00     C   2  keygroup block id
+01-02  v  n/a next keygroup block address (internal)
+03     C  24  keyrange low
+04     C 127  keyrange high
+05-06  v   0  tune offset
+07     C  99  filter freq.
+08     C   0  key > filter freq.
+09     C   0  velocity > filter freq.
+0a     C   0  pressure > filter freq.
+0b     C   0  envelope > filter freq.
+0c     C  25  amp. attack
+0d     C  50  amp. decay
+0e     C  99  amp. sustain
+0f     C  45  amp. release
+10     C   0  velocity > amp. attack
+11     C   0  velocity > amp. release
+12     C   0  off velocity > amp. release
+13     C   0  key > decay & release
+14     C   0  filter attack
+15     C  50  filter decay
+16     C  99  filter sustain
+17     C  45  filter release
+18     C   0  velocity > filter attack
+19     C   0  velocity > filter release
+1a     C   0  off velocity > filter release
+1b     C   0  key > decay & release
+1c     C  25  velocity > filter envelope output
+1d     C   0  envelope > pitch
+1e     C   1  velocity zone crossfade (0=off, 1=on)
+1f     C n/a  # of velocity zones (internal)
+20     C n/a  internal
+21     C n/a  internal
+22-2d  A12    sample name (velocity zone 1)
+2e     C   0  velocity range low
+2f     C 127  velocity range high
+30-31  v   0  tune offset
+32     C   0  loudness offset
+33     C   0  filter freq. offset
+34     C   0  pan offset
+35     C   0  loop in release
+36     C n/a  low velocity xfade factor (internal)
+37     C n/a  low velocity xfade factor (internal)
+38-39  v n/a  sample header block address (internal)
+3a-52          velocity zone 2
+53-69          velocity zone 3
+6a-82          velocity zone 4
+83     C   0  fixed rate detune
+84     C   0  attack hold until loop
+85-88  C4  0  constant pitch for zone 1--4 (0=track, 1=const); 84??
+89-8c  C4  0  output number offset for zone 1--4
+8d-94  v4  0  velocity > sample start
+95     C   0  velocity > loudness offset
+96-bf          ??
+97     C   0  vel. > filter freq.
+98     C   0  pres. > filter freq.
+99     C   0  env. > filter freq.

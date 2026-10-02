@@ -326,7 +326,7 @@ struct ProgramDetailView: View {
                             .padding(.horizontal, 16)
                             .padding(.bottom, 8)
                     }
-                    .frame(maxWidth: .infinity, maxHeight: 200)
+                    .frame(maxWidth: .infinity, maxHeight: 150)
 
                     // Everything else scrolls below
                     ScrollView {
@@ -673,9 +673,10 @@ struct ProgramDetailView: View {
     // MARK: - Drop handling
 
     private func handleProgramDrop(providers: [NSItemProvider]) -> Bool {
-        guard let provider = providers.first else { return false }
+        guard !providers.isEmpty else { return false }
         // Sidebar-sample drag: carries plain text (the sample name), NOT a file URL.
-        if provider.hasItemConformingToTypeIdentifier("public.plain-text") &&
+        if let provider = providers.first,
+           provider.hasItemConformingToTypeIdentifier("public.plain-text") &&
            !provider.hasItemConformingToTypeIdentifier("public.file-url") {
             _ = provider.loadObject(ofClass: NSString.self) { string, _ in
                 guard let name = string as? String else { return }
@@ -683,19 +684,22 @@ struct ProgramDetailView: View {
             }
             return true
         }
-        provider.loadItem(forTypeIdentifier: "public.file-url") { item, _ in
-            guard let data = item as? Data,
-                  let url = URL(dataRepresentation: data, relativeTo: nil) else { return }
-            var isDir: ObjCBool = false
-            FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir)
-            DispatchQueue.main.async {
-                if isDir.boolValue {
-                    dropFolder(url)
-                } else if audioExts.contains(url.pathExtension.lowercased()) {
-                    dropFile(url)
-                } else {
-                    dropErrorMessage = "\(url.lastPathComponent) is not a supported audio file."
-                    showDropError = true
+        // File drag: process ALL dropped URLs.
+        for provider in providers {
+            provider.loadItem(forTypeIdentifier: "public.file-url") { item, _ in
+                guard let data = item as? Data,
+                      let url = URL(dataRepresentation: data, relativeTo: nil) else { return }
+                var isDir: ObjCBool = false
+                FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir)
+                DispatchQueue.main.async {
+                    if isDir.boolValue {
+                        dropFolder(url)
+                    } else if audioExts.contains(url.pathExtension.lowercased()) {
+                        dropFile(url)
+                    } else {
+                        dropErrorMessage = "\(url.lastPathComponent) is not a supported audio file."
+                        showDropError = true
+                    }
                 }
             }
         }

@@ -21,6 +21,9 @@
 		AF6EE9273020A1E8006A2F7E /* Data+LittleEndian.swift in Sources */ = {isa = PBXBuildFile; fileRef = AF6EE9263020A1E8006A2F7E /* Data+LittleEndian.swift */; };
 		AF6EE9293020A1F2006A2F7E /* WAVImport.swift in Sources */ = {isa = PBXBuildFile; fileRef = AF6EE9283020A1F2006A2F7E /* WAVImport.swift */; };
 		AF857FA62FF2A3E400FE438E /* MultiDetailView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AF857FA52FF2A3E400FE438E /* MultiDetailView.swift */; };
+		A2000001 /* EmuESIBank.swift in Sources */ = {isa = PBXBuildFile; fileRef = B2000001 /* EmuESIBank.swift */; };
+		A2000002 /* EmuToAkaiImporter.swift in Sources */ = {isa = PBXBuildFile; fileRef = B2000002 /* EmuToAkaiImporter.swift */; };
+		A2000003 /* EmuImportSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = B2000003 /* EmuImportSheet.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -41,10 +44,14 @@
 		B1000008 /* PianoKeyboardView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PianoKeyboardView.swift; sourceTree = "<group>"; };
 		B1000009 /* SupportingViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SupportingViews.swift; sourceTree = "<group>"; };
 		C1000001 /* AkaiS3000Editor.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = AkaiS3000Editor.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		B2000001 /* EmuESIBank.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EmuESIBank.swift; sourceTree = "<group>"; };
+		B2000002 /* EmuToAkaiImporter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EmuToAkaiImporter.swift; sourceTree = "<group>"; };
+		B2000003 /* EmuImportSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EmuImportSheet.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
-		AF3138E22FF040FE0040BCA9 /* screenshots */ = {isa = PBXFileSystemSynchronizedRootGroup; explicitFileTypes = {}; explicitFolders = (); path = screenshots; sourceTree = "<group>"; };
+		AF79524D305EE16E00367755 /* ExternalResources */ = {isa = PBXFileSystemSynchronizedRootGroup; explicitFileTypes = {}; explicitFolders = (); path = ExternalResources; sourceTree = "<group>"; };
+		AFAE1C253061415D009BD2C3 /* Screenshots */ = {isa = PBXFileSystemSynchronizedRootGroup; explicitFileTypes = {}; explicitFolders = (); path = Screenshots; sourceTree = "<group>"; };
 /* End PBXFileSystemSynchronizedRootGroup section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -67,10 +74,21 @@
 			path = Audio;
 			sourceTree = "<group>";
 		};
+		E1000004 /* Import */ = {
+			isa = PBXGroup;
+			children = (
+				B2000001 /* EmuESIBank.swift */,
+				B2000002 /* EmuToAkaiImporter.swift */,
+				B2000003 /* EmuImportSheet.swift */,
+			);
+			path = Import;
+			sourceTree = "<group>";
+		};
 		E1000001 = {
 			isa = PBXGroup;
 			children = (
-				AF3138E22FF040FE0040BCA9 /* screenshots */,
+				AFAE1C253061415D009BD2C3 /* Screenshots */,
+				AF79524D305EE16E00367755 /* ExternalResources */,
 				AF3138DD2FF040E50040BCA9 /* README.md */,
 				E1000002 /* AkaiS3000Editor */,
 				E1000003 /* Products */,
@@ -81,6 +99,7 @@
 			isa = PBXGroup;
 			children = (
 				AF6EE92A3020A207006A2F7E /* Audio */,
+				E1000004 /* Import */,
 				AF857FA52FF2A3E400FE438E /* MultiDetailView.swift */,
 				AFB9FA582FF2A04800E234D5 /* AkaiS3000Editor.entitlements */,
 				AF33648B2FE58687002905E2 /* GreaseweazleRunner.swift */,
@@ -120,6 +139,10 @@
 			buildRules = (
 			);
 			dependencies = (
+			);
+			fileSystemSynchronizedGroups = (
+				AF79524D305EE16E00367755 /* ExternalResources */,
+				AFAE1C253061415D009BD2C3 /* Screenshots */,
 			);
 			name = AkaiS3000Editor;
 			productName = AkaiS3000Editor;
@@ -188,6 +211,9 @@
 				A1000008 /* PianoKeyboardView.swift in Sources */,
 				AF6EE9293020A1F2006A2F7E /* WAVImport.swift in Sources */,
 				A1000009 /* SupportingViews.swift in Sources */,
+				A2000001 /* EmuESIBank.swift in Sources */,
+				A2000002 /* EmuToAkaiImporter.swift in Sources */,
+				A2000003 /* EmuImportSheet.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

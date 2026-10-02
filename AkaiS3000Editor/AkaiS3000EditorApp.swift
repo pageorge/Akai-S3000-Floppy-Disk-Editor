@@ -24,6 +24,11 @@ struct AkaiS3000EditorApp: App {
                     NotificationCenter.default.post(name: .openDiskImage, object: nil)
                 }
                 .keyboardShortcut("o", modifiers: .command)
+                Divider()
+                Button("Import E-mu ESI Disks…") {
+                    NotificationCenter.default.post(name: .importEmuDisks, object: nil)
+                }
+                .keyboardShortcut("i", modifiers: [.command, .shift])
             }
         }
     }
@@ -34,6 +39,7 @@ extension Notification.Name {
     static let createDiskImage = Notification.Name("createDiskImage")
     static let beginMultiRename = Notification.Name("beginMultiRename")
     static let openLastSession = Notification.Name("openLastSession")
+    static let importEmuDisks = Notification.Name("importEmuDisks")
 }
 
 // MARK: - Shared disk image holder

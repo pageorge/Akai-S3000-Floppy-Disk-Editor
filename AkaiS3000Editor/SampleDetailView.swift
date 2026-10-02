@@ -74,6 +74,14 @@ struct SampleDetailView: View {
         Int(sample.header.numSamples)
     }
 
+    /// Whether the hardware has applied a destructive crossfade to this sample.
+    /// Detected from lnum=4 and rawHeader[0x12]≠0. The Xf length is not stored
+    /// on disk — it's baked into the PCM by the Akai's X-FD function.
+    private var hasCrossfade: Bool {
+        let raw = sample.header.rawHeader
+        return raw.count > 0x12 && raw[0x10] == 4 && raw[0x12] != 0
+    }
+
     /// Whether the currently selected playback mode actually loops. `.toEnd`
     /// and `.noLoop` don't use the loop points at all, so the loop sliders and
     /// playback preview should only engage for `.loop`/`.loopNotRel`.
@@ -161,18 +169,13 @@ struct SampleDetailView: View {
                     loopEnd: $editedLoopEnd,
                     playhead: playheadPosition,
                     playStart: Binding(
-                        // The white marker IS the saved start point (0x1E): read
-                        // it from editedSampleStart (nil when 0 = no marker), and
-                        // writing it (click or drag on the waveform) updates the
-                        // start and commits to the image, so it persists on save
-                        // and reappears on reopen. Keeps the marker, the Playback
-                        // Start slider and the on-disk value all in sync.
                         get: { editedSampleStart > 0 ? editedSampleStart : nil },
                         set: { newValue in
                             editedSampleStart = max(0, newValue ?? 0)
                             commitEditsToImage()
                         }
-                    )
+                    ),
+                    crossfadeActive: hasCrossfade
                 )
                     .id(sample.id)   // force a fresh WaveformView (and @State) per sample,
                                      // so switching samples can never leave stale waveMin/
@@ -274,6 +277,18 @@ struct SampleDetailView: View {
                                 .foregroundStyle(.secondary)
                                 .fixedSize(horizontal: false, vertical: true)
                                 .padding(.bottom, 4)
+                        }
+                        if hasCrossfade {
+                            HStack(spacing: 6) {
+                                Image(systemName: "waveform.path")
+                                    .foregroundStyle(.orange)
+                                Text("Crossfade active (applied on hardware — baked into PCM, read-only)")
+                                    .font(.caption)
+                                    .foregroundStyle(.orange)
+                            }
+                            .padding(.horizontal, 8).padding(.vertical, 4)
+                            .background(RoundedRectangle(cornerRadius: 6).fill(Color.orange.opacity(0.1)))
+                            .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(Color.orange.opacity(0.3)))
                         }
                         if isLooping {
                             let maxSamples = Double(max(audioFrameCount, 1))

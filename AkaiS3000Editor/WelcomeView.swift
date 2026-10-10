@@ -50,12 +50,9 @@ struct WelcomeView: View {
                             Label("New Disk Image", systemImage: "plus.rectangle.on.folder")
                                 .frame(width: actionButtonWidth)
                                 .padding(.vertical, 10)
-                                .background(Color.secondary.opacity(0.15))
+                                .foregroundStyle(.white)
+                                .background(akaiRed)
                                 .clipShape(RoundedRectangle(cornerRadius: 6))
-                                .overlay(
-                                    RoundedRectangle(cornerRadius: 6)
-                                        .strokeBorder(Color.secondary.opacity(0.3), lineWidth: 1)
-                                )
                         }
                         .buttonStyle(.plain)
                         Button {
@@ -64,23 +61,40 @@ struct WelcomeView: View {
                             Label("Open Disk Image", systemImage: "folder")
                                 .frame(width: actionButtonWidth)
                                 .padding(.vertical, 10)
-                                .foregroundStyle(.white)
-                                .background(akaiRed)
-                                .clipShape(RoundedRectangle(cornerRadius: 6))
-                        }
-                        .buttonStyle(.plain)
-                        Button {
-                            showEmuPicker = true
-                        } label: {
-                            Label("Import E-MU ESI Disk", systemImage: "arrow.triangle.2.circlepath")
-                                .frame(width: actionButtonWidth)
-                                .padding(.vertical, 10)
                                 .background(Color.secondary.opacity(0.15))
                                 .clipShape(RoundedRectangle(cornerRadius: 6))
                                 .overlay(
                                     RoundedRectangle(cornerRadius: 6)
                                         .strokeBorder(Color.secondary.opacity(0.3), lineWidth: 1)
                                 )
+                        }
+                        .buttonStyle(.plain)
+                        if !lastPath.isEmpty, FileManager.default.fileExists(atPath: lastPath) {
+                            let filename = URL(fileURLWithPath: lastPath).lastPathComponent
+                            Button {
+                                // Via the window so an already-open file just
+                                // brings its window forward.
+                                onOpenRecent(URL(fileURLWithPath: lastPath))
+                            } label: {
+                                Label("Reopen \(filename)", systemImage: "clock.arrow.circlepath")
+                                    .frame(width: actionButtonWidth)
+                                    .padding(.vertical, 10)
+                                    .foregroundStyle(.white)
+                                    .background(Color.accentColor)
+                                    .clipShape(RoundedRectangle(cornerRadius: 6))
+                            }
+                            .buttonStyle(.plain)
+                        }
+                        Button {
+                            showEmuPicker = true
+                        } label: {
+                            // Same colour as the "Import & Export" pill.
+                            Label("Import E-MU ESI Disk", systemImage: "square.and.arrow.down")
+                                .frame(width: actionButtonWidth)
+                                .padding(.vertical, 10)
+                                .foregroundStyle(.white)
+                                .background(greaseweazlePurple)
+                                .clipShape(RoundedRectangle(cornerRadius: 6))
                         }
                         .buttonStyle(.plain)
                         .fileImporter(
@@ -97,22 +111,6 @@ struct WelcomeView: View {
                                 onConvertEmu(urls)
                             }
                         }
-                        if !lastPath.isEmpty, FileManager.default.fileExists(atPath: lastPath) {
-                            let filename = URL(fileURLWithPath: lastPath).lastPathComponent
-                            Button {
-                                // Via the window so an already-open file just
-                                // brings its window forward.
-                                onOpenRecent(URL(fileURLWithPath: lastPath))
-                            } label: {
-                                Label(filename, systemImage: "clock.arrow.circlepath")
-                                    .frame(width: actionButtonWidth)
-                                    .padding(.vertical, 10)
-                                    .foregroundStyle(.white)
-                                    .background(Color.accentColor)
-                                    .clipShape(RoundedRectangle(cornerRadius: 6))
-                            }
-                            .buttonStyle(.plain)
-                        }
                     }
                 }
                 HStack(spacing: 28) {
@@ -120,7 +118,7 @@ struct WelcomeView: View {
                     FeaturePill(icon: "pianokeys",             text: "Create Programs", color: .purple)
                     FeaturePill(icon: "square.stack.3d.up",   text: "Create Multis",   color: .teal)
                     FeaturePill(icon: "square.and.arrow.up.on.square", text: "Import & Export", color: greaseweazlePurple)
-                    FeaturePill(icon: "externaldrive.badge.questionmark", text: "Disk Info", color: .white)
+                    FeaturePill(icon: "", text: "Floppy Disk", color: .white, floppy: true)
                 }
             }
             .padding(60)
@@ -216,10 +214,17 @@ struct FeaturePill: View {
     let icon: String
     let text: String
     var color: Color = Color(red: 0.91, green: 0, blue: 0.11)
+    /// Draw the custom floppy icon instead of the SF Symbol named `icon`.
+    var floppy: Bool = false
     var body: some View {
         VStack(spacing: 6) {
-            Image(systemName: icon)
-                .font(.title2)
+            Group {
+                if floppy {
+                    FloppyDiskIcon().frame(width: 24, height: 24)
+                } else {
+                    Image(systemName: icon).font(.title2)
+                }
+            }
                 .foregroundStyle(color)
                 .frame(height: 28)
             Text(text)

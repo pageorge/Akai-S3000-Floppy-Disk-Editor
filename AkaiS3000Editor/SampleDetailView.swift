@@ -239,7 +239,7 @@ struct SampleDetailView: View {
                         HStack {
                             Text("Start Point").font(.subheadline).foregroundStyle(.secondary)
                             Spacer()
-                            Text("\(Int(editedSampleStart)) samples").font(.system(.caption, design: .monospaced))
+                            Text("\(Int(editedSampleStart)) samples").font(.system(.body, design: .monospaced))
                         }
                         Slider(value: $editedSampleStart, in: 0...Double(max(audioFrameCount - 1, 1)))
                             .onChange(of: editedSampleStart) { _, _ in commitEditsToImage() }
@@ -296,7 +296,7 @@ struct SampleDetailView: View {
                                 HStack {
                                     Text("Loop Start").font(.subheadline).foregroundStyle(.secondary)
                                     Spacer()
-                                    Text("\(Int(editedLoopStart)) samples").font(.system(.caption, design: .monospaced))
+                                    Text("\(Int(editedLoopStart)) samples").font(.system(.body, design: .monospaced))
                                 }
                                 Slider(value: $editedLoopStart, in: 0...max(maxSamples - 1, 1))
                                     .onChange(of: editedLoopStart) { _, _ in
@@ -308,7 +308,7 @@ struct SampleDetailView: View {
                                 HStack {
                                     Text("Loop End").font(.subheadline).foregroundStyle(.secondary)
                                     Spacer()
-                                    Text("\(Int(editedLoopEnd)) samples").font(.system(.caption, design: .monospaced))
+                                    Text("\(Int(editedLoopEnd)) samples").font(.system(.body, design: .monospaced))
                                 }
                                 Slider(value: $editedLoopEnd, in: 0...maxSamples)
                                     .onChange(of: editedLoopEnd) { _, _ in
@@ -330,7 +330,7 @@ struct SampleDetailView: View {
                             let loopLen = max(0, editedLoopEnd - editedLoopStart) + storedFlen / 65536.0
                             HStack(spacing: 4) {
                                 Text("lng: \(String(format: "%.3f", loopLen))")
-                                    .font(.system(.caption, design: .monospaced))
+                                    .font(.system(.body, design: .monospaced))
                                     .foregroundStyle(.secondary)
                                 Text("— loop length in samples, as shown on the S3000XL LOOP page")
                                     .font(.caption2)

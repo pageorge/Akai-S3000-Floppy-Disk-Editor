@@ -211,7 +211,10 @@ struct AkaiProgramKeyzone {
     var rootNote: UInt8
     var tuneOffset: Int8
     var fineTune: Int8
-    var volume: UInt8
+    /// Velocity-zone loudness trim (vz+0x10), signed ±50, default 0 (manual:
+    /// "fine tune the loudness for each zone… The range is ±50"; factory
+    /// TEST PROGRAM = 0). Not an absolute level — program loudness is 0x19.
+    var volume: Int8
     var pan: Int8
     /// Per-velocity-zone filter cutoff fine-tune, signed, range ±50 —
     /// `filter` @ +0x11 in `akai_program1000kgvelzone_s`. Confirmed against the
@@ -259,8 +262,8 @@ struct AkaiProgramKeyzone {
     /// byte, `kg+0x97` 0x00→0x32(50) — direct, unscaled. This also retroactively
     /// explained an earlier ambiguous combined-change capture that showed
     /// kg+0x95/0x97/0x98/0x99 all non-zero at once (Resonance + the 3 mod depths,
-    /// strongly suggesting they're adjacent in memory with kg+0x96 unused/padding
-    /// between Resonance and this group) — but ONLY this one (kg+0x97) has
+    /// strongly suggesting they're adjacent in memory; kg+0x96 between them is
+    /// LFO1 > pitch, see lfo1ToPitch) — but ONLY this one (kg+0x97) has
     /// actually been independently isolated; mod depths #2/#3 are deliberately
     /// NOT yet modeled here, pending their own isolated tests, to avoid writing
     /// to bytes we haven't individually confirmed (same discipline as everywhere
@@ -332,6 +335,23 @@ struct AkaiProgramKeyzone {
     /// one changed byte at kg+0x84: 0x00 (TRACK) → 0x01 (CONST).
     /// TRACK: pitch follows keyboard. CONST: pitch locked to recorded pitch.
     var pitchMode: UInt8 = 0   // default TRACK (0x00)
+    /// Mute group, keygroup offset `0xA0`. 0xFF = OFF (default), 0 = group 1,
+    /// 1 = group 2 … Keygroups in the same group cut each other off (manual
+    /// p.85, e.g. closed hi-hat stops open hi-hat). CONFIRMED BY REAL HARDWARE
+    /// BYTE-DIFF: changing group 1 → OFF changed kg+0xA0: 0x00 → 0xFF.
+    var muteGroup: UInt8 = 0xFF
+    /// Keygroup FX send level, keygroup offset `0xA2`, 0–99 (the per-keygroup
+    /// send beside "override prog FX bus"). Hardware byte-diff: send 0→30
+    /// changed kg+0xA2: 0x00 → 0x1E. Default 25.
+    var fxSend: UInt8 = 25
+    /// Velocity-zone crossfade (VEL SW/XFD page "XFD"), keygroup offset `0x1E`:
+    /// 0 = OFF (hard switch between overlapping velocity zones), 1 = ON (blend).
+    /// Default ON — factory TEST PROGRAM has kg+0x1E = 1; Ohsaki agrees.
+    var velXfade: UInt8 = 1
+    /// LFO1 > pitch depth (keygroup PITCH page), keygroup offset `0x96`, 0–99.
+    /// Hardware byte-diff: 0→50 changed kg+0x96: 0x00 → 0x32. Default 50
+    /// (factory TEST PROGRAM also has 50 here).
+    var lfo1ToPitch: UInt8 = 50
 }
 
 /// The full set of modulation sources selectable for any of the 3 filter
@@ -523,6 +543,36 @@ struct AkaiProgram {
     var filterModSource2: AkaiFilterModSource
     var filterModSource3: AkaiFilterModSource
     var rawData: Data
+    /// Effects-card output level (MIX page "card out level"), program header
+    /// offset `0x46`, 0–99. CONFIRMED BY REAL HARDWARE BYTE-DIFF: an isolated
+    /// test changing ONLY this on the S3000XL from 0→50 produced exactly one
+    /// changed byte on the whole disk (`0x46`: `0x00`→`0x32`). This app used to
+    /// leave it 0. 50 is the value the hardware user asked for as the default.
+    var cardOutLevel: UInt8 = 50
+    /// FX send level, program header offset `0x72`, 0–99. CONFIRMED BY REAL
+    /// HARDWARE BYTE-DIFF: an isolated test changing ONLY FX send 0→25 on the
+    /// S3000XL changed exactly one byte inside the program file (`0x72`:
+    /// `0x00`→`0x19`). Default 25 as requested; this app used to leave it 0.
+    var fxSend: UInt8 = 25
+    /// Velocity > loudness, program header offset `0x1A`, signed −50…+50.
+    /// Manual p.26 / Edit Program Single: "You may set a value of ±50. The
+    /// default is +20." Stored as a signed byte (two's complement, like the
+    /// keygroup tune fields) — +20 = 0x14; negative encoding not yet
+    /// hardware-confirmed. This app used to never write it (always 0).
+    var velToLoud: Int8 = 20
+    /// LFO1 speed, program header offset `0x21`, 0–99. Default 50 (Ohsaki
+    /// default and factory TEST PROGRAM both 50). App used to write 0.
+    var lfo1Speed: UInt8 = 50
+    /// Portamento switch, program header offset `0x70`: 0 = OFF, 1 = ON.
+    /// Hardware: switching it on was the only header change vs factory (0x70:
+    /// 0x00 → 0x01). Time/rate/mode bytes not yet identified.
+    var portamento: UInt8 = 0
+    /// Portamento rate, program header offset `0x6E`, 0–99. Hardware: 0→99
+    /// changed only 0x6E. Factory default 0.
+    var portamentoRate: UInt8 = 0
+    /// Portamento type, program header offset `0x6F`: 0 = RATE (default),
+    /// 1 = TIME. Hardware: rate→time changed only 0x6F: 0x00 → 0x01.
+    var portamentoType: UInt8 = 0
 
     /// True when any keyzone is single-key (lowKey == highKey).
     var isDrumKit: Bool {
@@ -597,6 +647,10 @@ struct AkaiMultiPart {
     var pan: Int8 = 0
     var fxBus: AkaiFxBus = .off
     var fxSend: UInt8 = 25
+    /// Individual output (OUT column): 0xFF = OFF (default), 0…7 = outputs 1–8.
+    var output: UInt8 = 0xFF
+    /// Output level for the OUT column, 0–99, default 50.
+    var outputLevel: UInt8 = 50
 }
 
 /// FX bus assignment for a multi part's effects send (manual, p.38: "FX1, FX2,
@@ -691,7 +745,12 @@ struct AkaiMultiFormat {
     static let partStride          = 0xC0   // confirmed via Part 2's program-assignment test
     static let relNameOffset       = 0x03   // 12 bytes, Akai-encoded
     static let relChannelOffset    = 0x10   // 0-indexed
+    static let relPriorityOffset   = 0x12   // part priority 0=LOW 1=NORM 2=HIGH 3=HOLD (mirrors program hdr 0x12) — default NORM
+    static let relKeyLowOffset     = 0x13   // part key range low  (mirrors program hdr 0x13) — default 24 (C0)
+    static let relKeyHighOffset    = 0x14   // part key range high (mirrors program hdr 0x14) — default 127 (G8)
+    static let relOutputOffset     = 0x16   // individual output: 0xFF=OFF, 0-7 = out 1-8 (mirrors program hdr 0x16)
     static let relLevelOffset      = 0x17   // 0-99 direct
+    static let relOutLevelOffset   = 0x46   // output level 0-99 (mirrors program hdr 0x46), default 50
     static let relPanOffset        = 0x18   // signed
     static let relFxBusOffset      = 0x71   // index, see AkaiFxBus.byteValue
     static let relSendOffset       = 0x72   // 0-99 direct
@@ -937,6 +996,8 @@ class AkaiDiskImage: ObservableObject {
                     p.pan = Int8(bitPattern: fileData[base + AkaiMultiFormat.relPanOffset])
                     p.fxBus = AkaiFxBus(byteValue: fileData[base + AkaiMultiFormat.relFxBusOffset])
                     p.fxSend = fileData[base + AkaiMultiFormat.relSendOffset]
+                    p.output = fileData[base + AkaiMultiFormat.relOutputOffset]
+                    p.outputLevel = fileData[base + AkaiMultiFormat.relOutLevelOffset]
                     parts[partIndex] = p
                 }
                 parsedMultis.append(AkaiMultiFile(
@@ -1077,10 +1138,10 @@ class AkaiDiskImage: ObservableObject {
         let rawMidi = fileData.count > 0x10 ? fileData[0x10] : 0xff
         let midiChannel: UInt8 = rawMidi == 0xff ? 0 : rawMidi &+ 1
         let keygroupCount = fileData.count > 0x2A ? fileData[0x2A] : 0
-        let octave: UInt8 = max(
-            fileData.count > 0x27 ? fileData[0x27] : 2,
-            fileData.count > 0x15 ? fileData[0x15] : 0
-        )
+        // Bend range: up @ 0x27, down @ 0x49 (written together). 0x15 is NOT
+        // bend down — it's octave shift (Ohsaki); the S3000 showed bend down 0
+        // while we wrote 2 there.
+        let octave: UInt8 = fileData.count > 0x27 ? fileData[0x27] : 2
         // Polyphony @ hdr+0x11: 0-indexed (0=1 voice, 31=32 voices). Default 32 voices.
         let rawPoly = fileData.count > 0x11 ? fileData[0x11] : 31
         let polyphony: UInt8 = rawPoly &+ 1
@@ -1093,7 +1154,7 @@ class AkaiDiskImage: ObservableObject {
         // file is too short to contain them, matching real factory defaults
         // rather than the silent value.
         let stereoLevel = fileData.count > 0x17 ? fileData[0x17] : 99
-        let basicLoudness = fileData.count > 0x19 ? fileData[0x19] : 99
+        let basicLoudness = fileData.count > 0x19 ? fileData[0x19] : 80   // manual default
         // Filter mod-depth sources — confirmed program-level offsets, see
         // AkaiProgram.filterModSource1/2/3. Fall back to real hardware defaults
         // (Velocity/Lfo2/Env2) for any byte value outside the known 0-13 range.
@@ -1141,7 +1202,7 @@ class AkaiDiskImage: ObservableObject {
                 rootNote: 60,
                 tuneOffset: Int8(bitPattern: fileData[vz + 0x0F]),   // stune
                 fineTune:   Int8(bitPattern: fileData[vz + 0x0E]),   // ctune
-                volume: fileData[vz + 0x10],                          // loud
+                volume: Int8(bitPattern: fileData[vz + 0x10]),        // loud (±50)
                 pan: Int8(bitPattern: fileData[vz + 0x12]),           // pan
                 filterOffset: Int8(bitPattern: fileData[vz + 0x11]),  // filter (fine-tune)
                 filterCutoff: kgFilterCutoff,
@@ -1167,16 +1228,27 @@ class AkaiDiskImage: ObservableObject {
                 env2L3:       kg + 0x16 < fileData.count ? fileData[kg + 0x16] : AkaiKeyzoneDefaults.env2L3,
                 env2R4:       kg + 0x17 < fileData.count ? fileData[kg + 0x17] : AkaiKeyzoneDefaults.env2R4,
                 env2L4:       kg + 0x9F < fileData.count ? fileData[kg + 0x9F] : AkaiKeyzoneDefaults.env2L4,
-                pitchMode:    kg + 0x84 < fileData.count ? fileData[kg + 0x84] : 1))
+                pitchMode:    kg + 0x84 < fileData.count ? fileData[kg + 0x84] : 1,
+                muteGroup:    kg + 0xA0 < fileData.count ? fileData[kg + 0xA0] : 0xFF,
+                fxSend:       kg + 0xA2 < fileData.count ? fileData[kg + 0xA2] : 25,
+                velXfade:     kg + 0x1E < fileData.count ? fileData[kg + 0x1E] : 1,
+                lfo1ToPitch:  kg + 0x96 < fileData.count ? fileData[kg + 0x96] : 50))
         }
 
-        let program = AkaiProgram(name: name, keyzones: keyzones,
+        var program = AkaiProgram(name: name, keyzones: keyzones,
                                   midiChannel: midiChannel, polyphony: polyphony,
                                   priority: priority, reassignment: reassignment,
                                   bendRange: octave,
                                   stereoLevel: stereoLevel, basicLoudness: basicLoudness,
                                   filterModSource1: modSource1, filterModSource2: modSource2, filterModSource3: modSource3,
                                   rawData: fileData)
+        program.cardOutLevel = fileData.count > 0x46 ? fileData[0x46] : 50   // see AkaiProgram.cardOutLevel
+        program.fxSend = fileData.count > 0x72 ? fileData[0x72] : 25         // see AkaiProgram.fxSend
+        program.velToLoud = fileData.count > 0x1A ? Int8(bitPattern: fileData[0x1A]) : 20   // see AkaiProgram.velToLoud
+        program.lfo1Speed = fileData.count > 0x21 ? fileData[0x21] : 50     // see AkaiProgram.lfo1Speed
+        program.portamento = fileData.count > 0x70 ? fileData[0x70] : 0     // see AkaiProgram.portamento
+        program.portamentoRate = fileData.count > 0x6E ? fileData[0x6E] : 0 // see AkaiProgram.portamentoRate
+        program.portamentoType = fileData.count > 0x6F ? fileData[0x6F] : 0 // see AkaiProgram.portamentoType
         return AkaiProgramFile(directoryEntry: entry, program: program,
                                offset: startBlock * AkaiDiskFormat.blockSize)
     }
@@ -1205,7 +1277,8 @@ class AkaiDiskImage: ObservableObject {
 
         // Build the 0xC0-byte file: program header only, no keygroups yet.
         let progSize = 0xC0
-        var file = Data(repeating: 0, count: progSize)
+        var file = Data(Self.factoryProgramHeader)   // factory defaults for every byte, see factoryProgramHeader
+        assert(file.count == progSize)
 
         // --- Program header (akai_program1000_s + S3000 pad) ---
         file[0x00] = 0x01                       // blockid
@@ -1215,11 +1288,16 @@ class AkaiDiskImage: ObservableObject {
         file[0x10] = 0xFF                        // midich1 = OMNI
         file[0x13] = 24                         // keylo (matches hardware default)
         file[0x14] = 127                        // keyhi
-        file[0x15] = 0                          // bend down — hardware default is 0 (factory TEST PROGRAM confirmed)
+        file[0x15] = 0                          // TRANS (transpose) — default 0
         file[0x27] = 2                          // bend up — hardware default is 2 semitones
+        file[0x49] = 2                          // bend down — factory TEST PROGRAM has 2 here
         file[0x16] = 0xFF                        // auxch1 = OFF
         file[0x17] = 99                         // stereo level (OUTPUT LEVELS page) — confirmed offset; 0 = silent!
-        file[0x19] = 99                         // basic loudness (OUTPUT LEVELS page) — confirmed offset; real factory default is 80, but 99 matches "to 99 for both" request
+        file[0x19] = 80                         // basic loudness — confirmed offset; manual default 80 ("optimum range for velocity"; 99 = no velocity sensitivity)
+        file[0x1A] = 20                         // velocity > loudness — manual default +20 (range ±50), see AkaiProgram.velToLoud
+        file[0x21] = 50                         // LFO1 speed — default 50, see AkaiProgram.lfo1Speed
+        file[0x46] = 50                         // effects-card out level (MIX page) — hardware-confirmed offset, see AkaiProgram.cardOutLevel
+        file[0x72] = 25                         // FX send — hardware-confirmed offset, see AkaiProgram.fxSend
         file[0x54] = AkaiFilterModSource.velocity.rawValue   // filter mod source #1 — confirmed program-level offset
         file[0x55] = AkaiFilterModSource.lfo2.rawValue       // filter mod source #2 — confirmed program-level offset
         file[0x56] = AkaiFilterModSource.env2.rawValue       // filter mod source #3 — confirmed program-level offset
@@ -1284,7 +1362,7 @@ class AkaiDiskImage: ObservableObject {
             rawEntry: entryBytes, diskOffset: dirSlot)
         let program = AkaiProgram(name: name, keyzones: [],
             midiChannel: 0, polyphony: 32, priority: .norm, reassignment: .oldest,
-            bendRange: 2, stereoLevel: 99, basicLoudness: 99,
+            bendRange: 2, stereoLevel: 99, basicLoudness: 80,
             filterModSource1: .velocity, filterModSource2: .lfo2, filterModSource3: .env2,
             rawData: file)
         let progFile = AkaiProgramFile(directoryEntry: dirEntry, program: program,
@@ -2145,6 +2223,8 @@ class AkaiDiskImage: ObservableObject {
             p.pan = Int8(bitPattern: fileData[base + AkaiMultiFormat.relPanOffset])
             p.fxBus = AkaiFxBus(byteValue: fileData[base + AkaiMultiFormat.relFxBusOffset])
             p.fxSend = fileData[base + AkaiMultiFormat.relSendOffset]
+            p.output = fileData[base + AkaiMultiFormat.relOutputOffset]
+            p.outputLevel = fileData[base + AkaiMultiFormat.relOutLevelOffset]
             parts[partIndex] = p
         }
 
@@ -2181,6 +2261,11 @@ class AkaiDiskImage: ObservableObject {
             file[base + AkaiMultiFormat.relPanOffset]     = 0
             file[base + AkaiMultiFormat.relFxBusOffset]   = AkaiFxBus.off.byteValue
             file[base + AkaiMultiFormat.relSendOffset]    = 25
+            file[base + AkaiMultiFormat.relOutputOffset]  = 0xFF   // OUT = OFF
+            file[base + AkaiMultiFormat.relPriorityOffset] = 1     // priority NORM
+            file[base + AkaiMultiFormat.relKeyLowOffset]  = 24     // range C0…
+            file[base + AkaiMultiFormat.relKeyHighOffset] = 127    // …G8 (full)
+            file[base + AkaiMultiFormat.relOutLevelOffset] = 50    // output level
             // +0xBE/+0xBF: end link pointer — 0xFFFF = none (unassigned).
             // Hardware writes 0xFFFF for empty parts; 0x0000 may be interpreted
             // as a valid pointer, causing the Akai to always load the wrong multi.
@@ -2327,6 +2412,15 @@ class AkaiDiskImage: ObservableObject {
         fileData[base + AkaiMultiFormat.relPanOffset] = UInt8(bitPattern: part.pan)
         fileData[base + AkaiMultiFormat.relFxBusOffset] = part.fxBus.byteValue
         fileData[base + AkaiMultiFormat.relSendOffset] = part.fxSend
+        fileData[base + AkaiMultiFormat.relOutputOffset] = part.output
+        // Range/priority aren't edited in the app; repair parts older builds
+        // left zeroed (range 0/0 is the tell-tale — no real part has it).
+        if fileData[base + AkaiMultiFormat.relKeyLowOffset] == 0 && fileData[base + AkaiMultiFormat.relKeyHighOffset] == 0 {
+            fileData[base + AkaiMultiFormat.relKeyLowOffset] = 24
+            fileData[base + AkaiMultiFormat.relKeyHighOffset] = 127
+            fileData[base + AkaiMultiFormat.relPriorityOffset] = 1
+        }
+        fileData[base + AkaiMultiFormat.relOutLevelOffset] = part.outputLevel
 
         // Write the patched bytes back across the existing chain — file size
         // never changes (we only ever patch fields, never grow/shrink), so
@@ -2403,18 +2497,32 @@ class AkaiDiskImage: ObservableObject {
         try load(from: url)
     }
 
-    /// App version string stamped into every saved image at 0x128C (8 bytes,
-    /// ASCII, right after the 12-byte volume label). Lets you confirm which
-    /// build wrote a given .img — visible via hex dump at offset 0x128C.
-    static let imageVersionTag = "AKE-1.2 "   // 8 bytes exactly
+    /// Older builds stamped this 8-byte tag into every saved image at 0x128C.
+    /// That region is NOT free: it's the tail of akai_flvol_label_s —
+    /// 0x128F = osver (0x11), 0x1292 = a global setting (0x01) and
+    /// 0x1293 = the selected program number (0-indexed). The tag's last byte,
+    /// a space (0x20 = 32), made the S3000's SLCT screen show program 33.
+    /// No longer written; kept only so saves can detect and repair it.
+    private static let legacyVersionTag = Array("AKE-".utf8)
 
     func saveImageToDisk() throws {
         guard var data = imageData, let url = imageURL else {
             throw AkaiError.noImageLoaded
         }
-        // Stamp the app version at 0x128C (8 bytes after volume label).
-        let tag = Array(Self.imageVersionTag.utf8.prefix(8))
-        for (i, b) in tag.enumerated() { data[0x128C + i] = b }
+        let tagStart = 0x128C
+        if data.count > 0x1293,
+           Array(data[tagStart..<tagStart + Self.legacyVersionTag.count]) == Self.legacyVersionTag {
+            // Put back the blank-disk values the tag overwrote (see createBlankImage).
+            for i in 0x128C...0x128E { data[i] = 0x00 }
+            data[0x128F] = 0x11          // osver
+            data[0x1290] = 0x00
+            data[0x1291] = 0x00
+            data[0x1292] = 0x01          // global setting (factory default)
+            data[0x1293] = 0x00          // selected program → 1
+            NSLog("[SAVE] repaired label bytes 0x128C–0x1293 overwritten by old version tag")
+        }
+        NSLog("[SAVE] %@  selected program byte 0x1293 = %d (shows as %d), osver 0x128F = 0x%02X",
+              url.lastPathComponent, Int(data[0x1293]), Int(data[0x1293]) + 1, Int(data[0x128F]))
         imageData = data
         try data.write(to: url, options: .atomic)
         hasUnsavedChanges = false
@@ -2645,30 +2753,6 @@ class AkaiDiskImage: ObservableObject {
         hasUnsavedChanges = false
     }
 
-    func updateProgramInImage(programFile: AkaiProgramFile) throws {
-        guard var data = imageData else { throw AkaiError.noImageLoaded }
-        var fileData = programFile.program.rawData
-        let nameBytes = akaiBytes(from: programFile.program.name, length: 12)
-        for (i, b) in nameBytes.enumerated() { fileData[i] = b }
-        if fileData.count > 0x0C { fileData[0x0C] = programFile.program.midiChannel }
-        if fileData.count > 0x0D { fileData[0x0D] = programFile.program.polyphony }
-        if fileData.count > 0x0E { fileData[0x0E] = programFile.program.bendRange }
-        // Also write bend up/down at their confirmed offsets.
-        if fileData.count > 0x27 { fileData[0x27] = programFile.program.bendRange }
-        if fileData.count > 0x15 { fileData[0x15] = programFile.program.bendRange }
-        let chain = fatChain(from: programFile.offset / AkaiDiskFormat.blockSize, data: data)
-        let bs = AkaiDiskFormat.blockSize
-        for (i, block) in chain.enumerated() {
-            let srcStart = i * bs; guard srcStart < fileData.count else { break }
-            let srcEnd = min(srcStart + bs, fileData.count)
-            let dstStart = block * bs
-            data.replaceSubrange(dstStart..<dstStart+bs,
-                                 with: fileData[srcStart..<srcEnd] + Data(repeating: 0, count: bs-(srcEnd-srcStart)))
-        }
-        imageData = data
-        if let url = imageURL { try data.write(to: url) }
-        hasUnsavedChanges = false
-    }
 
     // MARK: - Akai Character Encoding
     // Confirmed S1000/S3000 encoding from akaiutil source (github.com/Midi-In/akaiutil):
@@ -2973,6 +3057,26 @@ class AkaiDiskImage: ObservableObject {
 
     // MARK: - Program Edits
 
+    /// The factory TEST PROGRAM's 0xC0-byte header, copied from a real
+    /// S3000XL-saved disk (akai_s3000.img), name blanked and internal address
+    /// zeroed. Used as the starting point for every program header so any byte
+    /// this app doesn't model yet (mod-source assignments, soft pedal, LFO
+    /// depth/delay…) gets the sampler's own default rather than 0.
+    static let factoryProgramHeader: [UInt8] = [
+        0x01, 0x00, 0x00, 0x0A, 0x0A, 0x0A, 0x0A, 0x0A, 0x0A, 0x0A, 0x0A, 0x0A, 0x0A, 0x0A, 0x0A, 0x00,
+        0x00, 0x1F, 0x01, 0x18, 0x7F, 0x00, 0xFF, 0x63, 0x00, 0x50, 0x14, 0x00, 0x00, 0x01, 0x63, 0x00,
+        0x00, 0x32, 0x00, 0x00, 0x1E, 0x00, 0x00, 0x02, 0x00, 0x00, 0x01, 0x01, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x0A, 0x0A,
+        0x0A, 0x00, 0x00, 0x00, 0x00, 0x00, 0x32, 0x00, 0x00, 0x02, 0x00, 0x00, 0x08, 0x06, 0x0C, 0x06,
+        0x03, 0x06, 0x06, 0x06, 0x05, 0x08, 0x0A, 0x0A, 0x05, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x05, 0x08, 0x0E, 0x00, 0x08, 0x08, 0x00, 0x00, 0x00, 0x00, 0x3C, 0x00, 0x00,
+        0x00, 0x00, 0x19, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
+    ]
+
     /// Build a complete S3000 program file from scratch: the 0xC0 header
     /// followed by exactly max(1, keyzones.count) 0xC0 keygroups, with kgnum
     /// (0x2A) always set to match the real keygroup count. A real S3000 reports
@@ -2980,13 +3084,23 @@ class AkaiDiskImage: ObservableObject {
     /// fields are written outside their real struct offsets — so this always
     /// rebuilds the whole file rather than patching bytes in place.
     private func buildProgramFileData(name: String, midiChannel: UInt8, bendRange: UInt8,
-                                      stereoLevel: UInt8, basicLoudness: UInt8,
+                                      stereoLevel: UInt8, basicLoudness: UInt8, velToLoud: Int8, lfo1Speed: UInt8, portamento: UInt8, portamentoRate: UInt8, portamentoType: UInt8, cardOutLevel: UInt8, fxSend: UInt8,
                                       polyphony: UInt8, priority: AkaiProgramPriority, reassignment: AkaiProgramReassignment,
                                       filterModSource1: AkaiFilterModSource, filterModSource2: AkaiFilterModSource, filterModSource3: AkaiFilterModSource,
-                                      keyzones: [AkaiProgramKeyzone]) -> Data {
+                                      keyzones: [AkaiProgramKeyzone],
+                                      baseHeader: Data? = nil) -> Data {
         let kgCount = keyzones.count
         let progSize = 0xC0 + kgCount * 0xC0
         var file = Data(repeating: 0, count: progSize)
+        // Seed the header: the program's own existing header (keeps any setting
+        // made on the sampler that this app doesn't model), or the factory
+        // template for a new one. Every field the app does model is written below.
+        let base: [UInt8] = {
+            if let b = baseHeader, b.count >= 0xC0 { return [UInt8](b.prefix(0xC0)) }
+            return Self.factoryProgramHeader
+        }()
+        file.replaceSubrange(0..<0xC0, with: base)
+        file[0x01] = 0; file[0x02] = 0            // first-keygroup address — sampler-managed
 
         file[0x00] = 0x01                         // blockid
         let nameBytes = akaiBytes(from: name, length: 12)
@@ -2998,14 +3112,27 @@ class AkaiDiskImage: ObservableObject {
         file[0x11] = polyphony > 0 ? polyphony - 1 : 31
         // Priority @ 0x12: LOW=0, NORM=1, HIGH=2. Hardware-confirmed.
         file[0x12] = priority.rawValue
-        file[0x13] = 0                            // program-level keylo
+        // Program play range low. C0 (24) is the S3000's floor — manual p.64:
+        // "the overall keyboard range C0-G8"; the sampler won't select below it.
+        // Writing 0 showed as C-1 on the MIDI page. Hardware byte-diff: setting
+        // it to C0 on the S3000XL changed only this byte, 0x13: 00 → 18.
+        file[0x13] = 24
         file[0x14] = 127                          // program-level keyhi
-        // Bend range — written to both 0x27 (up) and 0x15 (down).
-        file[0x15] = bendRange
+        // Bend range — up @ 0x27 (confirmed), down @ 0x49 (factory default 2;
+        // the S3000 ignored our old writes to 0x15, which is octave shift).
+        // 0x15 = TRANS (MIDI-page transpose) — not modelled; kept from the base header.
         file[0x27] = bendRange
+        file[0x49] = bendRange
         file[0x16] = 0xFF                          // auxch1 = OFF
         file[0x17] = stereoLevel                  // OUTPUT LEVELS "stereo level" — confirmed offset; 0 = total silence on main outs
         file[0x19] = basicLoudness                 // OUTPUT LEVELS "basic loudness" — confirmed offset; 0 = total silence regardless of velocity
+        file[0x1A] = UInt8(bitPattern: velToLoud)  // velocity > loudness, signed ±50 — see AkaiProgram.velToLoud
+        file[0x21] = lfo1Speed                     // LFO1 speed — see AkaiProgram.lfo1Speed
+        file[0x70] = portamento                    // portamento 0=OFF 1=ON — see AkaiProgram.portamento
+        file[0x6E] = portamentoRate                // portamento rate 0–99 — see AkaiProgram.portamentoRate
+        file[0x6F] = portamentoType                // portamento type 0=RATE 1=TIME — see AkaiProgram.portamentoType
+        file[0x46] = cardOutLevel                  // effects-card out level (MIX page) — hardware-confirmed offset, see AkaiProgram.cardOutLevel
+        file[0x72] = fxSend                        // FX send — hardware-confirmed offset, see AkaiProgram.fxSend
         file[0x54] = filterModSource1.rawValue     // filter mod source #1 — confirmed program-level offset (shared by all keygroups)
         file[0x55] = filterModSource2.rawValue     // filter mod source #2 — confirmed program-level offset (shared by all keygroups)
         file[0x56] = filterModSource3.rawValue     // filter mod source #3 — confirmed program-level offset (shared by all keygroups)
@@ -3037,6 +3164,10 @@ class AkaiDiskImage: ObservableObject {
             file[kg + 0x9E] = kz?.env2L2 ?? 99        // ENV2 Level 2  — hardware-confirmed kg+0x9E
             file[kg + 0x9F] = kz?.env2L4 ?? 0         // ENV2 Level 4  — hardware-confirmed kg+0x9F
             file[kg + 0x84] = kz?.pitchMode ?? 1      // SMP1 pitch mode: 0=TRACK, 1=CONST — confirmed kg+0x84
+            file[kg + 0xA0] = kz?.muteGroup ?? 0xFF   // mute group: 0xFF=OFF, 0=group 1 — hardware-confirmed kg+0xA0
+            file[kg + 0xA2] = kz?.fxSend ?? 25        // keygroup FX send 0–99 — hardware-confirmed kg+0xA2
+            file[kg + 0x1E] = kz?.velXfade ?? 1       // velocity-zone crossfade: 1=ON (factory default)
+            file[kg + 0x96] = kz?.lfo1ToPitch ?? 50   // LFO1 > pitch — hardware-confirmed kg+0x96
             file[kg + 0x95] = kz?.filterResonance ?? 0
             file[kg + 0x97] = UInt8(bitPattern: kz?.filterModDepth1 ?? 0)  // Mod depth #1 (Velocity→Freq) — confirmed offset
             file[kg + 0x98] = UInt8(bitPattern: kz?.filterModDepth2 ?? 0)  // Mod depth #2 (Lfo2→Freq) — confirmed offset
@@ -3055,7 +3186,7 @@ class AkaiDiskImage: ObservableObject {
                     file[vz + 0x0D] = kz.velocityHigh
                     file[vz + 0x0E] = UInt8(bitPattern: kz.fineTune)    // ctune
                     file[vz + 0x0F] = UInt8(bitPattern: kz.tuneOffset) // stune
-                    file[vz + 0x10] = kz.volume                         // loud
+                    file[vz + 0x10] = UInt8(bitPattern: kz.volume)      // loud trim ±50
                     file[vz + 0x11] = UInt8(bitPattern: kz.filterOffset) // filter (fine-tune)
                     file[vz + 0x12] = UInt8(bitPattern: kz.pan)
                     file[vz + 0x13] = kz.playbackMode.rawValue          // pmode
@@ -3072,7 +3203,7 @@ class AkaiDiskImage: ObservableObject {
                     file[vz + 0x0D] = kz.velocityHigh
                     file[vz + 0x0E] = UInt8(bitPattern: kz.fineTune)
                     file[vz + 0x0F] = UInt8(bitPattern: kz.tuneOffset)
-                    file[vz + 0x10] = kz.volume
+                    file[vz + 0x10] = UInt8(bitPattern: kz.volume)
                     file[vz + 0x11] = UInt8(bitPattern: kz.filterOffset)
                     file[vz + 0x12] = UInt8(bitPattern: kz.rightPan)
                     file[vz + 0x13] = kz.playbackMode.rawValue
@@ -3102,13 +3233,21 @@ class AkaiDiskImage: ObservableObject {
             bendRange: programFile.program.bendRange,
             stereoLevel: programFile.program.stereoLevel,
             basicLoudness: programFile.program.basicLoudness,
+            velToLoud: programFile.program.velToLoud,
+            lfo1Speed: programFile.program.lfo1Speed,
+            portamento: programFile.program.portamento,
+            portamentoRate: programFile.program.portamentoRate,
+            portamentoType: programFile.program.portamentoType,
+            cardOutLevel: programFile.program.cardOutLevel,
+            fxSend: programFile.program.fxSend,
             polyphony: programFile.program.polyphony,
             priority: programFile.program.priority,
             reassignment: programFile.program.reassignment,
             filterModSource1: programFile.program.filterModSource1,
             filterModSource2: programFile.program.filterModSource2,
             filterModSource3: programFile.program.filterModSource3,
-            keyzones: programFile.program.keyzones)
+            keyzones: programFile.program.keyzones,
+            baseHeader: programFile.program.rawData)
 
         let bs = AkaiDiskFormat.blockSize
         let requiredBlocks = (fileData.count + bs - 1) / bs

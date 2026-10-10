@@ -286,7 +286,7 @@ struct SidebarView: View {
                 let kz = AkaiProgramKeyzone(
                     sampleName: sample.header.name,
                     lowKey: 24, highKey: UInt8(PianoKeyboardView.visibleEndNote), rootNote: 60,
-                    tuneOffset: 0, fineTune: 0, volume: 99, pan: 0,
+                    tuneOffset: 0, fineTune: 0, volume: 0, pan: 0,
                     filterOffset: 0, filterCutoff: 99, filterKeyFollow: 0,
                     filterResonance: 0, filterModDepth1: 0,
                     filterModDepth2: 0, filterModDepth3: 0,
@@ -383,7 +383,7 @@ struct SidebarView: View {
                     keyzones.append(AkaiProgramKeyzone(
                         sampleName: sample.header.name,
                         lowKey: note, highKey: note, rootNote: 60,
-                        tuneOffset: 0, fineTune: 0, volume: 99, pan: 0,
+                        tuneOffset: 0, fineTune: 0, volume: 0, pan: 0,
                         filterOffset: 0, filterCutoff: 99, filterKeyFollow: 0,
                         filterResonance: 0, filterModDepth1: 0,
                         filterModDepth2: 0, filterModDepth3: 0,
@@ -468,14 +468,25 @@ struct SidebarView: View {
     }
 
     var body: some View {
-        List {
-            GreaseweazleSection(runner: greaseweazle, diskImage: diskImage)
+        // Disk name sits ABOVE the list (not inside it), so it's laid out in
+        // its own space and can never scroll or slide under the title bar.
+        VStack(alignment: .leading, spacing: 0) {
             if diskImage.isLoaded {
-                diskNameSection
+                diskNameHeader
+                    .padding(.leading, 16)
+                    .padding(.top, 8)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            sidebarList
+        }
+    }
+
+    private var sidebarList: some View {
+        List {
+            if diskImage.isLoaded {
                 samplesSection
                 programsSection
                 multisSection
-                diskInfoSection
             } else {
                 VStack(alignment: .leading, spacing: 8) {
                     Label("No Disk Loaded", systemImage: "externaldrive.badge.questionmark")
@@ -485,6 +496,10 @@ struct SidebarView: View {
                 }
                 .padding(.vertical, 8)
             }
+            if diskImage.isLoaded {
+                diskInfoSection   // Floppy Disk
+            }
+            greaseweazleSection   // always available (reading a floppy needs no disk open) — last item
         }
         .listStyle(.sidebar)
         .focused($sidebarFocused)
@@ -625,10 +640,7 @@ struct SidebarView: View {
 
     // MARK: - Sidebar sections (extracted to keep body type-checkable)
 
-    @ViewBuilder private var diskNameSection: some View {
-        Section {
-            EmptyView()
-        } header: {
+    @ViewBuilder private var diskNameHeader: some View {
             HStack(spacing: 6) {
                 if isEditingVolumeName {
                     TextField("Volume name", text: $editedVolumeName)
@@ -658,7 +670,6 @@ struct SidebarView: View {
             }
             .padding(.vertical, 6)
             .padding(.trailing, 12)
-        }
     }
 
     @ViewBuilder private var samplesSection: some View {
@@ -686,12 +697,9 @@ struct SidebarView: View {
         } header: {
             HStack {
                 let isActive = selectedTab == .samples && selectedSampleID == nil
-                HStack(spacing: 6) {
+                SidebarNodeLabel(title: "Samples (\(diskImage.samples.count))", isActive: isActive) {
                     Image(systemName: "waveform")
                         .foregroundStyle(Color(red: 0.91, green: 0, blue: 0.11))
-                    Text("Samples (\(diskImage.samples.count))")
-                        .font(.body)
-                        .foregroundStyle(isActive ? Color.primary : Color.secondary)
                 }
                 Spacer()
                 Button {
@@ -741,12 +749,9 @@ struct SidebarView: View {
         } header: {
             HStack {
                 let isActive = selectedTab == .programs && selectedProgramID == nil
-                HStack(spacing: 6) {
+                SidebarNodeLabel(title: "Programs (\(diskImage.programs.count))", isActive: isActive) {
                     Image(systemName: "pianokeys")
                         .foregroundStyle(Color.purple)
-                    Text("Programs (\(diskImage.programs.count))")
-                        .font(.body)
-                        .foregroundStyle(isActive ? Color.primary : Color.secondary)
                 }
                 Spacer()
                 Button {
@@ -823,12 +828,9 @@ struct SidebarView: View {
             let count = diskImage.multis.count
             HStack {
                 let isActive = selectedTab == .multis && selectedMultiID == nil
-                HStack(spacing: 6) {
+                SidebarNodeLabel(title: "Multis (\(count))", isActive: isActive) {
                     Image(systemName: "square.stack.3d.up")
                         .foregroundStyle(Color.teal)
-                    Text("Multis (\(count))")
-                        .font(.body)
-                        .foregroundStyle(isActive ? Color.primary : Color.secondary)
                 }
                 Spacer()
                 Button {
@@ -861,16 +863,28 @@ struct SidebarView: View {
         }
     }
 
+    /// Select the Greaseweazle node, clearing any sample/program/multi selection
+    /// (same as tapping Floppy Disk).
+    func showGreaseweazle() {
+        selectedTab = .greaseweazle
+        selectedSampleID = nil
+        selectedSampleIDs.removeAll()
+        selectionAnchorID = nil
+        selectedProgramID = nil
+        selectedProgramIDs.removeAll()
+        programSelectionAnchorID = nil
+        selectedMultiID = nil
+    }
+
     @ViewBuilder private var diskInfoSection: some View {
         Section {
             EmptyView()
         } header: {
-            HStack(spacing: 6) {
-                Image(systemName: "externaldrive.badge.questionmark")
+            SidebarNodeLabel(title: "Floppy Disk", isActive: selectedTab == .diskInfo) {
+                FloppyDiskIcon()
+                    .frame(width: SidebarNodeLabel<EmptyView>.iconSize - 1,
+                           height: SidebarNodeLabel<EmptyView>.iconSize - 1)  // drawn shape fills its box; SF Symbols don't quite
                     .foregroundStyle(Color.white)
-                Text("Disk Info")
-                    .font(.body)
-                    .foregroundStyle(selectedTab == .diskInfo ? Color.primary : Color.secondary)
             }
             .contentShape(Rectangle())
             .onTapGesture {
@@ -884,6 +898,52 @@ struct SidebarView: View {
                 selectedMultiID = nil
             }
             .padding(.trailing, 12)
+        }
+    }
+}
+
+extension SidebarView {
+    /// Sidebar node that opens the Greaseweazle page (drive/format, Read/Write,
+    /// progress and log). Behaves like Floppy Disk.
+    @ViewBuilder var greaseweazleSection: some View {
+        Section {
+            EmptyView()
+        } header: {
+            HStack(spacing: 6) {
+                SidebarNodeLabel(title: "Greaseweazle", isActive: selectedTab == .greaseweazle) {
+                    Image(systemName: "opticaldiscdrive.fill")
+                        .foregroundStyle(greaseweazlePurple)
+                }
+                if greaseweazle.isBusy {
+                    Spacer()
+                    ProgressView().controlSize(.small)
+                }
+            }
+            .contentShape(Rectangle())
+            .onTapGesture { showGreaseweazle() }
+            .padding(.trailing, 12)
+        }
+    }
+}
+
+/// Icon + title for a top-level sidebar node. Every node uses this so icon
+/// size, text size and the icon column width are identical — nothing is left
+/// to whatever font the List's section-header style happens to inherit.
+struct SidebarNodeLabel<Icon: View>: View {
+    static var iconSize: CGFloat { 14 }
+    static var textFont: Font { .system(size: 13) }   // macOS body size
+    let title: String
+    let isActive: Bool
+    @ViewBuilder let icon: () -> Icon
+
+    var body: some View {
+        HStack(spacing: 6) {
+            icon()
+                .font(.system(size: Self.iconSize))
+                .frame(width: Self.iconSize + 4, height: Self.iconSize + 2)   // fixed column so titles line up
+            Text(title)
+                .font(Self.textFont)
+                .foregroundStyle(isActive ? Color.primary : Color.secondary)
         }
     }
 }
@@ -1085,9 +1145,11 @@ struct SidebarMultiRow: View {
     }
 }
 
-// MARK: - Greaseweazle Section
+// MARK: - Greaseweazle Controls
 
-struct GreaseweazleSection: View {
+/// Drive + format pickers and Read / Write / Cancel. Shown at the top of the
+/// Greaseweazle page (GreaseweazleLogView).
+struct GreaseweazleControls: View {
     @ObservedObject var runner: GreaseweazleRunner
     @ObservedObject var diskImage: AkaiDiskImage
     @State private var saveErrorAlert = false
@@ -1100,7 +1162,6 @@ struct GreaseweazleSection: View {
     private let akaiRed = Color(red: 0.91, green: 0, blue: 0.11)
 
     var body: some View {
-        Section {
             VStack(alignment: .leading, spacing: 10) {
                 // Drive picker
                 Picker("Drive", selection: $runner.drive) {
@@ -1170,18 +1231,6 @@ struct GreaseweazleSection: View {
                 }
             }
             .padding(.vertical, 4)
-        } header: {
-            HStack {
-                Image(systemName: "opticaldiscdrive.fill").foregroundStyle(greaseweazlePurple).font(.title2)
-                Text("Greaseweazle").font(.title3.weight(.semibold)).foregroundStyle(.secondary)
-                if runner.isBusy {
-                    Spacer()
-                    ProgressView().controlSize(.small)
-                }
-            }
-            .padding(.vertical, 6)
-            .padding(.trailing, 12)
-        }
         .alert("Couldn't save before writing", isPresented: $saveErrorAlert) {
             Button("OK", role: .cancel) {}
         } message: {

@@ -17,7 +17,7 @@ struct PianoKeyboardView: View {
     /// keyzone's default high key) so "the max key you can see" always matches
     /// what's actually rendered here, with no separate constant to drift out of sync.
     static let visibleStartNote = 24
-    static let visibleEndNote   = 95
+    static let visibleEndNote   = 107   // B6
 
     private let startNote: Int = PianoKeyboardView.visibleStartNote
     private let endNote: Int   = PianoKeyboardView.visibleEndNote

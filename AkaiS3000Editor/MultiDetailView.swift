@@ -176,6 +176,8 @@ struct MultiPlaceholderView: View {
                 Text("Pan").frame(minWidth: 110, maxWidth: .infinity, alignment: .leading)
                 Text("Fx").frame(width: 70, alignment: .center)
                 Text("Send").frame(minWidth: 110, maxWidth: .infinity, alignment: .leading)
+                Text("Out").frame(width: 60, alignment: .center)
+                Text("Out Lev").frame(minWidth: 110, maxWidth: .infinity, alignment: .leading)
             }
             .font(.caption).foregroundStyle(.secondary)
             .padding(.horizontal).padding(.top, 12)
@@ -283,6 +285,8 @@ struct MultiMixEditorView: View {
                 Text("Pan").frame(minWidth: 90, maxWidth: .infinity, alignment: .leading)
                 Text("Fx").frame(width: 60, alignment: .center)
                 Text("Send").frame(minWidth: 90, maxWidth: .infinity, alignment: .leading)
+                Text("Out").frame(width: 60, alignment: .center)
+                Text("Out Lev").frame(minWidth: 90, maxWidth: .infinity, alignment: .leading)
             }
             .font(.caption).foregroundStyle(.secondary)
             .padding(.horizontal).padding(.top, 12)
@@ -364,6 +368,23 @@ private struct MultiPartRow: View {
             HStack(spacing: 4) {
                 Slider(value: .init(get: { Double(part.fxSend) }, set: { part.fxSend = UInt8($0); onChange?() }), in: 0...99, step: 1)
                 Text("\(part.fxSend)")
+                    .font(.system(.caption2, design: .monospaced))
+                    .frame(width: 24, alignment: .trailing)
+            }
+            .frame(minWidth: 110, maxWidth: .infinity)
+
+            Picker("", selection: $part.output) {
+                Text("Off").tag(UInt8(0xFF))
+                ForEach(0..<8, id: \.self) { o in Text("\(o + 1)").tag(UInt8(o)) }
+            }
+            .labelsHidden()
+            .pickerStyle(.menu)
+            .frame(width: 60)
+            .onChange(of: part.output) { _, _ in onChange?() }
+
+            HStack(spacing: 4) {
+                Slider(value: .init(get: { Double(part.outputLevel) }, set: { part.outputLevel = UInt8($0); onChange?() }), in: 0...99, step: 1)
+                Text("\(part.outputLevel)")
                     .font(.system(.caption2, design: .monospaced))
                     .frame(width: 24, alignment: .trailing)
             }

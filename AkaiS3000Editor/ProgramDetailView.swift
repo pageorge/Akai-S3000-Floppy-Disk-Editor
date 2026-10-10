@@ -3,7 +3,7 @@ import SwiftUI
 /// How new keyzones are laid out on the keyboard when samples are assigned.
 enum KeyzoneLayout {
     case singleKey   // One key per sample, C1 onwards — drum/one-shot style
-    case fullKeyboard // Divide the on-screen keyboard (24–95) evenly across all samples
+    case fullKeyboard // Divide the on-screen keyboard (24–107) evenly across all samples
 }
 
 struct ProgramDetailView: View {
@@ -25,6 +25,7 @@ struct ProgramDetailView: View {
     /// Session-remembered keyzone layout choice. nil = not yet chosen (popup
     /// will appear on next assignment). Resets when a different program is opened.
     @State private var keyzoneLayout: KeyzoneLayout? = nil
+    @AppStorage("programSettingsExpanded") private var programSettingsExpanded = true
     @State private var showLayoutPicker = false
     @State private var pendingLayoutActions: [() -> Void] = []
     /// Highlights the "Add Samples" drop zone while a file/folder is dragged over
@@ -98,10 +99,10 @@ struct ProgramDetailView: View {
                 VStack(alignment: .leading, spacing: 0) {
                     ScrollView {
                     VStack(alignment: .leading, spacing: 16) {
-                    InfoCard(title: "Program Settings") {
+                    InfoCard(title: "Program Settings", isExpanded: $programSettingsExpanded) {
                         VStack(alignment: .leading, spacing: 10) {
                         HStack {
-                            Text("MIDI Channel").frame(width: 100, alignment: .leading).font(.subheadline).foregroundStyle(.secondary)
+                            Text("MIDI Channel").frame(width: 125, alignment: .leading).font(.subheadline).foregroundStyle(.secondary)
                             Picker("", selection: $editedProgram.midiChannel) {
                                 Text("All").tag(UInt8(0))
                                 ForEach(1..<17) { ch in Text("\(ch)").tag(UInt8(ch)) }
@@ -113,13 +114,16 @@ struct ProgramDetailView: View {
                             ? "Program responds to MIDI on all channels simultaneously."
                             : "Program responds only to MIDI channel \(editedProgram.midiChannel).")
                         HStack {
-                            Text("Polyphony").frame(width: 100, alignment: .leading).font(.subheadline).foregroundStyle(.secondary)
-                            Stepper("\(editedProgram.polyphony)", value: $editedProgram.polyphony, in: 1...32)
-                                .onChange(of: editedProgram.polyphony) { _, _ in commitProgramEdits() }
+                            Text("Polyphony").frame(width: 125, alignment: .leading).font(.subheadline).foregroundStyle(.secondary)
+                            Picker("", selection: $editedProgram.polyphony) {
+                                ForEach((1...32).reversed(), id: \.self) { v in Text("\(v)").tag(UInt8(v)) }
+                            }
+                            .labelsHidden()
+                            .onChange(of: editedProgram.polyphony) { _, _ in commitProgramEdits() }
                         }
                         .help("Maximum simultaneous voices (1–32). For stereo programs this must be at least 2 — one voice per zone. Default: 32.")
                         HStack {
-                            Text("Priority").frame(width: 100, alignment: .leading).font(.subheadline).foregroundStyle(.secondary)
+                            Text("Priority").frame(width: 125, alignment: .leading).font(.subheadline).foregroundStyle(.secondary)
                             Picker("", selection: $editedProgram.priority) {
                                 ForEach(AkaiProgramPriority.allCases) { p in Text(p.displayName).tag(p) }
                             }
@@ -128,7 +132,7 @@ struct ProgramDetailView: View {
                         }
                         .help("Voice priority when the sampler is pushed to its polyphony limit. LOW = stolen first; HIGH = stolen last; HOLD = notes only stolen by the same program.")
                         HStack {
-                            Text("Reassignment").frame(width: 100, alignment: .leading).font(.subheadline).foregroundStyle(.secondary)
+                            Text("Reassignment").frame(width: 125, alignment: .leading).font(.subheadline).foregroundStyle(.secondary)
                             Picker("", selection: $editedProgram.reassignment) {
                                 ForEach(AkaiProgramReassignment.allCases) { r in Text(r.displayName).tag(r) }
                             }
@@ -137,28 +141,68 @@ struct ProgramDetailView: View {
                         }
                         .help("Which voice is stolen when all voices are in use. OLDEST = the longest-playing note; QUIETEST = the quietest note.")
                         HStack {
-                            Text("Bend Range").frame(width: 100, alignment: .leading).font(.subheadline).foregroundStyle(.secondary)
-                            Stepper("\(editedProgram.bendRange) semitones", value: $editedProgram.bendRange, in: 0...24)
-                                .onChange(of: editedProgram.bendRange) { _, _ in commitProgramEdits() }
+                            Text("Bend Range").frame(width: 125, alignment: .leading).font(.subheadline).foregroundStyle(.secondary)
+                            Picker("", selection: $editedProgram.bendRange) {
+                                ForEach(0...24, id: \.self) { v in Text(v == 1 ? "1 semitone" : "\(v) semitones").tag(UInt8(v)) }
+                            }
+                            .labelsHidden()
+                            .onChange(of: editedProgram.bendRange) { _, _ in commitProgramEdits() }
                         }
                         .help("Pitchbend wheel range, 0–24 semitones. Written to both up and down. Default: 2.")
                         HStack {
-                            Text("loudness").frame(width: 100, alignment: .leading).font(.subheadline).foregroundStyle(.secondary)
+                            Text("Portamento").frame(width: 125, alignment: .leading).font(.subheadline).foregroundStyle(.secondary)
+                            Picker("", selection: $editedProgram.portamento) {
+                                Text("Off").tag(UInt8(0))
+                                Text("On").tag(UInt8(1))
+                            }
+                            .labelsHidden()
+                            .onChange(of: editedProgram.portamento) { _, _ in commitProgramEdits() }
+                        }
+                        .help("Glide from one note to the next instead of jumping. Default: Off.")
+                        HStack {
+                            Text(editedProgram.portamentoType == 1 ? "Portamento Time" : "Portamento Rate").frame(width: 125, alignment: .leading).font(.subheadline).foregroundStyle(.secondary)
+                            Slider(value: .init(get: { Double(editedProgram.portamentoRate) },
+                                               set: { editedProgram.portamentoRate = UInt8($0); commitProgramEdits() }), in: 0...99, step: 1)
+                            Text("\(editedProgram.portamentoRate)").frame(width: 30).font(.system(.body, design: .monospaced))
+                        }
+                        .help("Portamento glide rate, 0–99. Default 0.")
+                        HStack {
+                            Text("Portamento Type").frame(width: 125, alignment: .leading).font(.subheadline).foregroundStyle(.secondary)
+                            Picker("", selection: $editedProgram.portamentoType) {
+                                Text("Rate").tag(UInt8(0))
+                                Text("Time").tag(UInt8(1))
+                            }
+                            .labelsHidden()
+                            .onChange(of: editedProgram.portamentoType) { _, _ in commitProgramEdits() }
+                        }
+                        .help("Rate: glide speed is fixed, so bigger intervals take longer. Time: every glide takes the same time. Default: Rate.")
+                        // NOTE: these two sliders were previously mislabelled — "loudness"
+                        // edited stereo level (0x17) and "vel > loud" edited loudness (0x19).
+                        HStack {
+                            Text("Stereo Level").frame(width: 125, alignment: .leading).font(.subheadline).foregroundStyle(.secondary)
                             Slider(value: .init(get: { Double(editedProgram.stereoLevel) },
                                                set: { editedProgram.stereoLevel = UInt8($0); commitProgramEdits() }), in: 0...99, step: 1)
                             Text("\(editedProgram.stereoLevel)").frame(width: 30).font(.system(.body, design: .monospaced))
                         }
-                        .help("Sets the overall loudness for the program. Affects main L/R outputs, individual outputs and effects send. 0 = silent.")
+                        .help("Level of this program in the main stereo L/R mix. 0 = mixed out of L/R entirely. Default 99.")
                         HStack {
-                            Text("vel > loud").frame(width: 100, alignment: .leading).font(.subheadline).foregroundStyle(.secondary)
+                            Text("Loudness").frame(width: 125, alignment: .leading).font(.subheadline).foregroundStyle(.secondary)
                             Slider(value: .init(get: { Double(editedProgram.basicLoudness) },
                                                set: { editedProgram.basicLoudness = UInt8($0); commitProgramEdits() }), in: 0...99, step: 1)
                             Text("\(editedProgram.basicLoudness)").frame(width: 30).font(.system(.body, design: .monospaced))
                         }
-                        .help("Velocity sensitivity. At loudness=99 this has no effect — maximum level, no velocity response.")
+                        .help("Overall output level of the program (0–99). Default 80 — the manual's optimum range for velocity. At 99 it's loudest but has no velocity sensitivity.")
+                        HStack {
+                            Text("Velocity > Loudness").frame(width: 125, alignment: .leading).font(.subheadline).foregroundStyle(.secondary)
+                            Slider(value: .init(get: { Double(editedProgram.velToLoud) },
+                                               set: { editedProgram.velToLoud = Int8($0); commitProgramEdits() }), in: -50...50, step: 1)
+                            Text(editedProgram.velToLoud > 0 ? "+\(editedProgram.velToLoud)" : "\(editedProgram.velToLoud)")
+                                .frame(width: 30).font(.system(.body, design: .monospaced))
+                        }
+                        .help("How much velocity affects loudness, −50…+50. Default +20. +50 = very wide dynamics; negative = softer when played harder (for velocity crossfades).")
                         Text("Filter modulation inputs").font(.caption).foregroundStyle(.secondary).padding(.top, 4)
                         HStack {
-                            Text("Mod 1").frame(width: 100, alignment: .leading).font(.subheadline).foregroundStyle(.secondary)
+                            Text("Mod 1").frame(width: 125, alignment: .leading).font(.subheadline).foregroundStyle(.secondary)
                             Picker("", selection: $editedProgram.filterModSource1) {
                                 ForEach(AkaiFilterModSource.allCases) { src in Text(src.displayName).tag(src) }
                             }
@@ -167,7 +211,7 @@ struct ProgramDetailView: View {
                         }
                         .help(editedProgram.filterModSource1.helpText)
                         HStack {
-                            Text("Mod 2").frame(width: 100, alignment: .leading).font(.subheadline).foregroundStyle(.secondary)
+                            Text("Mod 2").frame(width: 125, alignment: .leading).font(.subheadline).foregroundStyle(.secondary)
                             Picker("", selection: $editedProgram.filterModSource2) {
                                 ForEach(AkaiFilterModSource.allCases) { src in Text(src.displayName).tag(src) }
                             }
@@ -176,7 +220,7 @@ struct ProgramDetailView: View {
                         }
                         .help(editedProgram.filterModSource2.helpText)
                         HStack {
-                            Text("Mod 3").frame(width: 100, alignment: .leading).font(.subheadline).foregroundStyle(.secondary)
+                            Text("Mod 3").frame(width: 125, alignment: .leading).font(.subheadline).foregroundStyle(.secondary)
                             Picker("", selection: $editedProgram.filterModSource3) {
                                 ForEach(AkaiFilterModSource.allCases) { src in Text(src.displayName).tag(src) }
                             }
@@ -192,7 +236,8 @@ struct ProgramDetailView: View {
                                 editedProgram.reassignment = .oldest
                                 editedProgram.bendRange = 2
                                 editedProgram.stereoLevel = 99
-                                editedProgram.basicLoudness = 99
+                                editedProgram.basicLoudness = 80
+                                editedProgram.velToLoud = 20
                                 editedProgram.filterModSource1 = .velocity
                                 editedProgram.filterModSource2 = .lfo2
                                 editedProgram.filterModSource3 = .env2
@@ -515,7 +560,7 @@ struct ProgramDetailView: View {
                 newKZ = AkaiProgramKeyzone(
                     sampleName: sampleName,
                     lowKey: lo, highKey: hi, rootNote: root,
-                    tuneOffset: 0, fineTune: 0, volume: 99, pan: 0,
+                    tuneOffset: 0, fineTune: 0, volume: 0, pan: 0,
                     filterOffset: 0, filterCutoff: 99, filterKeyFollow: 0,
                     filterResonance: 0, filterModDepth1: 0, filterModDepth2: 0, filterModDepth3: 0,
                     rightSampleName: "", rightPan: 50, playbackMode: .sample,
@@ -525,7 +570,7 @@ struct ProgramDetailView: View {
                 editedProgram.keyzones.append(AkaiProgramKeyzone(
                     sampleName: sampleName,
                     lowKey: UInt8(PianoKeyboardView.visibleStartNote), highKey: UInt8(PianoKeyboardView.visibleEndNote), rootNote: 60,
-                    tuneOffset: 0, fineTune: 0, volume: 99, pan: 0,
+                    tuneOffset: 0, fineTune: 0, volume: 0, pan: 0,
                     filterOffset: 0, filterCutoff: 99, filterKeyFollow: 0,
                     filterResonance: 0, filterModDepth1: 0, filterModDepth2: 0, filterModDepth3: 0,
                     rightSampleName: "", rightPan: 50, playbackMode: .sample,
@@ -617,6 +662,9 @@ struct ProgramDetailView: View {
             if old.env2R4 != newValue.env2R4 { kz.env2R4 = newValue.env2R4 }
             if old.env2L4 != newValue.env2L4 { kz.env2L4 = newValue.env2L4 }
             if old.pitchMode != newValue.pitchMode { kz.pitchMode = newValue.pitchMode }
+            if old.muteGroup != newValue.muteGroup { kz.muteGroup = newValue.muteGroup }
+            if old.fxSend != newValue.fxSend { kz.fxSend = newValue.fxSend }
+            if old.lfo1ToPitch != newValue.lfo1ToPitch { kz.lfo1ToPitch = newValue.lfo1ToPitch }
             editedProgram.keyzones[idx] = kz
         }
     }
@@ -711,7 +759,7 @@ struct ProgramDetailView: View {
     /// Compute (lowKey, highKey) for a full-keyboard zone when adding one more
     /// sample. Takes existing keyzones into account and divides remaining range.
     private func nextFullKeyboardRange(forSampleCount total: Int) -> (low: UInt8, high: UInt8) {
-        // Same range as the on-screen keyboard (C0–B5, 24–95).
+        // Same range as the on-screen keyboard (C0–B6, 24–107).
         let keyboardLow = PianoKeyboardView.visibleStartNote
         let keyboardHigh = PianoKeyboardView.visibleEndNote
         let keysPerZone = max(1, (keyboardHigh - keyboardLow + 1) / max(1, total))
@@ -726,9 +774,9 @@ struct ProgramDetailView: View {
     }
 
     /// Redistribute all existing full-keyboard keyzones evenly across the
-    /// on-screen keyboard (24–95).
+    /// on-screen keyboard (24–107).
     private func redistributeFullKeyboard() {
-        // Same range as the on-screen keyboard (C0–B5, 24–95).
+        // Same range as the on-screen keyboard (C0–B6, 24–107).
         let keyboardLow = PianoKeyboardView.visibleStartNote
         let keyboardHigh = PianoKeyboardView.visibleEndNote
         let count = editedProgram.keyzones.count
@@ -743,6 +791,20 @@ struct ProgramDetailView: View {
             editedProgram.keyzones[i].lowKey = UInt8(lo)
             editedProgram.keyzones[i].highKey = UInt8(min(hi, keyboardHigh))
             lo = hi + 1
+        }
+        // Ranges moved — re-centre each zone's sample root on its middle C.
+        var report: [String] = []
+        for i in editedProgram.keyzones.indices {
+            let kz = editedProgram.keyzones[i]
+            let c = Self.middleC(low: kz.lowKey, high: kz.highKey)
+            NSLog("[ROOT] full keyboard zone %d %@–%@ → middle C %@ (%@)", i + 1,
+                  midiNoteNameStatic(kz.lowKey), midiNoteNameStatic(kz.highKey),
+                  midiNoteNameStatic(c), kz.sampleName)
+            let changed = setSampleRoot(c, forKeyzone: i, announce: false)
+            if !changed.isEmpty { report.append("\(changed[0]) \(midiNoteNameStatic(c))") }
+        }
+        if !report.isEmpty {
+            toast = ToastData(message: "Roots set to middle C: " + report.joined(separator: ", "))
         }
     }
     // MARK: - Sample root (edited from the keyzone)
@@ -782,8 +844,9 @@ struct ProgramDetailView: View {
     /// stereo keygroup, right too, so both halves stay in step. Because the
     /// root is stored per sample, any other keyzone or program using the same
     /// sample changes as well; the toast says which.
-    private func setSampleRoot(_ root: UInt8, forKeyzone idx: Int) {
-        guard editedProgram.keyzones.indices.contains(idx) else { return }
+    @discardableResult
+    private func setSampleRoot(_ root: UInt8, forKeyzone idx: Int, announce: Bool = true) -> [String] {
+        guard editedProgram.keyzones.indices.contains(idx) else { return [] }
         let kz = editedProgram.keyzones[idx]
         let names = [kz.sampleName, kz.rightSampleName]
             .map { $0.trimmingCharacters(in: .whitespaces) }
@@ -798,8 +861,9 @@ struct ProgramDetailView: View {
             NSLog("[ROOT] %@ root %@ → %@ (from keyzone %d of %@)",
                   name, from, midiNoteNameStatic(root), idx + 1, programFile.program.name)
         }
-        guard !changed.isEmpty else { return }
+        guard !changed.isEmpty else { return [] }
         editedProgram.keyzones[idx].rootNote = root   // keep the in-memory field in step
+        guard announce else { return changed }
 
         // Who else plays these samples?
         func uses(_ k: AkaiProgramKeyzone) -> Bool {
@@ -826,6 +890,18 @@ struct ProgramDetailView: View {
         toast = ToastData(message: alsoUsedBy.isEmpty
             ? "\(what) root set to \(note)"
             : "\(what) root set to \(note) — also changes \(alsoUsedBy.joined(separator: " and "))")
+        return changed
+    }
+
+    /// The C closest to the middle of lo…hi (ties go to the lower C). Used as
+    /// the root for Full Keyboard zones, so each sample plays at its original
+    /// pitch near the centre of its range: C0–B2 → C1, C3–B5 → C4.
+    static func middleC(low: UInt8, high: UInt8) -> UInt8 {
+        let mid = (Double(low) + Double(high)) / 2
+        let below = Int(floor(mid / 12)) * 12
+        let above = below + 12
+        let c = (mid - Double(below)) <= (Double(above) - mid) ? below : above
+        return UInt8(max(0, min(c, 120)))
     }
 
     private func toggleSample(_ name: String) {
@@ -895,7 +971,7 @@ struct ProgramDetailView: View {
                 }
                 kz = AkaiProgramKeyzone(
                     sampleName: name, lowKey: lo, highKey: hi, rootNote: root,
-                    tuneOffset: 0, fineTune: 0, volume: 99, pan: 0,
+                    tuneOffset: 0, fineTune: 0, volume: 0, pan: 0,
                     filterOffset: 0, filterCutoff: 99, filterKeyFollow: 0,
                     filterResonance: 0, filterModDepth1: 0, filterModDepth2: 0, filterModDepth3: 0,
                     rightSampleName: "", rightPan: 50, playbackMode: .sample,
@@ -905,7 +981,7 @@ struct ProgramDetailView: View {
             case .fullKeyboard:
                 kz = AkaiProgramKeyzone(
                     sampleName: name, lowKey: UInt8(PianoKeyboardView.visibleStartNote), highKey: UInt8(PianoKeyboardView.visibleEndNote), rootNote: 60,
-                    tuneOffset: 0, fineTune: 0, volume: 99, pan: 0,
+                    tuneOffset: 0, fineTune: 0, volume: 0, pan: 0,
                     filterOffset: 0, filterCutoff: 99, filterKeyFollow: 0,
                     filterResonance: 0, filterModDepth1: 0, filterModDepth2: 0, filterModDepth3: 0,
                     rightSampleName: "", rightPan: 50, playbackMode: .sample,
@@ -1009,7 +1085,7 @@ struct ProgramDetailView: View {
                     let kz = AkaiProgramKeyzone(
                         sampleName: sample.header.name,
                         lowKey: keyRange.low, highKey: keyRange.high, rootNote: keyRange.root,
-                        tuneOffset: 0, fineTune: 0, volume: 99, pan: 0,
+                        tuneOffset: 0, fineTune: 0, volume: 0, pan: rightSampleName.isEmpty ? 0 : -50,   // stereo pair: left hard left (L50), right hard right
                         filterOffset: 0, filterCutoff: 99, filterKeyFollow: 0,
                         filterResonance: 0, filterModDepth1: 0, filterModDepth2: 0, filterModDepth3: 0,
                         rightSampleName: rightSampleName,
@@ -1098,7 +1174,7 @@ struct ProgramDetailView: View {
                             newKeyzones.append(AkaiProgramKeyzone(
                                 sampleName: sample.header.name,
                                 lowKey: note, highKey: note, rootNote: note,
-                                tuneOffset: 0, fineTune: 0, volume: 99, pan: 0,
+                                tuneOffset: 0, fineTune: 0, volume: 0, pan: 0,
                                 filterOffset: 0, filterCutoff: 99, filterKeyFollow: 0,
                                 filterResonance: 0, filterModDepth1: 0, filterModDepth2: 0, filterModDepth3: 0,
                                 rightSampleName: "", rightPan: 50,
@@ -1109,7 +1185,7 @@ struct ProgramDetailView: View {
                             newKeyzones.append(AkaiProgramKeyzone(
                                 sampleName: sample.header.name,
                                 lowKey: UInt8(PianoKeyboardView.visibleStartNote), highKey: UInt8(PianoKeyboardView.visibleEndNote), rootNote: 60,
-                                tuneOffset: 0, fineTune: 0, volume: 99, pan: 0,
+                                tuneOffset: 0, fineTune: 0, volume: 0, pan: 0,
                                 filterOffset: 0, filterCutoff: 99, filterKeyFollow: 0,
                                 filterResonance: 0, filterModDepth1: 0, filterModDepth2: 0, filterModDepth3: 0,
                                 rightSampleName: "", rightPan: 50,
@@ -1290,6 +1366,20 @@ struct KeyzoneEditorView: View {
                         Text(keyzone.playbackMode.explanation).font(.caption).foregroundStyle(.secondary)
                             .frame(maxWidth: .infinity, alignment: .leading)
                             .fixedSize(horizontal: false, vertical: true).padding(.top, 4).padding(.bottom, 4)
+                        HStack {
+                            Text("Mute Group").frame(width: 100, alignment: .leading).font(.subheadline).foregroundStyle(.secondary)
+                            Picker("", selection: $keyzone.muteGroup) {
+                                Text("Off").tag(UInt8(0xFF))
+                                ForEach(0..<32, id: \.self) { g in Text("\(g + 1)").tag(UInt8(g)) }
+                            }
+                            .labelsHidden()
+                            .onChange(of: keyzone.muteGroup) { _, _ in onChange() }
+                            Spacer()
+                        }
+                        Text("Keygroups in the same mute group cut each other off — e.g. a closed hi-hat stops an open one. Off: plays freely.")
+                            .font(.caption).foregroundStyle(.secondary)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .fixedSize(horizontal: false, vertical: true).padding(.top, 4).padding(.bottom, 4)
                     }
                 }
                 InfoCard(title: "Tune") {
@@ -1312,24 +1402,29 @@ struct KeyzoneEditorView: View {
                             .fixedSize(horizontal: false, vertical: true).padding(.top, 4).padding(.bottom, 4)
                         HStack {
                             Text("Tune (st)").frame(width: 100, alignment: .leading).font(.subheadline).foregroundStyle(.secondary)
-                            Stepper("\(keyzone.tuneOffset)", value: $keyzone.tuneOffset, in: -24...24)
-                                .onChange(of: keyzone.tuneOffset) { _, _ in onChange() }
+                            Picker("", selection: $keyzone.tuneOffset) {
+                                ForEach((-50...50).reversed(), id: \.self) { v in
+                                    Text(v > 0 ? "+\(v) st" : "\(v) st").tag(Int8(v))
+                                }
+                            }
+                            .labelsHidden()
+                            .onChange(of: keyzone.tuneOffset) { _, _ in onChange() }
                         }
                         HStack {
                             Text("Fine (¢)").frame(width: 100, alignment: .leading).font(.subheadline).foregroundStyle(.secondary)
                             Slider(value: .init(get: { Double(keyzone.fineTune) }, set: { keyzone.fineTune = Int8($0); onChange() }), in: -50...50, step: 1)
-                            Text("\(keyzone.fineTune)¢").frame(width: 35, alignment: .trailing).font(.system(.caption, design: .monospaced))
+                            Text("\(keyzone.fineTune)¢").frame(width: 35).font(.system(.body, design: .monospaced))
                         }
                         HStack {
-                            Text("Volume").frame(width: 100, alignment: .leading).font(.subheadline).foregroundStyle(.secondary)
-                            Slider(value: .init(get: { Double(keyzone.volume) }, set: { keyzone.volume = UInt8($0); onChange() }), in: 0...99, step: 1)
-                            Text("\(keyzone.volume)").frame(width: 35, alignment: .trailing).font(.system(.body, design: .monospaced))
+                            Text("Loudness").frame(width: 100, alignment: .leading).font(.subheadline).foregroundStyle(.secondary)
+                            Slider(value: .init(get: { Double(keyzone.volume) }, set: { keyzone.volume = Int8($0); onChange() }), in: -50...50, step: 1)
+                            Text(keyzone.volume > 0 ? "+\(keyzone.volume)" : "\(keyzone.volume)").frame(width: 35).font(.system(.body, design: .monospaced))
                         }
                         HStack {
                             Text("Pan").frame(width: 100, alignment: .leading).font(.subheadline).foregroundStyle(.secondary)
                             Slider(value: .init(get: { Double(keyzone.pan) }, set: { keyzone.pan = Int8($0); onChange() }), in: -50...50, step: 1)
                             Text(keyzone.pan == 0 ? "C" : keyzone.pan > 0 ? "R\(keyzone.pan)" : "L\(abs(keyzone.pan))")
-                                .frame(width: 35, alignment: .trailing).font(.system(.caption, design: .monospaced))
+                                .frame(width: 35).font(.system(.body, design: .monospaced))
                         }
                         if !keyzone.rightSampleName.trimmingCharacters(in: .whitespaces).isEmpty {
                             VStack(alignment: .leading, spacing: 4) {
@@ -1337,7 +1432,7 @@ struct KeyzoneEditorView: View {
                                     Text("Right Pan").frame(width: 100, alignment: .leading).font(.subheadline).foregroundStyle(.secondary)
                                     Slider(value: .init(get: { Double(keyzone.rightPan) }, set: { keyzone.rightPan = Int8($0); onChange() }), in: -50...50, step: 1)
                                     Text(keyzone.rightPan == 0 ? "C" : keyzone.rightPan > 0 ? "R\(keyzone.rightPan)" : "L\(abs(keyzone.rightPan))")
-                                        .frame(width: 35).font(.system(.caption, design: .monospaced))
+                                        .frame(width: 35).font(.system(.body, design: .monospaced))
                                 }
                                 Text("Pan for the stereo right channel (zone 2: \(keyzone.rightSampleName.trimmingCharacters(in: .whitespaces))). Real hardware convention is hard left/right (-50/+50).")
                                     .font(.caption2).foregroundStyle(.secondary)
@@ -1436,7 +1531,7 @@ struct KeyzoneEditorView: View {
                             HStack {
                                 Text(modSource1.displayName).frame(width: 100, alignment: .leading).font(.subheadline).foregroundStyle(.secondary)
                                 Slider(value: .init(get: { Double(keyzone.filterModDepth1) }, set: { keyzone.filterModDepth1 = Int8($0); onChange() }), in: -50...50, step: 1)
-                                Text("\(keyzone.filterModDepth1)").frame(width: 35).font(.system(.caption, design: .monospaced))
+                                Text("\(keyzone.filterModDepth1)").frame(width: 35).font(.system(.body, design: .monospaced))
                             }
                             Text("\(modSource1.helpText) Range is ±50; the source itself is set once in Program Settings, shared by every keygroup.")
                                 .font(.caption2).foregroundStyle(.secondary)
@@ -1448,7 +1543,7 @@ struct KeyzoneEditorView: View {
                             HStack {
                                 Text(modSource2.displayName).frame(width: 100, alignment: .leading).font(.subheadline).foregroundStyle(.secondary)
                                 Slider(value: .init(get: { Double(keyzone.filterModDepth2) }, set: { keyzone.filterModDepth2 = Int8($0); onChange() }), in: -50...50, step: 1)
-                                Text("\(keyzone.filterModDepth2)").frame(width: 35).font(.system(.caption, design: .monospaced))
+                                Text("\(keyzone.filterModDepth2)").frame(width: 35).font(.system(.body, design: .monospaced))
                             }
                             Text("\(modSource2.helpText) Range is ±50; the source itself is set once in Program Settings, shared by every keygroup.")
                                 .font(.caption2).foregroundStyle(.secondary)
@@ -1460,7 +1555,7 @@ struct KeyzoneEditorView: View {
                             HStack {
                                 Text(modSource3.displayName).frame(width: 100, alignment: .leading).font(.subheadline).foregroundStyle(.secondary)
                                 Slider(value: .init(get: { Double(keyzone.filterModDepth3) }, set: { keyzone.filterModDepth3 = Int8($0); onChange() }), in: -50...50, step: 1)
-                                Text("\(keyzone.filterModDepth3)").frame(width: 35).font(.system(.caption, design: .monospaced))
+                                Text("\(keyzone.filterModDepth3)").frame(width: 35).font(.system(.body, design: .monospaced))
                             }
                             Text("\(modSource3.helpText) Range is ±50; the source itself is set once in Program Settings, shared by every keygroup.")
                                 .font(.caption2).foregroundStyle(.secondary)
@@ -1472,7 +1567,7 @@ struct KeyzoneEditorView: View {
                             HStack {
                                 Text("Filter Trim").frame(width: 100, alignment: .leading).font(.subheadline).foregroundStyle(.secondary)
                                 Slider(value: .init(get: { Double(keyzone.filterOffset) }, set: { keyzone.filterOffset = Int8($0); onChange() }), in: -50...50, step: 1)
-                                Text("\(keyzone.filterOffset)").frame(width: 35).font(.system(.caption, design: .monospaced))
+                                Text("\(keyzone.filterOffset)").frame(width: 35).font(.system(.body, design: .monospaced))
                             }
                             Text("Small ±50 adjustment on top of Cutoff, for matching tone between adjacent keygroups.")
                                 .font(.caption2).foregroundStyle(.secondary)
@@ -1552,12 +1647,14 @@ struct MidiKeyPicker: View {
     let label: String
     @Binding var value: UInt8
     let onChange: () -> Void
+    /// S3000 key range is C0–G8 (24–127) — manual p.64; the sampler won't go lower.
+    var range: ClosedRange<Int> = 24...127
     private static let noteNames = ["C","C#","D","D#","E","F","F#","G","G#","A","A#","B"]
     var body: some View {
         HStack {
             Text(label).frame(width: 80, alignment: .leading).font(.subheadline)
             Picker("", selection: $value) {
-                ForEach((0..<128).reversed(), id: \.self) { note in Text(noteName(UInt8(note))).tag(UInt8(note)) }
+                ForEach(range.reversed(), id: \.self) { note in Text(noteName(UInt8(note))).tag(UInt8(note)) }
             }
             .labelsHidden().onChange(of: value) { _, _ in onChange() }
         }

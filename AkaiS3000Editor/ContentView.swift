@@ -49,14 +49,16 @@ struct ContentView: View {
         case samples = "Samples"
         case programs = "Programs"
         case multis = "Multis"
-        case diskInfo = "Disk Info"
+        case diskInfo = "Floppy Disk"
+        case greaseweazle = "Greaseweazle"
 
         var icon: String {
             switch self {
             case .samples: return "waveform"
             case .programs: return "pianokeys"
             case .multis: return "square.stack.3d.up"
-            case .diskInfo: return "externaldrive.badge.questionmark"
+            case .diskInfo: return "externaldrive"   // UI draws FloppyDiskIcon (no SF Symbol exists)
+            case .greaseweazle: return "opticaldiscdrive.fill"
             }
         }
     }
@@ -81,8 +83,10 @@ struct ContentView: View {
                     Divider()
                 }
                 Group {
-                    if ownsGreaseweazleLog && (greaseweazle.isBusy || !greaseweazle.logLines.isEmpty) {
-                        GreaseweazleLogView(runner: greaseweazle)
+                    if selectedTab == .greaseweazle {
+                        // Available with or without a disk loaded (e.g. to read a floppy).
+                        GreaseweazleLogView(runner: greaseweazle, diskImage: diskImage,
+                                            showsLog: ownsGreaseweazleLog)
                     } else if !diskImage.isLoaded {
                         WelcomeView(diskImage: diskImage,
                                     onNew: { createDiskImage() },
@@ -124,6 +128,8 @@ struct ContentView: View {
                             }
                         case .diskInfo:
                             DiskInfoView(diskImage: diskImage)
+                        case .greaseweazle:
+                            EmptyView()   // handled above
                         }
                     }
                 }
@@ -132,6 +138,14 @@ struct ContentView: View {
             .toolbar {
                 ToolbarItemGroup(placement: .primaryAction) {
                     if diskImage.isLoaded {
+                        // Start screen has its own New/Open buttons, so only here.
+                        Button {
+                            createDiskImage()
+                        } label: {
+                            Label("New Disk Image", systemImage: "plus")
+                        }
+                        .help("Create a new blank disk image (opens in a new window)")
+
                         Button {
                             saveAll()
                         } label: {
@@ -166,7 +180,10 @@ struct ContentView: View {
             shouldClose: { UnsavedChangesPrompt.confirm(diskImage, action: "closing") }))
         .onChange(of: greaseweazle.isBusy) { _, busy in
             // The read/write was started from the key window — that's this one.
-            if busy, controlActiveState == .key { claimGreaseweazle() }
+            if busy, controlActiveState == .key {
+                claimGreaseweazle()
+                selectedTab = .greaseweazle   // show the progress/log page
+            }
         }
         .onDisappear {
             DiskImageRegistry.shared.unregister(diskImage)
@@ -179,19 +196,15 @@ struct ContentView: View {
             }
         }
         .onChange(of: selectedTab) { _, _ in
-            clearOwnGreaseweazleLog()
             scheduleContentReady()
         }
         .onChange(of: selectedSampleID) { _, _ in
-            clearOwnGreaseweazleLog()
             scheduleContentReady()
         }
         .onChange(of: selectedProgramID) { _, _ in
-            clearOwnGreaseweazleLog()
             scheduleContentReady()
         }
         .onChange(of: selectedMultiID) { _, _ in
-            clearOwnGreaseweazleLog()
             scheduleContentReady()
         }
         .onAppear {

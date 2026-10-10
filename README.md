@@ -241,11 +241,32 @@ block 17+     file data (FAT-chained)
 17       C     11     (osver)
 ```
 
-#### Global settings — block 4 offset 0x292
+The S3000XL rewrites block 0 on every save, and what it writes varies ?: one save
+left every slot as spaces (`0x20`) with `0x12`=`00`; a later save (after a multi
+was loaded) filled every slot with the multi's name (`NEW MULTI`) and `0x12`=`10`.
+It doesn't seem to matter what we write here — the sampler overwrites it.
+
+#### Volume label — absolute offset 0x1280 (block 4 + 0x280)
+
+```
+1280-128b  A12   volume name *
+128c-128e  C3    00 00 00 *
+128f       C     11  osver *
+1290-1291  C2    00 00
+```
+
+**Nothing here is free space** — `0x128c–0x1299` is all label/global data the
+sampler reads (see Global settings below for `0x1292–0x1299`).
+
+When the S3000XL saves a floppy it may replace the volume name with `NOT NAMED` ?
+(seen once: a disk named `NEW-DISK` came back as `NOT NAMED`).
+
+#### Global settings — block 4 offset 0x292 (absolute 0x1292)
 
 ```
 292-299  C8    01 00 00 00 32 09 0c ff   factory defaults *
                                           leaving zero → corrupt transpose on load
+293      C     selected program, 0-indexed (00 = program 1 on the SLCT screen) *
 ```
 
 #### FAT — one 16-bit LE entry per block
@@ -336,21 +357,21 @@ other   next block number
 10       C  0  MIDI channel (0-15, ff=omni)  *
 11       C 31  polyphony (value = voices-1, so 31=32 voices)  *
 12       C  1  priority: 0=low, 1=normal, 2=high, 3=hold  *
-13       C 24  play range low (24-127 = C0-G8)
+13       C 24  play range low (24-127 = C0-G8; 24 is the floor — manual p.64, sampler won't go lower)  *
 14       C127  play range high
-15       C  0  play octave shift ±2  [Ohsaki] / bend range down 0-24 [our use] ?
+15       C  0  TRANS (MIDI page transpose) ±50 semitones, default 0  *  [Ohsaki: octave shift ±2]
 16       C ff  individual output (0-7, ff=off)
 17       C 99  stereo level 0-99  *
 18       C  0  stereo pan
-19       C 80  loudness 0-99  *
-1a       C 20  velocity > loud  *
+19       C 80  loudness 0-99, default 80 (manual p.26; 99 = no velocity sensitivity)  *
+1a       C 20  velocity > loud, signed ±50, default +20 (manual)  *
 1b       C  0  key > loud
 1c       C  0  pressure > loud
 1d       C  0  pan LFO rate
 1e       C 99  pan depth
 1f       C  0  pan LFO delay
 20       C  0  key > pan position
-21       C 50  LFO speed
+21       C 50  LFO1 speed  * (factory = 50)
 22       C  0  LFO fixed depth
 23       C  0  LFO delay
 24       C 30  modwheel > depth
@@ -375,10 +396,15 @@ other   next block number
 43       C  0  key > LFO rate
 44       C  0  key > LFO depth
 45       C  0  key > LFO delay
-46       C 50  voice output scale
+46       C 50  card (effects) out level 0-99 — MIX page, single mode  *  [Ohsaki: voice output scale, default 50]
 47       C  0  stereo output scale
-48-bf           reserved / unknown
-49       C  2  unknown, default 2  ?
+48-bf           reserved / unknown (except below) — for unmapped bytes, the factory
+                TEST PROGRAM's values are a safe default (every mapped field matches it)
+6e       C  0  portamento rate/time 0-99  *
+6f       C  0  portamento type 0=rate, 1=time  *
+70       C  0  portamento 0=off, 1=on  *
+72       C 25  FX send 0-99  *
+49       C  2  bend down 0-24 (default 2)  *
 4a       C  0  bend mode: 0=normal, 1=held  *
 54       C  5  filter mod source #1 (0-13, see below)  *
 55       C  8  filter mod source #2  *
@@ -434,6 +460,9 @@ other   next block number
 9d       C 50  ENV2 rate 2  *
 9e       C 99  ENV2 level 2  *
 9f       C  0  ENV2 level 4  *
+96       C 50  LFO1 > pitch 0-99  *
+a0       C ff  mute group: ff=OFF, 00=group 1 … 1f=group 32  *
+a2       C 25  FX send 0-99 (per keygroup)  *
 ```
 
 #### Velocity zone — 0x18 bytes (4 zones at keygroup offsets 0x22, 0x3a, 0x52, 0x6a)
@@ -444,7 +473,7 @@ other   next block number
 0d       C127  velocity high
 0e       C  0  tune offset cents / 256
 0f       C  0  tune offset semitones
-10       C  0  loudness offset
+10       C  0  loudness offset, signed ±50 (manual; factory TEST PROGRAM = 0)  *
 11       C  0  filter freq. offset
 12       C  0  pan offset
 13       C  0  loop mode: 0=sample setting, 1=loop, 2=loop until release,
@@ -495,10 +524,17 @@ Zones 3-4 unused in this app.
 +03-0e   A12   program name  *
 +0f      C     padding
 +10      C     MIDI channel 0-indexed  *
-+11-16   C6    unknown, preserved
++11      C     unknown, preserved
++12      C  1  priority 0=low 1=norm 2=high 3=hold (mirrors program 0x12)  *
++13      C 24  key range low  (mirrors program 0x13)  *
++14      C127  key range high (mirrors program 0x14)  *
++15      C     unknown, preserved
++16      C ff  individual output: ff=OFF, 0-7 = out 1-8 (mirrors program 0x16)  *
 +17      C 99  level 0-99  *
 +18      C     pan signed  *
-+19-70   C88   unknown (OUT/TUNE/RNGE/PRIO), preserved
++19-45   C45   unknown (TUNE/RNGE/PRIO), preserved
++46      C 50  output level 0-99 (mirrors program 0x46)  *
++47-70   C42   unknown, preserved
 +71      C     FX bus: 0=off, 1=FX1, 2=FX2, 3=RV3, 4=RV4  *
 +72      C     FX send 0-99  *
 +be-bf   C2    end link pointer: ffff=unassigned  *must be ffff or wrong multi loads
@@ -510,8 +546,6 @@ Zones 3-4 unused in this app.
 
 ```
 Filter Key Follow    manual says +12    hardware shows 0   *
-Loudness             manual says 80     hardware shows 99  *  (program-level)
-Velocity > Loud      manual says 20     hardware shows 99  *
 ```
 
 ---
@@ -519,10 +553,6 @@ Velocity > Loud      manual says 20     hardware shows 99  *
 ### Cross-reference: disputed or unconfirmed offsets
 
 ```
-Program 0x15   Ohsaki: play octave shift ±2
-               This app: bend range down 0-24
-               Status: not yet hardware-confirmed  ?
-
 Keygroup 0x84  Ohsaki: attack hold until loop
                This app: pitchMode TRACK/CONST
                Ohsaki also notes "84??" next to 0x85-88 constant pitch
@@ -550,16 +580,17 @@ offset  akaiutil                  ohsaki              manual              this p
 0x10    midich1                   MIDI channel        MIDI channel        confirmed *               agree
 0x11    polyphony (in s1000)      polyphony           polyphony           confirmed *               agree
 0x12    priority (in s1000)       priority            priority            confirmed *               agree
-0x15    oct                       octave shift ±2     -                   we write bend down here   dispute ?
+0x13    keylo                     play range low      key range           confirmed * (floor C0=24) agree
+0x15    oct                       octave shift ±2     TRANS ±50           TRANS, default 0 *        dispute (Ohsaki naming)
 0x17    stereo level (in s1000)   stereo level        stereo level        confirmed *               agree
-0x19    loudness (in s1000)       loudness            basic loudness      confirmed * (default 99)  agree / manual wrong default
-0x1a    velocity > loud           velocity > loud     vel > loud          confirmed *               agree
+0x19    loudness (in s1000)       loudness            basic loudness      confirmed * (default 80)  agree
+0x1a    velocity > loud           velocity > loud     vel > loud ±50      modelled, default +20     agree
 0x27    -                         bend up 0-24        bendwheel up        confirmed *               agree
 0x28    -                         pressure > pitch    pressure > pitch    confirmed * (default 0)   agree
 0x29    kgxf                      kg crossfade        kg crossfade        not modelled              not modelled
 0x2a    kgnum                     # of keygroups      # of keygroups      confirmed *               agree
 0x3d    -                         voice assign        reassignment        confirmed *               agree
-0x49    -                         -                   -                   default 2, unknown        our finding ?
+0x49    -                         -                   bend down           confirmed * (default 2)   our finding
 0x4a    -                         -                   -                   bend mode NORMAL/HELD *   our finding
 0x54    -                         -                   -                   filter mod source 1 *     our finding
 0x55    -                         -                   -                   filter mod source 2 *     our finding
@@ -567,7 +598,8 @@ offset  akaiutil                  ohsaki              manual              this p
 0x18    -                         stereo pan          stereo pan          not modelled              not modelled
 0x1b-c  -                         key/pressure>loud   key/pres > loud     not modelled              not modelled
 0x1d-f  -                         pan LFO             pan LFO rate/depth  not modelled              not modelled
-0x20-6  -                         LFO/mod params      LFO speed/depth     not modelled              not modelled
+0x21    -                         LFO speed           LFO1 speed          default 50 (factory 50)   agree
+0x20,22-26 -                      LFO/mod params      LFO depth/delay     not modelled              not modelled
 0x38    -                         echo output         echo output level   not modelled              not modelled
 0x39    -                         modwheel pan        mod > pan           not modelled              not modelled
 0x3a    -                         start coherence     start coherence     not modelled              not modelled
@@ -576,7 +608,12 @@ offset  akaiutil                  ohsaki              manual              this p
 0x3e-40 -                         soft pedal          soft pedal          not modelled              not modelled
 0x41-42 -                         tune offset         tune                not modelled              not modelled
 0x43-45 -                         key > LFO           key > LFO           not modelled              not modelled
-0x46-47 -                         output scale        output scale        not modelled              not modelled
+0x46    -                         voice output scale  card out level      confirmed * (default 50)  agree
+0x47    -                         stereo output scale stereo output scale not modelled              not modelled
+0x6e    -                         -                   portamento rate     confirmed * (default 0)   our finding
+0x6f    -                         -                   portamento type     0=rate 1=time *           our finding
+0x70    -                         -                   portamento on/off   confirmed * (default off) our finding
+0x72    -                         -                   FX send             confirmed * (default 25)  our finding
 
 KEYGROUP
 
@@ -594,7 +631,7 @@ offset  akaiutil                  ohsaki              manual              this p
 0x0f    amp release               amp ADSR            release             confirmed *               agree
 0x10-13 -                         vel/key > amp       vel/key > amp       not modelled              not modelled
 0x14-17 -                         filter ENV2         ENV2 attack/decay   confirmed *               agree
-0x1e    velxf                     vel zone crossfade  vel zone xfade      not modelled              not modelled
+0x1e    velxf                     vel zone crossfade  vel zone xfade      default ON (factory = 1)  agree
 0x1f-21 dummy2[3]                 internal            -                   must be 0xffff *          agree / extended (silence bug)
 0x22+   velzone[4]                velocity zones      velocity zones      zone 1 *, zone 2 stereo   agree
 0x83    -                         fixed rate detune   -                   not modelled              not modelled
@@ -607,6 +644,9 @@ offset  akaiutil                  ohsaki              manual              this p
 0x98    -                         -                   mod depth 2         filter mod depth 2 *      our finding
 0x99    -                         -                   mod depth 3         filter mod depth 3 *      our finding
 0x9c-9f -                         -                   -                   ENV2 levels/rates *       our finding
+0x96    -                         ??                  LFO1 > pitch        confirmed * (default 50)  our finding
+0xa0    -                         -                   mute group          ff=OFF, 0=group 1 *       our finding
+0xa2    -                         -                   kg FX send          confirmed * (default 25)  our finding
 
 SAMPLE HEADER
 
@@ -631,6 +671,13 @@ offset  akaiutil                  ohsaki              manual              this p
 ```
 
 ---
+
+### Finding a field by byte-diff
+
+Load a disk on the S3000XL, change exactly one parameter, save, and diff the image
+against the original. Ignore block 0 (the sampler rewrites it on every save) and any
+bytes past the end of a file within its last block — the sampler fills that slack
+with leftover RAM, so it isn't part of the file.
 
 ### Reading a floppy with GreaseWeazle
 

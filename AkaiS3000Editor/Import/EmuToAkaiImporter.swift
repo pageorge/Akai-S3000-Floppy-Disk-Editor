@@ -257,7 +257,8 @@ extension AkaiDiskImage {
             rootNote: UInt8(max(0, min(127, sampleRoot))),
             tuneOffset: Int8(max(-36, min(36, semis))),
             fineTune: Int8(fine),
-            volume: EmuToAkai.scale127to99(z.level),
+            // Zone loudness is a ±50 trim: EMU full level (127) → 0, silence → −50.
+            volume: Int8((Double(z.level) / 127.0 * 50.0).rounded()) - 50,
             pan: Int8(pan),
             filterOffset: 0, filterCutoff: 99, filterKeyFollow: 0,
             filterResonance: 0, filterModDepth1: 0, filterModDepth2: 0, filterModDepth3: 0,

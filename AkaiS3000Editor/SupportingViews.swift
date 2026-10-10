@@ -862,12 +862,55 @@ struct DiskPathBar: View {
     }
 }
 
+// MARK: - Floppy disk icon
+
+/// A classic 3.5" floppy disk, drawn as a single shape so it tints with
+/// `.foregroundStyle` exactly like an SF Symbol (SF Symbols has no floppy).
+/// Body with the clipped top-right corner, metal shutter with its slot, and
+/// the label area — shutter and label are cut out (even-odd fill).
+struct FloppyDiskShape: Shape {
+    func path(in r: CGRect) -> Path {
+        func pt(_ x: CGFloat, _ y: CGFloat) -> CGPoint {
+            CGPoint(x: r.minX + x * r.width, y: r.minY + y * r.height)
+        }
+        func rect(_ x0: CGFloat, _ y0: CGFloat, _ x1: CGFloat, _ y1: CGFloat) -> CGRect {
+            CGRect(origin: pt(x0, y0), size: CGSize(width: (x1 - x0) * r.width, height: (y1 - y0) * r.height))
+        }
+        var p = Path()
+        // Body (corner chamfer top-right)
+        p.move(to: pt(0.06, 0.06))
+        p.addLine(to: pt(0.80, 0.06))
+        p.addLine(to: pt(0.94, 0.20))
+        p.addLine(to: pt(0.94, 0.94))
+        p.addLine(to: pt(0.06, 0.94))
+        p.closeSubpath()
+        // Shutter (hole) with its slot (filled again by even-odd)
+        p.addRect(rect(0.26, 0.06, 0.70, 0.38))
+        p.addRect(rect(0.52, 0.12, 0.62, 0.32))
+        // Label (hole)
+        p.addRoundedRect(in: rect(0.18, 0.50, 0.82, 0.88), cornerSize: CGSize(width: r.width * 0.04, height: r.width * 0.04))
+        return p
+    }
+}
+
+struct FloppyDiskIcon: View {
+    var body: some View {
+        FloppyDiskShape()
+            .fill(style: FillStyle(eoFill: true))
+            .aspectRatio(1, contentMode: .fit)
+    }
+}
+
 // MARK: - Greaseweazle Log View
 
-/// Main-window view shown while Greaseweazle is reading/writing, or after it has
-/// finished (until dismissed). Shows a progress bar and a live, scrolling log.
+/// The Greaseweazle page (sidebar node): drive/format pickers and Read/Write at
+/// the top, then the file, progress bar and live log of the current or last job.
+/// The log stays until the next job starts.
 struct GreaseweazleLogView: View {
     @ObservedObject var runner: GreaseweazleRunner
+    @ObservedObject var diskImage: AkaiDiskImage
+    /// False when another window started the current job — its log shows there.
+    var showsLog: Bool = true
 
     private var title: String {
         switch runner.activity {
@@ -888,18 +931,17 @@ struct GreaseweazleLogView: View {
                         .font(.subheadline).foregroundStyle(.secondary)
                 }
                 Spacer()
-                if runner.isBusy {
-                    Button(role: .destructive) { runner.cancel() } label: {
-                        Label("Cancel", systemImage: "stop.fill")
-                    }
-                    .buttonStyle(.bordered)
-                } else {
-                    Button { runner.clearLog() } label: {
-                        Label("Dismiss", systemImage: "xmark")
-                    }
-                    .buttonStyle(.bordered)
-                }
             }
+
+            GreaseweazleControls(runner: runner, diskImage: diskImage)
+                .frame(maxWidth: 420, alignment: .leading)
+
+            if !showsLog {
+                Text(runner.isBusy ? "A job started in another window is running — its log is shown there."
+                                   : "The last job ran in another window.")
+                    .font(.callout).foregroundStyle(.secondary)
+                Spacer()
+            } else {
 
             // Full path of the file being read/written.
             if let url = runner.currentFileURL {
@@ -933,6 +975,11 @@ struct GreaseweazleLogView: View {
             ScrollViewReader { proxy in
                 ScrollView {
                     VStack(alignment: .leading, spacing: 2) {
+                        if runner.logLines.isEmpty {
+                            Text("Nothing read or written yet — choose a drive and format, then Read or Write.")
+                                .font(.system(.caption, design: .monospaced))
+                                .foregroundStyle(.tertiary)
+                        }
                         ForEach(Array(runner.logLines.enumerated()), id: \.offset) { idx, line in
                             Text(line)
                                 .font(.system(.caption, design: .monospaced))
@@ -942,8 +989,12 @@ struct GreaseweazleLogView: View {
                                 .id(idx)
                         }
                     }
+                    // Full width even when empty — otherwise the box shrinks to
+                    // its (empty) content and only widens once lines arrive.
+                    .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(12)
                 }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .background(Color(nsColor: .textBackgroundColor))
                 .clipShape(RoundedRectangle(cornerRadius: 8))
                 .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(Color.secondary.opacity(0.2)))
@@ -951,6 +1002,7 @@ struct GreaseweazleLogView: View {
                     if count > 0 { withAnimation { proxy.scrollTo(count - 1, anchor: .bottom) } }
                 }
             }
+            } // end showsLog
         }
         .padding(24)
     }
@@ -967,6 +1019,9 @@ struct GreaseweazleLogView: View {
 
 struct InfoCard<Content: View>: View {
     let title: String
+    /// Pass a binding to make the card collapsible (chevron in the title row,
+    /// same style as the sidebar's Samples/Programs toggles).
+    var isExpanded: Binding<Bool>? = nil
     @ViewBuilder let content: () -> Content
 
     var body: some View {
@@ -981,9 +1036,22 @@ struct InfoCard<Content: View>: View {
         // callers passing several sibling views (e.g. multiple InfoRows) keep
         // the same visual spacing as before.
         VStack(alignment: .leading, spacing: 6) {
-            Text(title)
-                .font(.headline.weight(.semibold))
-                .foregroundStyle(.primary)
+            HStack {
+                Text(title)
+                    .font(.headline.weight(.semibold))
+                    .foregroundStyle(.primary)
+                if let isExpanded {
+                    Spacer()
+                    Image(systemName: isExpanded.wrappedValue ? "chevron.down" : "chevron.right")
+                        .font(.system(size: 10, weight: .semibold)).foregroundStyle(.secondary)
+                }
+            }
+            .contentShape(Rectangle())
+            .onTapGesture {
+                guard let isExpanded else { return }
+                withAnimation(.easeInOut(duration: 0.2)) { isExpanded.wrappedValue.toggle() }
+            }
+            if isExpanded?.wrappedValue ?? true {
             // Each top-level row of `content` is forced to the card's full width
             // (see FullWidthRows). That single rule is what makes every control,
             // caption and label inside a card behave consistently: intrinsic
@@ -998,6 +1066,7 @@ struct InfoCard<Content: View>: View {
             .padding(10)
             .background(RoundedRectangle(cornerRadius: 6).fill(Color(nsColor: .controlBackgroundColor).opacity(0.4)))
             .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(Color.secondary.opacity(0.2)))
+            }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
     }
@@ -1571,8 +1640,8 @@ struct DiskInfoView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 24) {
                 HStack {
-                    Image(systemName: "internaldrive.fill")
-                        .font(.largeTitle)
+                    FloppyDiskIcon()
+                        .frame(width: 34, height: 34)
                         .foregroundStyle(.blue)
                     VStack(alignment: .leading, spacing: 4) {
                         // Read-only — this is an info screen, not an editor.

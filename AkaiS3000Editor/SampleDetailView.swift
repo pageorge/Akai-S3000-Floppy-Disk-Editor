@@ -352,6 +352,8 @@ struct SampleDetailView: View {
         }
         .onAppear {
             keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
+                // Space in another disk image's window shouldn't play this sample.
+                guard self.diskImage.ownsKeyEvent(event) else { return event }
                 if event.keyCode == 49 && !self.isEditingName { self.togglePlayback(); return nil }
                 return event
             }
@@ -722,92 +724,81 @@ struct SampleListView: View {
             }
             .padding()
             Divider()
-            if diskImage.samples.isEmpty {
-                VStack(spacing: 16) {
-                    ContentUnavailableView("No Samples", systemImage: "waveform",
-                        description: Text("Drag a WAV file here or browse to import."))
-                    Button {
-                        showingImport = true
-                    } label: {
-                        Label("Browse for Samples", systemImage: "square.and.arrow.down")
-                            .padding(.horizontal, 16)
-                            .padding(.vertical, 8)
-                    }
-                    .buttonStyle(.borderedProminent)
+            VStack(spacing: 16) {
+                ContentUnavailableView(diskImage.samples.isEmpty ? "No Samples" : "Add Samples", systemImage: "waveform",
+                    description: Text("Drag a sample here or browse to import."))
+                Button {
+                    showingImport = true
+                } label: {
+                    Label("Browse for Samples", systemImage: "square.and.arrow.down")
+                        .padding(.horizontal, 16)
+                        .padding(.vertical, 8)
                 }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .fileImporter(isPresented: $showingImport,
-                              allowedContentTypes: [.audio],
-                              allowsMultipleSelection: true) { result in
-                    guard case .success(let urls) = result else { return }
-                    importURLs(urls)
+                .buttonStyle(.borderedProminent)
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .fileImporter(isPresented: $showingImport,
+                          allowedContentTypes: [.audio],
+                          allowsMultipleSelection: true) { result in
+                guard case .success(let urls) = result else { return }
+                importURLs(urls)
+            }
+            .alert(duplicateCount == 1 ? "Sample already exists" : "Samples already exist", isPresented: $duplicateAlert) {
+                Button("Import Anyway") {
+                    NSLog("[IMPORT] SampleDetailView duplicate prompt → Import Anyway")
+                    pendingImport?(); pendingImport = nil
                 }
-                .alert(duplicateCount == 1 ? "Sample already exists" : "Samples already exist", isPresented: $duplicateAlert) {
-                    Button("Import Anyway") { pendingImport?(); pendingImport = nil }
-                    Button(duplicateHasOtherFiles ? "Skip" : "Cancel", role: .cancel) { pendingImport = nil }
-                } message: {
-                    Text(duplicateMessage)
+                Button(duplicateHasOtherFiles ? "Skip" : "Cancel", role: .cancel) {
+                    NSLog("[IMPORT] SampleDetailView duplicate prompt → %@", duplicateHasOtherFiles ? "Skip" : "Cancel")
+                    pendingImport = nil
                 }
-            } else {
-                Table(diskImage.samples, selection: $selectedSampleID) {
-                    TableColumn("Name") { s in
-                        Text(s.header.name.isEmpty ? s.directoryEntry.name : s.header.name)
-                            .font(.system(.body, design: .monospaced))
-                    }
-                    TableColumn("Root") { s in Text(midiNoteName(s.header.midiRootNote)) }.width(50)
-                    TableColumn("Rate") { s in Text("\(s.header.sampleRate / 1000)kHz") }.width(60)
-                    TableColumn("Duration") { s in
-                        let dur = s.header.sampleRate > 0
-                            ? Double(s.header.numSamples) / Double(s.header.sampleRate) : 0
-                        Text(dur < 1 ? String(format: "%.0fms", dur*1000) : String(format: "%.2fs", dur))
-                    }.width(70)
-                    TableColumn("Loop") { s in
-                        let loops = s.header.playbackMode == .loop || s.header.playbackMode == .loopNotRel
-                        Image(systemName: loops ? "repeat" : "minus")
-                            .foregroundStyle(loops ? .blue : .secondary)
-                    }.width(40)
-                    TableColumn("Size") { s in
-                        Text(formatSize(Int(s.directoryEntry.size))).foregroundStyle(.secondary)
-                    }.width(70)
-                }
+            } message: {
+                Text(duplicateMessage)
             }
         }
     }
 
-    private func midiNoteName(_ note: UInt8) -> String {
-        let names = ["C","C#","D","D#","E","F","F#","G","G#","A","A#","B"]
-        return "\(names[Int(note) % 12])\(Int(note) / 12 - 2)"
-    }
-
-    private func formatSize(_ bytes: Int) -> String {
-        if bytes < 1024 { return "\(bytes)B" }
-        if bytes < 1024*1024 { return String(format: "%.0fKB", Double(bytes)/1024) }
-        return String(format: "%.1fMB", Double(bytes)/1024/1024)
-    }
-
-    private func importOneURL(_ url: URL, pcm: Data, rate: Int, channels: Int, loFi: Bool) -> AkaiSample? {
+    private func importOneURL(_ url: URL, pcm: Data, rate: Int, channels: Int, loFi: Bool,
+                              consent: AudioImportPipeline.ResampleConsent) -> AkaiSample? {
         let left = channels >= 2 ? AkaiDiskImage.deinterleaveStereo(pcm, channels: channels).0 : pcm
         let right = channels >= 2 ? AkaiDiskImage.deinterleaveStereo(pcm, channels: channels).1 : nil
-        let stem = AkaiDiskImage.sanitizeName(url.deletingPathExtension().lastPathComponent)
-        let stemL = channels >= 2 ? AkaiDiskImage.sanitizeNamePreservingEnd(url.deletingPathExtension().lastPathComponent, maxLen: 10) + "-L" : stem
-        let stemR = AkaiDiskImage.sanitizeNamePreservingEnd(url.deletingPathExtension().lastPathComponent, maxLen: 10) + "-R"
+        NSLog("[IMPORT] SampleDetailView.importOneURL %@ ch=%d rate=%d loFi=%d", url.lastPathComponent, channels, rate, loFi ? 1 : 0)
+        let picked = diskImage.reserveImportNames(for: url.deletingPathExtension().lastPathComponent,
+                                                  stereo: channels >= 2)
+        let stemL = picked.left
+        let stemR = picked.right ?? ""
         let (finalL, finalRate): (Data, UInt32)
         if loFi {
             let (loPCM, loRate) = AkaiDiskImage.applyLoFi(pcm: left, fromRate: rate)
             finalL = loPCM; finalRate = loRate
         } else {
-            finalL = left; finalRate = UInt32(rate)
+            // confirmedAkaiRate shows the resample prompt if needed; if cancelled it throws,
+            // and we silently return nil so the per-file error doesn't block the whole batch.
+            guard let confirmedRate = try? AudioImportPipeline.confirmedAkaiRate(fromRate: rate, consent: consent) else { return nil }
+            finalRate = confirmedRate
+            finalL = confirmedRate != UInt32(rate)
+                ? AkaiDiskImage.resampleToAkaiRate(pcm: left, fromRate: rate).0
+                : left
         }
-        let leftSample = try? diskImage.addImportedSample(name: stemL, sampleRate: finalRate, numChannels: 1, pcmData: finalL)
+        let leftSample = try? diskImage.addImportedSample(name: stemL, sampleRate: finalRate, numChannels: 1, pcmData: finalL, forceName: true)
         if channels >= 2, let r = right {
-            let finalR = loFi ? AkaiDiskImage.applyLoFi(pcm: r, fromRate: rate).0 : r
-            _ = try? diskImage.addImportedSample(name: stemR, sampleRate: finalRate, numChannels: 1, pcmData: finalR)
+            let finalR: Data
+            if loFi {
+                finalR = AkaiDiskImage.applyLoFi(pcm: r, fromRate: rate).0
+            } else if finalRate != UInt32(rate) {
+                finalR = AkaiDiskImage.resampleToAkaiRate(pcm: r, fromRate: rate).0
+            } else {
+                finalR = r
+            }
+            _ = try? diskImage.addImportedSample(name: stemR, sampleRate: finalRate, numChannels: 1, pcmData: finalR, forceName: true)
         }
         return leftSample
     }
 
     private func importURLs(_ urls: [URL]) {
         let loFi = lowQualityImport  // capture on main thread
+        let consent = AudioImportPipeline.ResampleConsent()   // one prompt for the whole selection
+        NSLog("[IMPORT] SampleDetailView.importURLs %d file(s)", urls.count)
         DispatchQueue.global(qos: .userInitiated).async {
             var clean: [(url: URL, pcm: Data, rate: UInt32, channels: Int)] = []
             var dupeFiles: [(url: URL, pcm: Data, rate: UInt32, channels: Int)] = []
@@ -823,6 +814,8 @@ struct SampleListView: View {
                 let ch = decoded.channels
                 let checkPCM = ch >= 2 ? AkaiDiskImage.deinterleaveStereo(pcm, channels: ch).0 : pcm
                 let dupes = diskImage.duplicateSampleNames(forPCM: checkPCM)
+                NSLog("[IMPORT] SampleDetailView dupe check %@ → PCM matches on disk: [%@]",
+                      url.lastPathComponent, dupes.joined(separator: ", "))
                 if dupes.isEmpty {
                     clean.append((url, pcm, UInt32(rate), ch))
                 } else {
@@ -834,7 +827,7 @@ struct SampleListView: View {
             // Import clean files immediately.
             for file in clean {
                 let accessing = file.url.startAccessingSecurityScopedResource()
-                if let s = importOneURL(file.url, pcm: file.pcm, rate: Int(file.rate), channels: file.channels, loFi: loFi) {
+                if let s = importOneURL(file.url, pcm: file.pcm, rate: Int(file.rate), channels: file.channels, loFi: loFi, consent: consent) {
                     DispatchQueue.main.async { selectedSampleID = s.id }
                 }
                 if accessing { file.url.stopAccessingSecurityScopedResource() }
@@ -846,12 +839,12 @@ struct SampleListView: View {
             DispatchQueue.main.async {
                 duplicateCount = dupeFiles.count
                 duplicateHasOtherFiles = !clean.isEmpty
-                duplicateMessage = "\(dupeFileNames.joined(separator: ", ")) already exist\(dupeFiles.count == 1 ? "s" : "") on the disk. Import anyway?"
+                duplicateMessage = AkaiDiskImage.duplicateImportMessage(dupeFileNames)
                 pendingImport = {
                     DispatchQueue.global(qos: .userInitiated).async {
                         for file in dupeFiles {
                             let accessing = file.url.startAccessingSecurityScopedResource()
-                            if let s = importOneURL(file.url, pcm: file.pcm, rate: Int(file.rate), channels: file.channels, loFi: loFi) {
+                            if let s = importOneURL(file.url, pcm: file.pcm, rate: Int(file.rate), channels: file.channels, loFi: loFi, consent: consent) {
                                 DispatchQueue.main.async { selectedSampleID = s.id }
                             }
                             if accessing { file.url.stopAccessingSecurityScopedResource() }
@@ -863,7 +856,4 @@ struct SampleListView: View {
         }
     }
 
-    private func applyLoFi(pcm: Data, fromRate: Int) -> (Data, UInt32) {
-        AkaiDiskImage.applyLoFi(pcm: pcm, fromRate: fromRate)
-    }
 }

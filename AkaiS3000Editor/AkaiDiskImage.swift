@@ -1,5 +1,6 @@
 import Foundation
 import AVFoundation
+import AppKit
 
 // MARK: - Akai S3000 Disk Format Constants
 // Greaseweazle-read S3000 HD floppy, byte-for-byte.
@@ -709,6 +710,11 @@ class AkaiDiskImage: ObservableObject {
     /// calls from reading a stale imageData snapshot and clobbering each other's
     /// directory entries.
     private let diskQueue = DispatchQueue(label: "AkaiDiskImage.diskQueue")
+    /// Names handed out by `reserveImportNames` that aren't in `samples` yet
+    /// (the sample is still being written, or `samples` hasn't caught up on
+    /// the main thread). Guarded by `importNamesLock`.
+    private var reservedImportNames = Set<String>()
+    private let importNamesLock = NSLock()
 
     @Published var isLoaded    = false
     @Published var diskName    = ""
@@ -1257,6 +1263,13 @@ class AkaiDiskImage: ObservableObject {
         entryBytes[22] = 0x00; entryBytes[23] = 0x11   // osver 0x1100 (v17.00)
         data.replaceSubrange(dirSlot..<dirSlot + AkaiDiskFormat.dirEntrySize, with: entryBytes)
 
+        // Default the loaded-program number to 1 (0-indexed 0) so the SLCT
+        // screen shows "1" rather than whatever stale value was in block 4.
+        // Field confirmed by hardware binary diff: absolute offset 0x1293
+        // (block 4 + 0x293), one byte, 0-indexed program number.
+        let progNumOffset = 4 * AkaiDiskFormat.blockSize + 0x293
+        if progNumOffset < data.count { data[progNumOffset] = 0x00 }
+
         // Commit to in-memory image + model.
         imageData = data
         freeBlocks = countFreeBlocks(data: data)
@@ -1315,49 +1328,6 @@ class AkaiDiskImage: ObservableObject {
     }
 
     // MARK: - WAV Import
-
-    /// Parse an audio file and add it to the disk with real block allocation and
-    /// a directory entry (so it persists on Save). Stereo files are split into two
-    /// mono samples named "<base>-L" and "<base>-R", matching how the S3000
-    /// hardware stores stereo (as a pair of mono samples). Returns the first
-    /// sample added (the -L part for stereo, or the single sample for mono).
-    @discardableResult
-    func importAndAddSample(from url: URL) throws -> AkaiSample {
-        let wavData = try Data(contentsOf: url)
-        let (pcmData, sampleRate, numChannels, _) = try parseWAV(wavData)
-        let baseName = Self.sanitizeName(url.deletingPathExtension().lastPathComponent)
-
-        // Pre-check total space so we don't half-import a stereo pair (or fail
-        // after partially writing). 1 block = 1 KB on the Akai HD floppy.
-        let bs = AkaiDiskFormat.blockSize
-        let headerSize = AkaiDiskFormat.sampleHeaderSize
-        func blocksFor(_ audioBytes: Int) -> Int { (headerSize + audioBytes + bs - 1) / bs }
-        let perChannelBytes = pcmData.count / max(1, numChannels)
-        let blocksRequired = numChannels >= 2
-            ? 2 * blocksFor(perChannelBytes)        // -L and -R
-            : blocksFor(pcmData.count)
-        if blocksRequired > freeBlockCount {
-            throw AkaiError.diskFull("Not enough space on the disk! This sample needs \(blocksRequired) KB but only \(freeBlockCount) KB is free.")
-        }
-
-        if numChannels >= 2 {
-            // De-interleave to two mono channels (use channels 0 and 1).
-            let (left, right) = Self.deinterleaveStereo(pcmData, channels: numChannels)
-            // Base clamped to 10 chars so the -L/-R suffix fits within 12.
-            // Preserve the trailing characters (usually the unique part, e.g.
-            // number suffixes) rather than the leading ones, so names like
-            // DNB_BREAK_111 / DNB_BREAK_113 don't collide.
-            let stem = Self.sanitizeNamePreservingEnd(baseName, maxLen: 10)
-            let l = try addImportedSample(name: "\(stem)-L", sampleRate: UInt32(sampleRate),
-                                          numChannels: 1, pcmData: left)
-            _ = try addImportedSample(name: "\(stem)-R", sampleRate: UInt32(sampleRate),
-                                      numChannels: 1, pcmData: right)
-            return l
-        }
-
-        return try addImportedSample(name: baseName, sampleRate: UInt32(sampleRate),
-                                     numChannels: 1, pcmData: pcmData)
-    }
 
     /// Split interleaved 16-bit PCM into two mono 16-bit buffers (left, right).
     /// Only the first two channels are used; any extra channels are ignored.
@@ -1539,9 +1509,17 @@ class AkaiDiskImage: ObservableObject {
         return try diskQueue.sync {
         guard var data = imageData else { throw AkaiError.noImageLoaded }
 
-        let name = forceName
-            ? Self.sanitizeName(rawName.isEmpty ? "NEW SAMPLE" : rawName)
-            : uniqueSampleName(basedOn: rawName.isEmpty ? "NEW SAMPLE" : rawName)
+        let requested = Self.sanitizeName(rawName.isEmpty ? "NEW SAMPLE" : rawName)
+        NSLog("[NAMES] addImportedSample requested=%@ forceName=%d", requested, forceName ? 1 : 0)
+        let name: String
+        if forceName || !sampleNameTaken(requested) {
+            name = requested
+        } else {
+            // Caller didn't reserve a name and this one is taken — apply the
+            // import naming rule rather than failing.
+            name = reserveImportNames(for: requested, stereo: false).left
+            NSLog("[NAMES] addImportedSample: %@ taken → %@", requested, name)
+        }
         let numSamples = UInt32(pcmData.count) / UInt32(max(1, numChannels)) / 2
         let header = buildSampleHeader(name: name, sampleRate: sampleRate,
                                        numSamples: numSamples, rootNote: 60)
@@ -1551,9 +1529,11 @@ class AkaiDiskImage: ObservableObject {
         let blocksNeeded = (fileBytes + bs - 1) / bs
 
         guard let blocks = findFreeBlocks(count: blocksNeeded, data: data) else {
+            NSLog("[NAMES] addImportedSample %@ FAILED: disk full (name stays reserved)", name)
             throw AkaiError.dataError("Not enough free space on disk for this sample")
         }
         guard let dirSlot = findFreeDirectorySlot(data: data) else {
+            NSLog("[NAMES] addImportedSample %@ FAILED: directory full (name stays reserved)", name)
             throw AkaiError.dataError("Disk directory is full")
         }
 
@@ -1572,6 +1552,7 @@ class AkaiDiskImage: ObservableObject {
             let srcEnd   = min(srcStart + bs, fileData.count)
             let dstStart = block * bs
             guard dstStart + bs <= data.count else {
+                NSLog("[NAMES] addImportedSample %@ FAILED: block out of range (name stays reserved)", name)
                 throw AkaiError.dataError("Block out of range while writing sample")
             }
             let chunk = fileData[srcStart..<srcEnd]
@@ -1611,15 +1592,18 @@ class AkaiDiskImage: ObservableObject {
             directoryEntry: dirEntry, header: hdrModel, audioData: pcmData,
             offset: startBlock * bs)
 
+        NSLog("[NAMES] addImportedSample wrote %@ (main thread=%d)", name, Thread.isMainThread ? 1 : 0)
         if Thread.isMainThread {
             freeBlocks = countFreeBlocks(data: data)
             samples.append(newSample)
             hasUnsavedChanges = true
+            releaseImportName(name)
         } else {
             DispatchQueue.main.async {
                 self.freeBlocks = self.countFreeBlocks(data: data)
                 self.samples.append(newSample)
                 self.hasUnsavedChanges = true
+                self.releaseImportName(name)
             }
         }
         return newSample
@@ -1688,22 +1672,6 @@ class AkaiDiskImage: ObservableObject {
     /// Generate a unique 12-char Akai sample name based on `base`, avoiding any
     /// name already present in the directory. Tries "<base> 2", "<base> 3", …,
     /// trimming the base so the suffix fits within 12 characters.
-    /// Returns a unique base name (up to 10 chars) for a stereo pair, ensuring
-    /// neither baseName+"-L" nor baseName+"-R" conflicts with existing samples.
-    func uniqueSampleBaseName(_ base: String) -> String {
-        let existing = Set(samples.map { $0.header.name.trimmingCharacters(in: .whitespaces) })
-        var candidate = String(Self.sanitizeNamePreservingEnd(base, maxLen: 10))
-        var suffix = 2
-        while existing.contains(candidate + "-L") || existing.contains(candidate + "-R") {
-            let num = String(suffix)
-            let trimmed = Self.sanitizeNamePreservingEnd(base, maxLen: 10 - num.count)
-            candidate = trimmed + num
-            suffix += 1
-            if suffix > 99 { break }
-        }
-        return candidate
-    }
-
     private func uniqueSampleName(basedOn base: String) -> String {
         let existing = Set(samples.map { $0.header.name })
         let cleanBase = Self.sanitizeName(base)
@@ -1941,152 +1909,6 @@ class AkaiDiskImage: ObservableObject {
         samples.append(newSample)
         hasUnsavedChanges = true
         return newSample
-    }
-
-    private func parseWAV(_ data: Data) throws -> (Data, Int, Int, Int) {
-        // Route by file magic: RIFF/WAVE → WAV, FORM/AIFF or FORM/AIFC → AIFF.
-        if data.count > 12,
-           data[0..<4] == Data("FORM".utf8),
-           (data[8..<12] == Data("AIFF".utf8) || data[8..<12] == Data("AIFC".utf8)) {
-            return try parseAIFF(data)
-        }
-        guard data.count > 44,
-              data[0..<4] == Data("RIFF".utf8),
-              data[8..<12] == Data("WAVE".utf8) else {
-            throw AkaiError.dataError("Not a valid WAV or AIFF file")
-        }
-        var offset = 12, sampleRate = 44100, numChannels = 1, bitsPerSample = 16
-        var pcmData = Data()
-        while offset + 8 <= data.count {
-            let id = String(bytes: data[offset..<offset+4], encoding: .ascii) ?? ""
-            let size = Int(data.readLE32(at: offset + 4))
-            offset += 8
-            if id == "fmt " {
-                numChannels = Int(data.readLE16(at: offset + 2))
-                sampleRate  = Int(data.readLE32(at: offset + 4))
-                bitsPerSample = Int(data.readLE16(at: offset + 14))
-            } else if id == "data" {
-                pcmData = data.subdata(in: offset..<min(offset + size, data.count))
-            }
-            offset += size + (size % 2)
-        }
-        guard !pcmData.isEmpty else { throw AkaiError.dataError("No audio data in WAV") }
-        // 24-bit needs converting to 16-bit before anything downstream (like
-        // deinterleaveStereo) touches it — that code assumes 2 bytes/sample.
-        // Take the top 2 of each 3 LE bytes (drop the least-significant byte).
-        if bitsPerSample == 24 {
-            let bytesPerFrame = 3 * numChannels
-            var out = Data(); out.reserveCapacity((pcmData.count / bytesPerFrame) * 2 * numChannels)
-            var i = 0
-            while i + bytesPerFrame <= pcmData.count {
-                for ch in 0..<numChannels { out.append(pcmData[i + ch*3 + 1]); out.append(pcmData[i + ch*3 + 2]) }
-                i += bytesPerFrame
-            }
-            return (out, sampleRate, numChannels, 16)
-        }
-        return (pcmData, sampleRate, numChannels, bitsPerSample)
-    }
-
-    /// Parse an AIFF or AIFF-C file. Extracts raw 16-bit signed PCM.
-    /// AIFF stores audio big-endian; we byte-swap to little-endian for the Akai.
-    /// AIFF-C (AIFC) with 'sowt' (little-endian) compression needs no swap.
-    private func parseAIFF(_ data: Data) throws -> (Data, Int, Int, Int) {
-        // FORM chunk: bytes 0-3 = "FORM", 4-7 = size (BE), 8-11 = "AIFF"/"AIFC"
-        let isAIFC = data[8..<12] == Data("AIFC".utf8)
-        var offset = 12
-        var sampleRate = 44100
-        var numChannels = 1
-        var bitsPerSample = 16
-        var soundDataOffset = -1
-        var soundDataSize = 0
-        var offset2sound = 8   // AIFF SSND chunk has an 8-byte header before audio
-        var isSowt = false     // AIFC 'sowt' = already little-endian
-
-        // Read big-endian 32-bit int
-        func readBE32(at i: Int) -> Int {
-            guard i + 3 < data.count else { return 0 }
-            return Int(data[i]) << 24 | Int(data[i+1]) << 16 | Int(data[i+2]) << 8 | Int(data[i+3])
-        }
-        func readBE16(at i: Int) -> Int {
-            guard i + 1 < data.count else { return 0 }
-            return Int(data[i]) << 8 | Int(data[i+1])
-        }
-        // 80-bit IEEE 754 extended → Int (sample rate field in AIFF COMM chunk)
-        func readExtended(at i: Int) -> Int {
-            guard i + 9 < data.count else { return 44100 }
-            let exp = (Int(data[i] & 0x7F) << 8) | Int(data[i+1])
-            let mantHi = UInt32(data[i+2]) << 24 | UInt32(data[i+3]) << 16 |
-                         UInt32(data[i+4]) << 8  | UInt32(data[i+5])
-            let shift = 63 - exp
-            if shift < 0 || shift > 32 { return 44100 }
-            return Int(mantHi >> UInt32(shift))
-        }
-
-        while offset + 8 <= data.count {
-            let id = String(bytes: data[offset..<offset+4], encoding: .ascii) ?? ""
-            let size = readBE32(at: offset + 4)
-            offset += 8
-            switch id {
-            case "COMM":
-                numChannels   = readBE16(at: offset)
-                // numSampleFrames at offset+2 (4 bytes) — not needed
-                bitsPerSample = readBE16(at: offset + 6)
-                sampleRate    = readExtended(at: offset + 8)
-                if isAIFC, offset + 18 + 4 <= data.count {
-                    // compression type: 4-byte OSType at offset+18
-                    let comp = String(bytes: data[(offset+18)..<(offset+22)], encoding: .ascii) ?? ""
-                    isSowt = (comp == "sowt")   // little-endian PCM — no swap needed
-                }
-            case "SSND":
-                // SSND: offset(4) + blockSize(4) + audio data
-                offset2sound = readBE32(at: offset) + 8   // skip offset+blockSize fields
-                soundDataOffset = offset + offset2sound
-                soundDataSize   = max(0, size - offset2sound)
-            default:
-                break
-            }
-            offset += size + (size % 2)
-        }
-
-        guard soundDataOffset >= 0, soundDataOffset + soundDataSize <= data.count else {
-            throw AkaiError.dataError("No audio data found in AIFF file")
-        }
-
-        var pcmData = data.subdata(in: soundDataOffset..<soundDataOffset + soundDataSize)
-
-        if bitsPerSample == 24 {
-            // AIFF is big-endian: 24-bit samples are stored [MSB, mid, LSB]
-            // per channel. Keep the top 16 bits (MSB, mid), swapped into
-            // little-endian order for the Akai (mid, MSB) — same top-16-bits
-            // truncation as the WAV 24-bit path in parseWAV, just accounting
-            // for AIFF's opposite byte order.
-            let bytesPerFrame = 3 * numChannels
-            var out = Data(); out.reserveCapacity((pcmData.count / bytesPerFrame) * 2 * numChannels)
-            var i = 0
-            while i + bytesPerFrame <= pcmData.count {
-                for ch in 0..<numChannels {
-                    let base = i + ch * 3
-                    out.append(pcmData[base + 1])
-                    out.append(pcmData[base])
-                }
-                i += bytesPerFrame
-            }
-            pcmData = out
-            bitsPerSample = 16
-        } else if bitsPerSample == 16 && !isSowt {
-            // AIFF is big-endian 16-bit; swap bytes to little-endian for the Akai.
-            // AIFC 'sowt' is already little-endian — skip the swap.
-            pcmData.withUnsafeMutableBytes { (buf: UnsafeMutableRawBufferPointer) in
-                var i = 0
-                while i + 1 < buf.count {
-                    let hi = buf[i]; buf[i] = buf[i+1]; buf[i+1] = hi
-                    i += 2
-                }
-            }
-        }
-
-        guard !pcmData.isEmpty else { throw AkaiError.dataError("No audio data in AIFF file") }
-        return (pcmData, sampleRate, numChannels, bitsPerSample)
     }
 
     // MARK: - Delete
@@ -2898,18 +2720,42 @@ class AkaiDiskImage: ObservableObject {
         }
     }
 
-    /// Downsample mono PCM to ~22kHz using AVAudioConverter for high-quality
-    /// resampling with proper anti-aliasing. Used by all lo-fi import paths.
-    static func applyLoFi(pcm: Data, fromRate: Int) -> (Data, UInt32) {
-        let targetRate: Double = 22050
-        let outRate = UInt32(targetRate)
-        guard fromRate > 0, !pcm.isEmpty else { return (pcm, UInt32(fromRate)) }
+    // MARK: - Resampling
+
+    /// Resample mono 16-bit PCM to the nearest Akai-legal rate (44.1 kHz or
+    /// 22.05 kHz). Rates that are already legal pass through untouched.
+    static func resampleToAkaiRate(pcm: Data, fromRate: Int,
+                                   caller: String = #function, file: String = #fileID,
+                                   line: Int = #line) -> (Data, UInt32) {
+        guard fromRate != 22050, fromRate != 44100 else {
+            NSLog("[RESAMPLE] resampleToAkaiRate %dHz passthrough (from %@:%d %@)", fromRate, file, line, caller)
+            return (pcm, UInt32(fromRate))
+        }
+        let targetRate = abs(fromRate - 44100) <= abs(fromRate - 22050) ? 44100 : 22050
+        NSLog("[RESAMPLE] resampleToAkaiRate %d→%d (from %@:%d %@)", fromRate, targetRate, file, line, caller)
+        return resample(pcm: pcm, fromRate: fromRate, toRate: targetRate)
+    }
+
+    /// Downsample mono 16-bit PCM to 22.05 kHz. Used by all lo-fi import paths.
+    static func applyLoFi(pcm: Data, fromRate: Int,
+                          caller: String = #function, file: String = #fileID,
+                          line: Int = #line) -> (Data, UInt32) {
+        NSLog("[RESAMPLE] applyLoFi %d→22050 (from %@:%d %@)", fromRate, file, line, caller)
+        return resample(pcm: pcm, fromRate: fromRate, toRate: 22050)
+    }
+
+    /// Mono 16-bit PCM sample-rate conversion via AVAudioConverter. Works in
+    /// float32 internally and clamps to Int16 on the way out. On any failure
+    /// returns the input unchanged at its original rate.
+    private static func resample(pcm: Data, fromRate: Int, toRate: Int) -> (Data, UInt32) {
         let frameCount = pcm.count / 2
-        guard let inFormat = AVAudioFormat(commonFormat: .pcmFormatInt16,
-                                           sampleRate: Double(fromRate),
-                                           channels: 1, interleaved: false),
-              let outFormat = AVAudioFormat(commonFormat: .pcmFormatInt16,
-                                            sampleRate: targetRate,
+        guard fromRate > 0, frameCount > 0 else { return (pcm, UInt32(fromRate)) }
+        guard fromRate != toRate else { return (pcm, UInt32(toRate)) }
+        guard let inFormat  = AVAudioFormat(commonFormat: .pcmFormatFloat32,
+                                            sampleRate: Double(fromRate),
+                                            channels: 1, interleaved: false),
+              let outFormat = AVAudioFormat(commonFormat: .pcmFormatFloat32,
+                                            sampleRate: Double(toRate),
                                             channels: 1, interleaved: false),
               let converter = AVAudioConverter(from: inFormat, to: outFormat),
               let inBuf = AVAudioPCMBuffer(pcmFormat: inFormat,
@@ -2918,12 +2764,12 @@ class AkaiDiskImage: ObservableObject {
         inBuf.frameLength = AVAudioFrameCount(frameCount)
         pcm.withUnsafeBytes { raw in
             let src = raw.bindMemory(to: Int16.self)
-            let dst = inBuf.int16ChannelData![0]
-            for i in 0..<frameCount { dst[i] = src[i] }
+            let dst = inBuf.floatChannelData![0]
+            for i in 0..<frameCount { dst[i] = Float(src[i]) / 32768.0 }
         }
-        let outFrames = AVAudioFrameCount(Double(frameCount) * targetRate / Double(fromRate)) + 1
-        guard let outBuf = AVAudioPCMBuffer(pcmFormat: outFormat,
-                                             frameCapacity: outFrames) else { return (pcm, UInt32(fromRate)) }
+        let outCap = AVAudioFrameCount(Double(frameCount) * Double(toRate) / Double(fromRate)) + 1
+        guard let outBuf = AVAudioPCMBuffer(pcmFormat: outFormat, frameCapacity: outCap)
+        else { return (pcm, UInt32(fromRate)) }
         var inputDone = false
         let status = converter.convert(to: outBuf, error: nil) { _, outStatus in
             if inputDone { outStatus.pointee = .noDataNow; return nil }
@@ -2931,15 +2777,28 @@ class AkaiDiskImage: ObservableObject {
             inputDone = true
             return inBuf
         }
-        guard status != .error, outBuf.frameLength > 0 else { return (pcm, UInt32(fromRate)) }
-        let outFrameCount = Int(outBuf.frameLength)
-        var out = Data(count: outFrameCount * 2)
-        let src = outBuf.int16ChannelData![0]
+        guard status != .error, outBuf.frameLength > 0 else {
+            NSLog("[RESAMPLE] converter FAILED %d→%d — returning input unchanged", fromRate, toRate)
+            return (pcm, UInt32(fromRate))
+        }
+        let n = Int(outBuf.frameLength)
+        let floatSrc = outBuf.floatChannelData![0]
+        let inPtr = inBuf.floatChannelData![0]
+        var inPeak: Float = 0, outPeak: Float = 0, clipped = 0
+        for i in 0..<frameCount { inPeak = max(inPeak, abs(inPtr[i])) }
+        for i in 0..<n {
+            let a = abs(floatSrc[i]); outPeak = max(outPeak, a); if a > 1 { clipped += 1 }
+        }
+        NSLog("[RESAMPLE]   %d→%d frames %d→%d  peak in=%.4f out=%.4f  clipped=%d",
+              fromRate, toRate, frameCount, n, inPeak, outPeak, clipped)
+        var out = Data(count: n * 2)
         out.withUnsafeMutableBytes { raw in
             let dst = raw.bindMemory(to: Int16.self)
-            for i in 0..<outFrameCount { dst[i] = src[i] }
+            for i in 0..<n {
+                dst[i] = Int16(clamping: Int32((floatSrc[i] * 32767.0).rounded()))
+            }
         }
-        return (out, outRate)
+        return (out, UInt32(toRate))
     }
 
     /// Sanitizes a name for the Akai charset and truncates it to maxLen,
@@ -2959,36 +2818,6 @@ class AkaiDiskImage: ObservableObject {
         return String(filtered.prefix(maxLen))
     }
 
-    /// If `candidate` is already in `usedNames` (either an existing on-disk
-    /// sample or another name already assigned earlier in this import
-    /// batch), disambiguates by overwriting the trailing characters with an
-    /// incrementing counter: the last character becomes "1", "2", ... "9"
-    /// for the first nine collisions, then — if still colliding — the last
-    /// TWO characters become "10", "11", "12"... This mirrors what someone
-    /// doing this by hand would do: keep as much of the original name as
-    /// possible and only touch the very end. Adds whatever name is returned
-    /// to `usedNames` so later calls in the same batch see it as taken.
-    static func disambiguateSampleName(_ candidate: String, usedNames: inout Set<String>) -> String {
-        guard usedNames.contains(candidate) else {
-            usedNames.insert(candidate)
-            return candidate
-        }
-        var counter = 1
-        while counter < 1000 {
-            let suffix = String(counter)
-            guard candidate.count >= suffix.count else { break }
-            let attempt = String(candidate.prefix(candidate.count - suffix.count)) + suffix
-            if !usedNames.contains(attempt) {
-                usedNames.insert(attempt)
-                return attempt
-            }
-            counter += 1
-        }
-        // Unreachable in any realistic batch size — accept the collision
-        // rather than loop forever.
-        usedNames.insert(candidate)
-        return candidate
-    }
     static let allowedNameCharacters = Set("ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 #+-.")
 
     /// CRC-32 of the raw PCM data for each on-disk sample, keyed by sample UUID.
@@ -3047,6 +2876,95 @@ class AkaiDiskImage: ObservableObject {
             allowedNameCharacters.contains(ch) ? ch : "-"
         }
         return String(String(filtered).prefix(12))
+    }
+
+    // MARK: - Import naming
+    //
+    // One rule for every audio import (Samples tab, drops, presets, EMU):
+    //  • upper-case, spaces removed, anything outside the Akai charset → "-"
+    //  • stereo: base of up to 10 chars + "-L" / "-R";  mono: up to 12 chars
+    //  • if taken, a counter (1, 2 … 9, 10 …) goes on the end of the base —
+    //    appended if there's room, otherwise over the last characters — and
+    //    both halves of a stereo pair always get the same number.
+    //
+    //   "Marque Pad 1.aif" → MARQUEPAD1-L / -R, then MARQUEPAD2-L / -R, …
+    //   "Kick.wav" (mono)  → KICK, then KICK1, KICK2, …
+
+    /// Wording for the "this audio is already on the disk" prompt, shared by
+    /// every import path so they all ask the same question.
+    static func duplicateImportMessage(_ fileNames: [String]) -> String {
+        let list = fileNames.joined(separator: ", ")
+        return fileNames.count == 1
+            ? "A sample with the same PCM data as \(list) already exists on the disk. Import a duplicate sample?"
+            : "Samples with the same PCM data as \(list) already exist on the disk. Import duplicate samples?"
+    }
+
+    /// Upper-case, space-free, Akai-charset stem truncated to `maxLen`.
+    static func importStem(_ raw: String, maxLen: Int) -> String {
+        sanitizeNamePreservingEnd(raw.replacingOccurrences(of: " ", with: ""), maxLen: maxLen)
+    }
+
+    /// True if a sample with this name is on the disk or reserved by an
+    /// import that's still in flight.
+    private func sampleNameTaken(_ name: String) -> Bool {
+        importNamesLock.lock(); defer { importNamesLock.unlock() }
+        return reservedImportNames.contains(name)
+            || samples.contains { $0.header.name.trimmingCharacters(in: .whitespaces) == name }
+    }
+
+    /// Choose unique sample name(s) for one imported file and reserve them so
+    /// concurrent imports can't pick the same ones. For a stereo file the
+    /// pair is chosen together (both -L and -R must be free); pass
+    /// `rightToo: false` when only the left channel will be imported.
+    /// Pass the returned names to `addImportedSample(..., forceName: true)`.
+    func reserveImportNames(for raw: String, stereo: Bool, rightToo: Bool = true,
+                            caller: String = #function, file: String = #fileID,
+                            line: Int = #line) -> (left: String, right: String?) {
+        importNamesLock.lock(); defer { importNamesLock.unlock() }
+        let taken = reservedImportNames.union(
+            samples.map { $0.header.name.trimmingCharacters(in: .whitespaces) })
+        let maxLen = stereo ? 10 : 12
+        var base = Self.importStem(raw, maxLen: maxLen)
+        if base.isEmpty { base = "NEWSAMPLE" }
+        func names(_ b: String) -> [String] { stereo ? [b + "-L", b + "-R"] : [b] }
+
+        let onDisk = Set(samples.map { $0.header.name.trimmingCharacters(in: .whitespaces) })
+        let prefix = String(base.prefix(max(1, base.count - 2)))
+        NSLog("[NAMES] reserve \"%@\" stereo=%d base=%@ | on disk matching %@*: [%@] | reserved (all %d): [%@]",
+              raw, stereo ? 1 : 0, base, prefix,
+              onDisk.filter { $0.hasPrefix(prefix) }.sorted().joined(separator: ", "),
+              reservedImportNames.count, reservedImportNames.sorted().joined(separator: ", "))
+        func why(_ c: [String]) -> String {
+            c.map { n in
+                onDisk.contains(n) ? "\(n)=ON-DISK" :
+                reservedImportNames.contains(n) ? "\(n)=RESERVED" : "\(n)=free"
+            }.joined(separator: " ")
+        }
+        var chosen = names(base)
+        var n = 1
+        while chosen.contains(where: taken.contains), n < 100_000 {
+            NSLog("[NAMES]   try %@ → rejected", why(chosen))
+            let num = String(n)
+            chosen = names(String(base.prefix(maxLen - num.count)) + num)
+            n += 1
+        }
+        NSLog("[NAMES]   try %@ → OK", why(chosen))
+        let left = chosen[0]
+        let right: String? = stereo && rightToo ? chosen[1] : nil
+        reservedImportNames.insert(left)
+        if let right { reservedImportNames.insert(right) }
+        NSLog("[NAMES] \"%@\" stereo=%d → %@%@ (from %@:%d %@)",
+              raw, stereo ? 1 : 0, left, right.map { " + " + $0 } ?? "", file, line, caller)
+        return (left, right)
+    }
+
+    /// Drop a reservation once the sample is in `samples`.
+    private func releaseImportName(_ name: String) {
+        importNamesLock.lock(); defer { importNamesLock.unlock() }
+        let was = reservedImportNames.remove(name) != nil
+        NSLog("[NAMES] release %@ (%@) — still reserved: [%@]", name,
+              was ? "was reserved" : "wasn't reserved",
+              reservedImportNames.sorted().joined(separator: ", "))
     }
 
     // MARK: - Program Edits
@@ -3447,6 +3365,10 @@ class AkaiDiskImage: ObservableObject {
         entryBytes[22] = 0x00; entryBytes[23] = 0x11   // osver 0x1100 (v17.00)
         data.replaceSubrange(dirSlot..<dirSlot + AkaiDiskFormat.dirEntrySize, with: entryBytes)
 
+        // Default the loaded-program number to 1 (0-indexed 0) — same as createProgram.
+        let progNumOffsetC = 4 * AkaiDiskFormat.blockSize + 0x293
+        if progNumOffsetC < data.count { data[progNumOffsetC] = 0x00 }
+
         // Commit to in-memory image + model.
         imageData = data
         freeBlocks = countFreeBlocks(data: data)
@@ -3469,13 +3391,14 @@ class AkaiDiskImage: ObservableObject {
 // MARK: - Errors
 
 enum AkaiError: LocalizedError {
-    case invalidImage(String), dataError(String), noImageLoaded, diskFull(String)
+    case invalidImage(String), dataError(String), noImageLoaded, diskFull(String), cancelled
     var errorDescription: String? {
         switch self {
         case .invalidImage(let s): return "Invalid image: \(s)"
         case .dataError(let s):    return "Data error: \(s)"
         case .noImageLoaded:       return "No disk image loaded"
         case .diskFull(let s):     return s
+        case .cancelled:           return "Cancelled"
         }
     }
 }

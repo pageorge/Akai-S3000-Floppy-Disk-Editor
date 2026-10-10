@@ -31,15 +31,22 @@ enum WAVImport {
         case noAudioData
         var errorDescription: String? {
             switch self {
-            case .notAWAV:      return "Not a valid WAV file"
+            case .notAWAV:      return "Not a valid WAV or AIFF file"
             case .noAudioData:  return "No audio data in WAV"
             }
         }
     }
 
-    /// Parse WAV bytes into 16-bit interleaved PCM plus format info.
-    /// Throws `WAVError` if the data isn't a RIFF/WAVE file or has no samples.
+    /// Parse WAV or AIFF bytes into 16-bit interleaved PCM plus format info.
+    /// Throws `WAVError` if the data isn't a supported audio file or has no samples.
     static func decode(_ data: Data) throws -> Decoded {
+        // Route AIFF/AIFC by magic before attempting WAV parse.
+        if data.count > 12,
+           data[data.startIndex..<data.startIndex+4] == Data("FORM".utf8),
+           data[data.startIndex+8..<data.startIndex+12] == Data("AIFF".utf8) ||
+           data[data.startIndex+8..<data.startIndex+12] == Data("AIFC".utf8) {
+            return try decodeAIFF(data)
+        }
         guard data.count > 44,
               data[data.startIndex..<data.startIndex+4] == Data("RIFF".utf8),
               data[data.startIndex+8..<data.startIndex+12] == Data("WAVE".utf8) else {
@@ -95,4 +102,86 @@ enum WAVImport {
         }
         return out
     }
+
+    /// Parse AIFF/AIFC bytes into 16-bit little-endian PCM.
+    /// AIFF is big-endian; `sowt` AIFC is already little-endian.
+    private static func decodeAIFF(_ data: Data) throws -> Decoded {
+        let isAIFC = data[data.startIndex+8..<data.startIndex+12] == Data("AIFC".utf8)
+        var offset = 12
+
+        func readBE32(at i: Int) -> UInt32 {
+            (UInt32(data[i]) << 24) | (UInt32(data[i+1]) << 16) |
+            (UInt32(data[i+2]) << 8)  |  UInt32(data[i+3])
+        }
+        func readBE16(at i: Int) -> UInt16 {
+            (UInt16(data[i]) << 8) | UInt16(data[i+1])
+        }
+        func readExtended(at i: Int) -> Double {
+            let exp  = Int(readBE16(at: i)) & 0x7FFF
+            let mant = (UInt64(readBE32(at: i+2)) << 32) | UInt64(readBE32(at: i+6))
+            guard exp != 0 else { return 0 }
+            let frac = Double(mant) / pow(2.0, 63.0)
+            return frac * pow(2.0, Double(exp - 16383))
+        }
+
+        var sampleRate = 44100, numChannels = 1, bitsPerSample = 16
+        var soundData = Data(), isSowt = false
+
+        while offset + 8 <= data.count {
+            let id   = String(bytes: data[offset..<offset+4], encoding: .ascii) ?? ""
+            let size = Int(readBE32(at: offset + 4))
+            let body = offset + 8
+            offset += 8
+
+            if id == "COMM" {
+                numChannels   = Int(readBE16(at: body))
+                bitsPerSample = Int(readBE16(at: body + 6))
+                sampleRate    = Int(readExtended(at: body + 8))
+                if isAIFC, size >= 26 {
+                    let codec = String(bytes: data[body+18..<body+22], encoding: .ascii) ?? ""
+                    isSowt = (codec == "sowt")
+                }
+            } else if id == "SSND" {
+                let ssndOff = Int(readBE32(at: body))
+                let start   = body + 8 + ssndOff
+                let end     = min(body + size, data.count)
+                if start < end { soundData = data.subdata(in: start..<end) }
+            }
+            offset += size + (size % 2)
+        }
+
+        guard !soundData.isEmpty else { throw WAVError.noAudioData }
+
+        let pcm16: Data
+        if bitsPerSample == 24 {
+            var out = Data(); out.reserveCapacity(soundData.count / 3 * 2)
+            var i = soundData.startIndex
+            while i + 3 * numChannels <= soundData.endIndex {
+                for _ in 0..<numChannels {
+                    // AIFF 24-bit is big-endian [MSB, mid, LSB]. Keep the top
+                    // two bytes and emit little-endian: low = mid, high = MSB.
+                    out.append(soundData[i + 1])
+                    out.append(soundData[i])
+                    i += 3
+                }
+            }
+            pcm16 = out
+        } else if isSowt {
+            pcm16 = soundData
+        } else {
+            var out = Data(); out.reserveCapacity(soundData.count)
+            var i = soundData.startIndex
+            while i + 2 <= soundData.endIndex {
+                out.append(soundData[i + 1])
+                out.append(soundData[i])
+                i += 2
+            }
+            pcm16 = out
+        }
+
+        return Decoded(pcm: pcm16, sampleRate: sampleRate, channels: numChannels,
+                       sourceBitsPerSample: bitsPerSample)
+    }
+
+
 }

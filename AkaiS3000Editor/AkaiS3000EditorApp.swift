@@ -4,31 +4,19 @@ import AppKit
 @main
 struct AkaiS3000EditorApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
-    @StateObject private var diskImage = AppDiskImageHolder.shared
+    /// One runner for the whole app — there's only one Greaseweazle. The window
+    /// that starts a read/write claims it (see ContentView.claimGreaseweazle).
     @StateObject private var greaseweazle = GreaseweazleRunner()
 
     var body: some Scene {
-        WindowGroup {
-            ContentView(diskImage: diskImage.image, greaseweazle: greaseweazle)
-                .frame(minWidth: 1100, minHeight: 700)
+        WindowGroup(id: DiskWindow.groupID, for: DiskWindowRequest.self) { $request in
+            DiskWindow(request: $request, greaseweazle: greaseweazle)
         }
         .windowStyle(.titleBar)
         .windowToolbarStyle(.unified)
         .commands {
             CommandGroup(replacing: .newItem) {
-                Button("New Disk Image…") {
-                    NotificationCenter.default.post(name: .createDiskImage, object: nil)
-                }
-                .keyboardShortcut("n", modifiers: .command)
-                Button("Open Disk Image…") {
-                    NotificationCenter.default.post(name: .openDiskImage, object: nil)
-                }
-                .keyboardShortcut("o", modifiers: .command)
-                Divider()
-                Button("Import E-mu ESI Disks…") {
-                    NotificationCenter.default.post(name: .importEmuDisks, object: nil)
-                }
-                .keyboardShortcut("i", modifiers: [.command, .shift])
+                FileMenuButtons()
             }
         }
     }
@@ -42,49 +30,38 @@ extension Notification.Name {
     static let importEmuDisks = Notification.Name("importEmuDisks")
 }
 
-// MARK: - Shared disk image holder
-// The app delegate needs to see the same AkaiDiskImage instance that ContentView
-// uses, so it can check hasUnsavedChanges when the app is asked to quit.
-final class AppDiskImageHolder: ObservableObject {
-    static let shared = AppDiskImageHolder()
-    let image = AkaiDiskImage()
-}
-
 // MARK: - App Delegate
-// Intercepts Cmd+Q / Quit so the user gets a chance to save unsaved changes
-// (sample/program edits, deletions) before the disk image data is lost.
+// Intercepts Cmd+Q / Quit so the user gets a chance to save unsaved changes in
+// every open window before the disk image data is lost. (Closing a single
+// window is handled by DiskWindowCloseGuard.)
 final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
-        let diskImage = AppDiskImageHolder.shared.image
-        guard diskImage.hasUnsavedChanges else { return .terminateNow }
+        let dirty = DiskImageRegistry.shared.images.filter { $0.hasUnsavedChanges }
+        guard !dirty.isEmpty else { return .terminateNow }
 
+        if dirty.count == 1 {
+            return UnsavedChangesPrompt.confirm(dirty[0], action: "quitting") ? .terminateNow : .terminateCancel
+        }
+
+        let names = dirty.map { "• " + ($0.imageURL?.lastPathComponent ?? "Untitled") }
         let alert = NSAlert()
-        alert.messageText = "You have unsaved changes"
-        alert.informativeText = "If you quit now, your changes to the disk image will be lost. Do you want to save before quitting?"
-        alert.addButton(withTitle: "Save")
+        alert.messageText = "\(dirty.count) disk images have unsaved changes"
+        alert.informativeText = names.joined(separator: "\n") + "\n\nIf you quit without saving, these changes will be lost."
+        alert.addButton(withTitle: "Save All")
         alert.addButton(withTitle: "Don't Save")
         alert.addButton(withTitle: "Cancel")
         alert.alertStyle = .warning
 
-        let response = alert.runModal()
-        switch response {
-        case .alertFirstButtonReturn: // Save
-            do {
-                try diskImage.saveImageToDisk()
-                return .terminateNow
-            } catch {
-                let errorAlert = NSAlert()
-                errorAlert.messageText = "Couldn't save changes"
-                errorAlert.informativeText = error.localizedDescription
-                errorAlert.alertStyle = .critical
-                errorAlert.addButton(withTitle: "OK")
-                errorAlert.runModal()
+        switch alert.runModal() {
+        case .alertFirstButtonReturn:
+            for image in dirty where !UnsavedChangesPrompt.save(image) {
                 return .terminateCancel
             }
-        case .alertSecondButtonReturn: // Don't Save
             return .terminateNow
-        default: // Cancel
+        case .alertSecondButtonReturn:
+            return .terminateNow
+        default:
             return .terminateCancel
         }
     }

@@ -5,6 +5,8 @@ import AppKit
 /// file), tick the presets to bring across, check they fit, import.
 struct EmuImportSheet: View {
     @ObservedObject var diskImage: AkaiDiskImage
+    /// Bank already parsed by the menu action — skip the Choose Disks flow.
+    var preloadedBank: EmuBank? = nil
     /// Called with a one-line summary after a successful import.
     var onImported: (String) -> Void
 
@@ -63,7 +65,13 @@ struct EmuImportSheet: View {
         }
         .padding(20)
         .frame(width: 600, height: 620)
-        .onAppear { options.downsampleTo22k = lowQualityImport }
+        .onAppear {
+            options.downsampleTo22k = lowQualityImport
+            if let preloadedBank {
+                bank = preloadedBank
+                selected = Set(preloadedBank.presets.map(\.id))
+            }
+        }
     }
 
     private var importButtonTitle: String {

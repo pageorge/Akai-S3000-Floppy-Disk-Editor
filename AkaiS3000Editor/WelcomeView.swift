@@ -2,7 +2,13 @@ import SwiftUI
 
 struct WelcomeView: View {
     @ObservedObject var diskImage: AkaiDiskImage
+    /// Actions of the window this start screen is in (set by ContentView).
+    var onNew: () -> Void = {}
+    var onOpen: () -> Void = {}
+    var onOpenRecent: (URL) -> Void = { _ in }
+    var onConvertEmu: ([URL]) -> Void = { _ in }
     @AppStorage("lastOpenedImagePath") private var lastPath: String = ""
+    @State private var showEmuPicker = false
 
     /// The vivid Akai brand red, shared with the logo and the Greaseweazle Write
     /// button so the prominent action buttons match exactly. Using a flat fill +
@@ -39,7 +45,7 @@ struct WelcomeView: View {
                         )
                     VStack(spacing: 12) {
                         Button {
-                            NotificationCenter.default.post(name: .createDiskImage, object: nil)
+                            onNew()
                         } label: {
                             Label("New Disk Image", systemImage: "plus.rectangle.on.folder")
                                 .frame(width: actionButtonWidth)
@@ -53,7 +59,7 @@ struct WelcomeView: View {
                         }
                         .buttonStyle(.plain)
                         Button {
-                            NotificationCenter.default.post(name: .openDiskImage, object: nil)
+                            onOpen()
                         } label: {
                             Label("Open Disk Image", systemImage: "folder")
                                 .frame(width: actionButtonWidth)
@@ -63,10 +69,40 @@ struct WelcomeView: View {
                                 .clipShape(RoundedRectangle(cornerRadius: 6))
                         }
                         .buttonStyle(.plain)
+                        Button {
+                            showEmuPicker = true
+                        } label: {
+                            Label("Import E-MU ESI Disk", systemImage: "arrow.triangle.2.circlepath")
+                                .frame(width: actionButtonWidth)
+                                .padding(.vertical, 10)
+                                .background(Color.secondary.opacity(0.15))
+                                .clipShape(RoundedRectangle(cornerRadius: 6))
+                                .overlay(
+                                    RoundedRectangle(cornerRadius: 6)
+                                        .strokeBorder(Color.secondary.opacity(0.3), lineWidth: 1)
+                                )
+                        }
+                        .buttonStyle(.plain)
+                        .fileImporter(
+                            isPresented: $showEmuPicker,
+                            allowedContentTypes: [.init(filenameExtension: "e4b")!,
+                                                  .init(filenameExtension: "esi")!,
+                                                  .init(filenameExtension: "e3b")!,
+                                                  .init(filenameExtension: "e3x")!,
+                                                  .init(filenameExtension: "img")!,
+                                                  .init(filenameExtension: "iso")!],
+                            allowsMultipleSelection: true
+                        ) { result in
+                            if case .success(let urls) = result {
+                                onConvertEmu(urls)
+                            }
+                        }
                         if !lastPath.isEmpty, FileManager.default.fileExists(atPath: lastPath) {
                             let filename = URL(fileURLWithPath: lastPath).lastPathComponent
                             Button {
-                                try? diskImage.load(from: URL(fileURLWithPath: lastPath))
+                                // Via the window so an already-open file just
+                                // brings its window forward.
+                                onOpenRecent(URL(fileURLWithPath: lastPath))
                             } label: {
                                 Label(filename, systemImage: "clock.arrow.circlepath")
                                     .frame(width: actionButtonWidth)

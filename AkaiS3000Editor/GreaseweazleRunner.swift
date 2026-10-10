@@ -55,6 +55,10 @@ final class GreaseweazleRunner: ObservableObject {
     /// successfully (exit 0), so the app can auto-load the freshly read image.
     var onReadComplete: ((URL) -> Void)?
 
+    /// The window that started the current/last read or write. Only that window
+    /// shows the log and receives onReadComplete; nil = not yet claimed.
+    @Published var ownerWindowID: UUID? = nil
+
     /// Candidate install locations for the gw binary. ~/.local/bin (pipx/pip --user)
     /// is resolved against the real home directory. Homebrew Intel/ARM also covered.
     private static var candidatePaths: [String] {

@@ -137,7 +137,6 @@ extension AkaiDiskImage {
         // 2. Import every referenced sample once.
         struct Imported { let left: String; let right: String; let root: Int }
         var imported: [Int: Imported] = [:]
-        var usedNames = Set(samples.map { $0.header.name })
         var missing = Set<Int>()
 
         for number in rootFor.keys.sorted() {
@@ -162,15 +161,8 @@ extension AkaiDiskImage {
                 }
             }
 
-            let names: [String]
-            if channels.count == 2 {
-                let base = uniqueSampleBaseName(AkaiDiskImage.sanitizeNamePreservingEnd(rawName, maxLen: 10))
-                names = [base + "-L", base + "-R"]
-                usedNames.formUnion(names)
-            } else {
-                names = [AkaiDiskImage.disambiguateSampleName(AkaiDiskImage.sanitizeName(rawName),
-                                                              usedNames: &usedNames)]
-            }
+            let picked = reserveImportNames(for: rawName, stereo: channels.count == 2)
+            let names: [String] = [picked.left] + (picked.right.map { [$0] } ?? [])
 
             for (pcm, name) in zip(channels, names) {
                 var sample = try addImportedSample(name: name, sampleRate: rate, numChannels: 1,

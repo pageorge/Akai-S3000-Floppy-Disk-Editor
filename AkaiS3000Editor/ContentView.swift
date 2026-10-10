@@ -16,6 +16,17 @@ struct ContentView: View {
     @State private var pendingOpenAction: (() -> Void)? = nil
     @State private var showingUnsavedChangesConfirm = false
     @State private var showingEmuImport = false
+    @State private var emuBank: EmuBank?
+
+    /// What this window was opened for. Kept in sync with what it shows
+    /// (.open(url) once an image is loaded) so SwiftUI can bring an existing
+    /// window forward instead of opening the same file twice, and restore
+    /// windows on relaunch.
+    @Binding var request: DiskWindowRequest?
+    @Environment(\.openWindow) private var openWindow
+    @Environment(\.controlActiveState) private var controlActiveState
+    @State private var windowID = UUID()
+    @State private var handledInitialRequest = false
 
     @State private var isContentReady = true
 
@@ -70,10 +81,13 @@ struct ContentView: View {
                     Divider()
                 }
                 Group {
-                    if greaseweazle.isBusy || !greaseweazle.logLines.isEmpty {
+                    if ownsGreaseweazleLog && (greaseweazle.isBusy || !greaseweazle.logLines.isEmpty) {
                         GreaseweazleLogView(runner: greaseweazle)
                     } else if !diskImage.isLoaded {
-                        WelcomeView(diskImage: diskImage)
+                        WelcomeView(diskImage: diskImage,
+                                    onNew: { createDiskImage() },
+                                    onOpen: { openDiskImage() },
+                                    onOpenRecent: { open($0) })
                     } else if !isContentReady {
                         ProgressView()
                             .progressViewStyle(.circular)
@@ -131,8 +145,7 @@ struct ContentView: View {
                         } label: {
                             Text("×").font(.system(size: 22))
                         }
-                        .help("Close this disk image and return to the start screen")
-                        .keyboardShortcut("w", modifiers: .command)
+                        .help("Close this disk image and return to the start screen (⌘W closes the window)")
                     }
                 }
             }
@@ -140,68 +153,71 @@ struct ContentView: View {
         .onDrop(of: [.fileURL], isTargeted: nil) { providers in
             handleDrop(providers: providers)
         }
-        .onReceive(NotificationCenter.default.publisher(for: .openDiskImage)) { _ in
-            openDiskImage()
+        // File-menu commands act on whichever window is focused.
+        .focusedSceneValue(\.diskWindowActions, DiskWindowActions(
+            newImage: { createDiskImage() },
+            openImage: { openDiskImage() },
+            importEmu: { triggerEmuImport() },
+            isLoaded: diskImage.isLoaded))
+        .background(DiskWindowCloseGuard(
+            diskImage: diskImage,
+            isEdited: diskImage.hasUnsavedChanges,
+            title: windowTitle,
+            shouldClose: { UnsavedChangesPrompt.confirm(diskImage, action: "closing") }))
+        .onChange(of: greaseweazle.isBusy) { _, busy in
+            // The read/write was started from the key window — that's this one.
+            if busy, controlActiveState == .key { claimGreaseweazle() }
         }
-        .onReceive(NotificationCenter.default.publisher(for: .createDiskImage)) { _ in
-            createDiskImage()
-        }
-        .onReceive(NotificationCenter.default.publisher(for: .importEmuDisks)) { _ in
-            if diskImage.isLoaded {
-                showingEmuImport = true
-            } else {
-                alertMessage = "Open or create an Akai disk image first — the E-mu presets are imported into it."
-                showingAlert = true
-            }
+        .onDisappear {
+            DiskImageRegistry.shared.unregister(diskImage)
         }
         .sheet(isPresented: $showingEmuImport) {
-            EmuImportSheet(diskImage: diskImage) { message in
+            EmuImportSheet(diskImage: diskImage, preloadedBank: emuBank) { message in
                 selectedTab = .programs
                 selectedProgramID = nil
                 toast = ToastData(message: message)
             }
         }
         .onChange(of: selectedTab) { _, _ in
-            if !greaseweazle.isBusy { greaseweazle.clearLog() }
+            clearOwnGreaseweazleLog()
             scheduleContentReady()
         }
         .onChange(of: selectedSampleID) { _, _ in
-            if !greaseweazle.isBusy { greaseweazle.clearLog() }
+            clearOwnGreaseweazleLog()
             scheduleContentReady()
         }
         .onChange(of: selectedProgramID) { _, _ in
-            if !greaseweazle.isBusy { greaseweazle.clearLog() }
+            clearOwnGreaseweazleLog()
             scheduleContentReady()
         }
         .onChange(of: selectedMultiID) { _, _ in
-            if !greaseweazle.isBusy { greaseweazle.clearLog() }
+            clearOwnGreaseweazleLog()
             scheduleContentReady()
         }
         .onAppear {
-            // When a Greaseweazle read finishes, auto-load the freshly read .img.
-            greaseweazle.onReadComplete = { url in
-                do {
-                    try diskImage.load(from: url)
-                    UserDefaults.standard.set(url.path, forKey: "lastOpenedImagePath")
-                    selectedSampleID = nil
-                    selectedProgramID = nil
-                    selectedMultiID = nil
-                    greaseweazle.clearLog()
-                    toast = ToastData(message: "Loaded \(url.lastPathComponent)")
-                } catch {
-                    toast = ToastData(message: "Read OK but couldn't load: \(error.localizedDescription)", isError: true)
-                }
-            }
+            handleInitialRequest()
         }
         .alert("Error", isPresented: $showingAlert) {
             Button("OK", role: .cancel) {}
         } message: {
             Text(alertMessage)
         }
+        .onReceive(NotificationCenter.default.publisher(for: .importEmuDisks)) { _ in
+            // Fired when the menu item is clicked from FileMenuButtons fallback.
+            // Only the key window should respond.
+            guard controlActiveState == .key else { return }
+            triggerEmuImport()
+        }
         .toast($toast)
         .alert(duplicateSampleCount == 1 ? "Sample already exists" : "Samples already exist", isPresented: $duplicateSampleAlert) {
-            Button("Import Anyway") { pendingSampleImport?(); pendingSampleImport = nil }
-            Button(duplicateSampleHasOtherFiles ? "Skip" : "Cancel", role: .cancel) { pendingSampleImport = nil }
+            Button("Import Anyway") {
+                NSLog("[IMPORT] ContentView duplicate prompt → Import Anyway")
+                pendingSampleImport?(); pendingSampleImport = nil
+            }
+            Button(duplicateSampleHasOtherFiles ? "Skip" : "Cancel", role: .cancel) {
+                NSLog("[IMPORT] ContentView duplicate prompt → %@", duplicateSampleHasOtherFiles ? "Skip" : "Cancel")
+                pendingSampleImport = nil
+            }
         } message: {
             Text(duplicateSampleMessage)
         }
@@ -231,6 +247,113 @@ struct ContentView: View {
         }
     }
 
+    // MARK: - Window: opening, creating, Greaseweazle ownership
+
+    /// Window/tab title: the image's file name, e.g. "Vamp.img".
+    private var windowTitle: String {
+        guard diskImage.isLoaded, let url = diskImage.imageURL else { return "S3000 Editor" }
+        return url.lastPathComponent
+    }
+
+    /// Act on what this window was opened for (runs once, when it appears).
+    private func handleInitialRequest() {
+        guard !handledInitialRequest else { return }
+        handledInitialRequest = true
+        DiskImageRegistry.shared.register(diskImage)
+        switch request {
+        case .open(let url)?:
+            if !loadInPlace(url) { request = .empty(UUID()) }
+        case .create?:
+            // Let the window finish appearing before the save panel runs.
+            DispatchQueue.main.async {
+                if !performCreateDiskImage() { request = .empty(UUID()) }
+            }
+        default:
+            break
+        }
+    }
+
+    /// Open `url`: bring its window forward if it's already open, load it here
+    /// if this window is empty, otherwise open it in a new window.
+    private func open(_ url: URL) {
+        let url = url.standardizedFileURL
+        if let existing = DiskImageRegistry.shared.image(openAt: url) {
+            if existing !== diskImage {
+                openWindow(id: DiskWindow.groupID, value: DiskWindowRequest.open(url))
+            }
+            return
+        }
+        if diskImage.isLoaded {
+            openWindow(id: DiskWindow.groupID, value: DiskWindowRequest.open(url))
+        } else {
+            loadInPlace(url)
+        }
+    }
+
+    @discardableResult
+    private func loadInPlace(_ url: URL) -> Bool {
+        do {
+            try diskImage.load(from: url)
+            didLoad(url)
+            return true
+        } catch {
+            alertMessage = error.localizedDescription
+            showingAlert = true
+            return false
+        }
+    }
+
+    /// Bookkeeping after this window loads or creates an image.
+    private func didLoad(_ url: URL) {
+        UserDefaults.standard.set(url.path, forKey: "lastOpenedImagePath")
+        selectedSampleID = nil
+        selectedSampleIDs = []
+        selectedProgramID = nil
+        selectedMultiID = nil
+        selectedTab = .samples
+        request = .open(url.standardizedFileURL)
+    }
+
+    /// Only the window that started a Greaseweazle job shows its log. Before
+    /// any job has been claimed, the key window shows messages (e.g. gw not found).
+    private var ownsGreaseweazleLog: Bool {
+        if let owner = greaseweazle.ownerWindowID { return owner == windowID }
+        return controlActiveState == .key
+    }
+
+    private func clearOwnGreaseweazleLog() {
+        if ownsGreaseweazleLog && !greaseweazle.isBusy { greaseweazle.clearLog() }
+    }
+
+    /// Take the Greaseweazle for this window: its log shows here, and a freshly
+    /// read image loads here (or in a new window if this one already has an image).
+    private func claimGreaseweazle() {
+        greaseweazle.ownerWindowID = windowID
+        greaseweazle.onReadComplete = { url in
+            let url = url.standardizedFileURL
+            greaseweazle.clearLog()
+            if let existing = DiskImageRegistry.shared.image(openAt: url) {
+                // The read just overwrote a file that's open somewhere — reload it.
+                do {
+                    try existing.load(from: url)
+                } catch {
+                    toast = ToastData(message: "Read OK but couldn't reload: \(error.localizedDescription)", isError: true)
+                    return
+                }
+                if existing !== diskImage {
+                    openWindow(id: DiskWindow.groupID, value: DiskWindowRequest.open(url))
+                }
+            } else if diskImage.isLoaded {
+                openWindow(id: DiskWindow.groupID, value: DiskWindowRequest.open(url))
+            } else if !loadInPlace(url) {
+                return
+            }
+            toast = ToastData(message: "Loaded \(url.lastPathComponent)")
+        }
+    }
+
+    // MARK: - Close / save
+
     /// Close the current disk image and return to the welcome screen. Respects
     /// unsaved changes by routing through the same confirmation dialog as Open/New.
     private func closeDiskImage() {
@@ -240,7 +363,8 @@ struct ContentView: View {
             selectedProgramID = nil
             selectedMultiID = nil
             selectedTab = .samples
-            greaseweazle.clearLog()
+            clearOwnGreaseweazleLog()
+            request = .empty(UUID())
         }
         if diskImage.hasUnsavedChanges {
             pendingOpenAction = doClose
@@ -259,67 +383,73 @@ struct ContentView: View {
         }
     }
 
+    /// Open one or more images. The first loads here if this window is empty;
+    /// the rest (or all, if this window already has an image) get their own windows.
     private func openDiskImage() {
-        if diskImage.hasUnsavedChanges {
-            pendingOpenAction = { performOpenDiskImage() }
-            showingUnsavedChangesConfirm = true
-            return
-        }
-        performOpenDiskImage()
+        for url in DiskWindow.chooseImages() { open(url) }
     }
 
+    /// New blank image: here if this window is empty, otherwise in a new window.
     private func createDiskImage() {
-        if diskImage.hasUnsavedChanges {
-            pendingOpenAction = { performCreateDiskImage() }
-            showingUnsavedChangesConfirm = true
-            return
+        if diskImage.isLoaded {
+            openWindow(id: DiskWindow.groupID, value: DiskWindowRequest.create(UUID()))
+        } else {
+            performCreateDiskImage()
         }
-        performCreateDiskImage()
     }
 
-    private func performCreateDiskImage() {
+    /// Returns false if the user cancelled or creation failed.
+    @discardableResult
+    private func performCreateDiskImage() -> Bool {
         let panel = NSSavePanel()
         panel.allowedContentTypes = [.init(filenameExtension: "img")!]
         panel.title = "Create New Akai S3000 Disk Image"
         panel.nameFieldStringValue = "new_disk.img"
         panel.prompt = "Create"
-        if panel.runModal() == .OK, let url = panel.url {
-            do {
-                // Use the file's base name (uppercased, Akai-clamped) as the volume label.
-                let vol = url.deletingPathExtension().lastPathComponent
-                try diskImage.createBlankImage(at: url, volumeName: vol)
-                UserDefaults.standard.set(url.path, forKey: "lastOpenedImagePath")
-                selectedSampleID = nil
-                selectedProgramID = nil
-                selectedMultiID = nil
-                toast = ToastData(message: "Created \(url.lastPathComponent)")
-            } catch {
-                alertMessage = error.localizedDescription
-                showingAlert = true
-            }
+        guard panel.runModal() == .OK, let url = panel.url else { return false }
+        // Creating over a file that's open in another window would leave two
+        // windows on the same file (SwiftUI then closes one of them) and the
+        // other window showing stale contents.
+        if let other = DiskImageRegistry.shared.image(openAt: url), other !== diskImage {
+            alertMessage = "“\(url.lastPathComponent)” is open in another window. Close it first, or choose a different name."
+            showingAlert = true
+            return false
+        }
+        do {
+            // Use the file's base name (uppercased, Akai-clamped) as the volume label.
+            let vol = url.deletingPathExtension().lastPathComponent
+            try diskImage.createBlankImage(at: url, volumeName: vol)
+            didLoad(url)
+            toast = ToastData(message: "Created \(url.lastPathComponent)")
+            return true
+        } catch {
+            alertMessage = error.localizedDescription
+            showingAlert = true
+            return false
         }
     }
 
-    private func performOpenDiskImage() {
+    private func triggerEmuImport() {
         let panel = NSOpenPanel()
-        panel.allowsMultipleSelection = false
+        panel.allowsMultipleSelection = true
         panel.canChooseDirectories = false
-        panel.allowedContentTypes = [.init(filenameExtension: "img")!,
-                                     .init(filenameExtension: "ima")!,
-                                     .data]
-        panel.title = "Open Akai S3000 Disk Image"
-
-        if panel.runModal() == .OK, let url = panel.url {
-            do {
-                try diskImage.load(from: url)
-                UserDefaults.standard.set(url.path, forKey: "lastOpenedImagePath")
-                selectedSampleID = nil
-                selectedProgramID = nil
-                selectedMultiID = nil
-            } catch {
-                alertMessage = error.localizedDescription
-                showingAlert = true
+        panel.allowedContentTypes = [.data]
+        panel.title = "Choose E-mu ESI Disk Images or Bank File"
+        panel.prompt = "Open"
+        guard panel.runModal() == .OK, !panel.urls.isEmpty else { return }
+        do {
+            let loaded = try EmuESIParser.load(urls: panel.urls)
+            emuBank = loaded
+            if !diskImage.isLoaded {
+                let name = loaded.name.isEmpty ? "EMU IMPORT" : loaded.name
+                let tmpURL = FileManager.default.temporaryDirectory
+                    .appendingPathComponent(AkaiDiskImage.sanitizeName(name) + ".img")
+                try diskImage.createBlankImage(at: tmpURL, volumeName: name)
             }
+            showingEmuImport = true
+        } catch {
+            alertMessage = error.localizedDescription
+            showingAlert = true
         }
     }
 
@@ -330,112 +460,18 @@ struct ContentView: View {
         panel.title = "Import WAV as Sample"
 
         if panel.runModal() == .OK {
-            for url in panel.urls {
-                importSample(from: url)
-            }
+            importFiles(panel.urls)
         }
     }
 
-    /// Import a single audio file at `url` as a new sample in the loaded disk.
-    /// `release` (if provided) is called once the file read completes — used to
-    /// drop security-scoped access for dropped files.
-    private func applyLoFi(pcm: Data, fromRate: Int) -> (Data, UInt32) {
-        AkaiDiskImage.applyLoFi(pcm: pcm, fromRate: fromRate)
-    }
-
-    private func importSample(from url: URL, release: (() -> Void)? = nil) {
-        let loFi = lowQualityImport
-        DispatchQueue.global(qos: .userInitiated).async {
-            defer { release?() }
-            // Read file once.
-            guard let wavData = try? Data(contentsOf: url),
-                  wavData.count > 44,
-                  wavData[0..<4] == Data("RIFF".utf8),
-                  wavData[8..<12] == Data("WAVE".utf8) else {
-                // Not a WAV — try importAndAddSample which handles AIFF etc.
-                do {
-                    let s = try self.diskImage.importAndAddSample(from: url)
-                    DispatchQueue.main.async { self.selectedSampleID = s.id; self.selectedTab = .samples }
-                } catch {
-                    DispatchQueue.main.async { self.alertMessage = error.localizedDescription; self.showingAlert = true }
-                }
-                return
-            }
-            // Parse WAV once.
-            var offset = 12; var sampleRate = 44100; var numChannels = 1; var bitsPerSample = 16; var pcm = Data()
-            while offset + 8 <= wavData.count {
-                let id = String(bytes: wavData[offset..<offset+4], encoding: .ascii) ?? ""
-                let size = Int(wavData.readLE32(at: offset + 4)); offset += 8
-                if id == "fmt " { numChannels = Int(wavData.readLE16(at: offset+2)); sampleRate = Int(wavData.readLE32(at: offset+4)); bitsPerSample = Int(wavData.readLE16(at: offset+14)) }
-                else if id == "data" { pcm = wavData.subdata(in: offset..<min(offset+size, wavData.count)) }
-                offset += size + (size % 2)
-            }
-            guard !pcm.isEmpty else { return }
-            // Normalise to 16-bit LE mono.
-            let pcm16: Data
-            if bitsPerSample == 24 {
-                // 24-bit: 3 bytes per sample, take top 2 (bytes 1 and 2) for 16-bit.
-                let bytesPerFrame = (bitsPerSample / 8) * numChannels
-                var out = Data(); out.reserveCapacity((pcm.count / bytesPerFrame) * 2 * numChannels)
-                var i = 0
-                while i + bytesPerFrame <= pcm.count {
-                    for ch in 0..<numChannels {
-                        let base = i + ch * 3
-                        // 24-bit LE: bytes are [lo, mid, hi]. Top 16 = mid+hi.
-                        out.append(pcm[base + 1])
-                        out.append(pcm[base + 2])
-                    }
-                    i += bytesPerFrame
-                }
-                pcm16 = out
-            } else {
-                pcm16 = pcm
-            }
-            let left = numChannels >= 2 ? AkaiDiskImage.deinterleaveStereo(pcm16, channels: numChannels).0 : pcm16
-            let right = numChannels >= 2 ? AkaiDiskImage.deinterleaveStereo(pcm16, channels: numChannels).1 : nil
-            // Duplicate check on left channel.
-            let dupes = self.diskImage.duplicateSampleNames(forPCM: left)
-            if !dupes.isEmpty {
-                DispatchQueue.main.async {
-                    self.duplicateSampleCount = dupes.count
-                    self.duplicateSampleHasOtherFiles = false
-                    self.duplicateSampleMessage = "\(url.lastPathComponent) already exists on the disk. Import anyway?"
-                    self.pendingSampleImport = {
-                        DispatchQueue.global(qos: .userInitiated).async {
-                            self.doImport(url: url, left: left, right: right, sampleRate: sampleRate, numChannels: numChannels, loFi: loFi)
-                        }
-                    }
-                    self.duplicateSampleAlert = true
-                }
-                return
-            }
-            self.doImport(url: url, left: left, right: right, sampleRate: sampleRate, numChannels: numChannels, loFi: loFi)
-        }
-    }
-
-    private func doImport(url: URL, left: Data, right: Data?, sampleRate: Int, numChannels: Int, loFi: Bool) {
+    /// Write pipeline output to the disk as mono samples (an -L/-R pair for stereo).
+    private func addChannels(_ channels: [AudioImportPipeline.Channel]) {
         do {
-            let raw = url.deletingPathExtension().lastPathComponent
-            let stem = AkaiDiskImage.sanitizeName(raw)
-            let isStereo = numChannels >= 2
-            let stemL = isStereo ? AkaiDiskImage.sanitizeNamePreservingEnd(raw, maxLen: 10) + "-L" : stem
-            let stemR = AkaiDiskImage.sanitizeNamePreservingEnd(raw, maxLen: 10) + "-R"
-            if loFi {
-                let (loPCM, loRate) = applyLoFi(pcm: left, fromRate: sampleRate)
-                let newL = try diskImage.addImportedSample(name: stemL, sampleRate: loRate, numChannels: 1, pcmData: loPCM)
-                DispatchQueue.main.async { self.selectedSampleID = newL.id; self.selectedTab = .samples }
-                if isStereo, let r = right {
-                    let (roPCM, roRate) = applyLoFi(pcm: r, fromRate: sampleRate)
-                    let newR = try diskImage.addImportedSample(name: stemR, sampleRate: roRate, numChannels: 1, pcmData: roPCM)
-                    DispatchQueue.main.async { self.selectedSampleID = newR.id }
-                }
-            } else {
-                let newL = try diskImage.addImportedSample(name: stemL, sampleRate: UInt32(sampleRate), numChannels: 1, pcmData: left)
-                DispatchQueue.main.async { self.selectedSampleID = newL.id; self.selectedTab = .samples }
-                if isStereo, let r = right {
-                    let newR = try diskImage.addImportedSample(name: stemR, sampleRate: UInt32(sampleRate), numChannels: 1, pcmData: r)
-                    DispatchQueue.main.async { self.selectedSampleID = newR.id }
-                }
+            for ch in channels {
+                let s = try diskImage.addImportedSample(name: ch.name, sampleRate: ch.sampleRate,
+                                                        numChannels: 1, pcmData: ch.pcm,
+                                                        forceName: true)
+                DispatchQueue.main.async { self.selectedSampleID = s.id; self.selectedTab = .samples }
             }
         } catch {
             DispatchQueue.main.async { self.alertMessage = error.localizedDescription; self.showingAlert = true }
@@ -478,9 +514,9 @@ struct ContentView: View {
                         showingAlert = true
                         return
                     }
-                    importSample(from: url, release: release)
+                    importFiles([url], release: release)
                 } else if diskImage.isLoaded {
-                    importSample(from: url, release: release)
+                    importFiles([url], release: release)
                 } else {
                     handleDroppedDisk(url: url, release: release)
                 }
@@ -499,62 +535,65 @@ struct ContentView: View {
             .filter { audioExts.contains($0.pathExtension.lowercased()) }
             .sorted { $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedAscending }
         release() // folder access done; each file gets its own security scope
-        guard !audioURLs.isEmpty else { return }
-        DispatchQueue.global(qos: .userInitiated).async {
-            var clean: [URL] = []
-            var dupeURLs: [URL] = []
-            var dupeFileNames: [String] = []
+        importFiles(audioURLs)
+    }
 
+    /// Import one or more audio files as new samples. The whole batch shares a
+    /// single resample prompt and a single "already on the disk" prompt.
+    /// `release` (if provided) runs once every file has been read — used to
+    /// drop security-scoped access for dropped files.
+    private func importFiles(_ audioURLs: [URL], release: (() -> Void)? = nil) {
+        NSLog("[IMPORT] ContentView.importFiles %d file(s)", audioURLs.count)
+        guard !audioURLs.isEmpty else { release?(); return }
+        let loFi = lowQualityImport
+        DispatchQueue.global(qos: .userInitiated).async {
+            defer { release?() }
+            var clean: [[AudioImportPipeline.Channel]] = []
+            var dupes: [[AudioImportPipeline.Channel]] = []
+            var dupeFileNames: [String] = []
+            let consent = AudioImportPipeline.ResampleConsent()   // ask once per batch
+
+            // Decode + convert every file first, then sort into new vs. already-on-disk.
             for fileURL in audioURLs {
-                let accessing = fileURL.startAccessingSecurityScopedResource()
-                defer { if accessing { fileURL.stopAccessingSecurityScopedResource() } }
-                guard let wavData = try? Data(contentsOf: fileURL),
-                      wavData.count > 44,
-                      wavData[0..<4] == Data("RIFF".utf8),
-                      wavData[8..<12] == Data("WAVE".utf8) else { clean.append(fileURL); continue }
-                var offset = 12; var numChannels = 1; var pcm = Data()
-                while offset + 8 <= wavData.count {
-                    let id = String(bytes: wavData[offset..<offset+4], encoding: .ascii) ?? ""
-                    let size = Int(wavData.readLE32(at: offset + 4)); offset += 8
-                    if id == "fmt " { numChannels = Int(wavData.readLE16(at: offset+2)) }
-                    else if id == "data" { pcm = wavData.subdata(in: offset..<min(offset+size, wavData.count)) }
-                    offset += size + (size % 2)
+                let channels: [AudioImportPipeline.Channel]
+                do {
+                    channels = try AudioImportPipeline.process(
+                        url: fileURL, loFi: loFi, stereo: .stereoLR,
+                        names: diskImage, consent: consent)
+                } catch AkaiError.cancelled {
+                    return   // user declined the resample prompt — import nothing
+                } catch {
+                    // One file: say why it failed. A batch: skip it and carry on.
+                    if audioURLs.count == 1 {
+                        DispatchQueue.main.async { alertMessage = error.localizedDescription; showingAlert = true }
+                    }
+                    continue
                 }
-                guard !pcm.isEmpty else { clean.append(fileURL); continue }
-                let checkPCM = numChannels >= 2 ? AkaiDiskImage.deinterleaveStereo(pcm, channels: numChannels).0 : pcm
-                let dupes = diskImage.duplicateSampleNames(forPCM: checkPCM)
-                if dupes.isEmpty {
-                    clean.append(fileURL)
+                guard let first = channels.first else { continue }
+                let matches = diskImage.duplicateSampleNames(forPCM: first.pcm)
+                NSLog("[IMPORT] ContentView dupe check %@ → names [%@] | PCM matches on disk: [%@]",
+                      fileURL.lastPathComponent, channels.map(\.name).joined(separator: ", "),
+                      matches.joined(separator: ", "))
+                if matches.isEmpty {
+                    clean.append(channels)
                 } else {
-                    dupeURLs.append(fileURL)
+                    dupes.append(channels)
                     dupeFileNames.append(fileURL.lastPathComponent)
                 }
             }
 
             // Import non-duplicate files immediately.
-            for fileURL in clean {
-                let accessing = fileURL.startAccessingSecurityScopedResource()
-                if let s = try? diskImage.importAndAddSample(from: fileURL) {
-                    DispatchQueue.main.async { selectedSampleID = s.id; selectedTab = .samples }
-                }
-                if accessing { fileURL.stopAccessingSecurityScopedResource() }
-            }
+            for channels in clean { addChannels(channels) }
 
-            guard !dupeURLs.isEmpty else { return }
+            guard !dupes.isEmpty else { return }
 
             DispatchQueue.main.async {
-                duplicateSampleCount = dupeURLs.count
+                duplicateSampleCount = dupes.count
                 duplicateSampleHasOtherFiles = !clean.isEmpty
-                duplicateSampleMessage = "\(dupeFileNames.joined(separator: ", ")) already exist\(dupeURLs.count == 1 ? "s" : "") on the disk. Import anyway?"
+                duplicateSampleMessage = AkaiDiskImage.duplicateImportMessage(dupeFileNames)
                 pendingSampleImport = {
                     DispatchQueue.global(qos: .userInitiated).async {
-                        for fileURL in dupeURLs {
-                            let accessing = fileURL.startAccessingSecurityScopedResource()
-                            if let s = try? diskImage.importAndAddSample(from: fileURL) {
-                                DispatchQueue.main.async { selectedSampleID = s.id; selectedTab = .samples }
-                            }
-                            if accessing { fileURL.stopAccessingSecurityScopedResource() }
-                        }
+                        for channels in dupes { addChannels(channels) }
                     }
                 }
                 duplicateSampleAlert = true
@@ -562,26 +601,10 @@ struct ContentView: View {
         }
     }
 
+    /// A dropped disk image loads here if this window is empty, otherwise it
+    /// opens in its own window — it never replaces the image already shown.
     private func handleDroppedDisk(url: URL, release: @escaping () -> Void) {
-        let openIt = {
-            defer { release() }
-            do {
-                try diskImage.load(from: url)
-                UserDefaults.standard.set(url.path, forKey: "lastOpenedImagePath")
-                selectedSampleID = nil
-                selectedProgramID = nil
-                selectedMultiID = nil
-            } catch {
-                alertMessage = error.localizedDescription
-                showingAlert = true
-            }
-        }
-        if diskImage.hasUnsavedChanges {
-            // Defer the open (and the access release) until the user resolves the dialog.
-            pendingOpenAction = openIt
-            showingUnsavedChangesConfirm = true
-        } else {
-            openIt()
-        }
+        defer { release() }
+        open(url)
     }
 }

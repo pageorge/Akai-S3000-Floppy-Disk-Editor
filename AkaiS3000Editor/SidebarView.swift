@@ -253,6 +253,7 @@ struct SidebarView: View {
     /// Open a file picker for a single WAV/AIFF, import it, and create a
     /// program with one keyzone spanning the full keyboard (C0–G8).
     private func createPresetFromSample() {
+        NSLog("[IMPORT] SidebarView.createPresetFromSample")
         let panel = NSOpenPanel()
         panel.canChooseFiles = true
         panel.canChooseDirectories = false
@@ -277,29 +278,11 @@ struct SidebarView: View {
             let accessing = url.startAccessingSecurityScopedResource()
             defer { if accessing { url.stopAccessingSecurityScopedResource() } }
             do {
-                let wavData = try Data(contentsOf: url)
-                let (pcmData, sampleRate, numChannels) = try Self.parseWAVMinimal(wavData)
-                let baseName = AkaiDiskImage.sanitizeName(
-                    url.deletingPathExtension().lastPathComponent)
-                var monoData: Data; var monoName: String
-                if numChannels >= 2 {
-                let (left, _) = AkaiDiskImage.deinterleaveStereo(pcmData, channels: numChannels)
-                monoData = left
-                monoName = AkaiDiskImage.sanitizeNamePreservingEnd(baseName, maxLen: 10) + "-L"
-                } else {
-                monoData = pcmData
-                monoName = String(baseName.prefix(12))
-                }
-                let finalRate: UInt32
-                if loFi {
-                    let (loPCM, loRate) = Self.applyLoFi(pcm: monoData, fromRate: sampleRate)
-                    monoData = loPCM; finalRate = loRate
-                } else {
-                    finalRate = UInt32(sampleRate)
-                }
+                guard let ch = try AudioImportPipeline.process(
+                    url: url, loFi: loFi, names: diskImage).first else { return }
                 let sample = try diskImage.addImportedSample(
-                    name: monoName, sampleRate: finalRate,
-                    numChannels: 1, pcmData: monoData)
+                    name: ch.name, sampleRate: ch.sampleRate,
+                    numChannels: 1, pcmData: ch.pcm, forceName: true)
                 let kz = AkaiProgramKeyzone(
                     sampleName: sample.header.name,
                     lowKey: 24, highKey: UInt8(PianoKeyboardView.visibleEndNote), rootNote: 60,
@@ -319,6 +302,8 @@ struct SidebarView: View {
                     selectedProgramIDs = [prog.id]
                     programSelectionAnchorID = prog.id
                 }
+            } catch AkaiError.cancelled {
+                return
             } catch {
                 DispatchQueue.main.async {
                     cloneSpaceMessage = error.localizedDescription
@@ -334,6 +319,7 @@ struct SidebarView: View {
     /// mid-batch) are reported via an alert; the successfully-imported samples
     /// and their keyzones are still committed.
     private func createDrumPresetFromFolder() {
+        NSLog("[IMPORT] SidebarView.createDrumPresetFromFolder")
         let panel = NSOpenPanel()
         panel.canChooseFiles = false
         panel.canChooseDirectories = true
@@ -378,35 +364,19 @@ struct SidebarView: View {
             var nextNote: Int = 36   // C1
             var hitDiskLimit = false
             var limitMessage = ""
+            let consent = AudioImportPipeline.ResampleConsent()   // ask once per folder
 
             for url in audioURLs {
                 let accessing = url.startAccessingSecurityScopedResource()
                 defer { if accessing { url.stopAccessingSecurityScopedResource() } }
 
                 do {
-                    let wavData = try Data(contentsOf: url)
-                    let (pcmData, sampleRate, numChannels) = try Self.parseWAVMinimal(wavData)
-                    let baseName = AkaiDiskImage.sanitizeName(
-                        url.deletingPathExtension().lastPathComponent)
-                    var monoData: Data; var monoName: String
-                    if numChannels >= 2 {
-                        let (left, _) = AkaiDiskImage.deinterleaveStereo(pcmData, channels: numChannels)
-                        monoData = left
-                        monoName = AkaiDiskImage.sanitizeNamePreservingEnd(baseName, maxLen: 10) + "-L"
-                    } else {
-                        monoData = pcmData
-                        monoName = String(baseName.prefix(12))
-                    }
-                    let finalRate: UInt32
-                    if loFi {
-                        let (loPCM, loRate) = Self.applyLoFi(pcm: monoData, fromRate: sampleRate)
-                        monoData = loPCM; finalRate = loRate
-                    } else {
-                        finalRate = UInt32(sampleRate)
-                    }
+                    guard let ch = try AudioImportPipeline.process(
+                        url: url, loFi: loFi, names: diskImage, consent: consent).first
+                    else { continue }
                     let sample = try diskImage.addImportedSample(
-                        name: monoName, sampleRate: finalRate,
-                        numChannels: 1, pcmData: monoData)
+                        name: ch.name, sampleRate: ch.sampleRate,
+                        numChannels: 1, pcmData: ch.pcm, forceName: true)
                     let note = UInt8(min(nextNote, 127))
                     var patched = sample; patched.header.midiRootNote = note
                     diskImage.applySampleEdits(patched)
@@ -421,6 +391,8 @@ struct SidebarView: View {
                         playbackMode: .sample, velocityLow: 0, velocityHigh: 127,
                         pitchMode: 0))   // TRACK — bendable, unity at its own key
                     nextNote += 1
+                } catch AkaiError.cancelled {
+                    break   // user declined the resample prompt — keep what's imported so far
                 } catch {
                     // Disk full or directory full — stop importing.
                     hitDiskLimit = true
@@ -449,51 +421,6 @@ struct SidebarView: View {
                 }
             }
         }
-    }
-
-    /// Minimal WAV/AIFF parser — extracts PCM data, sample rate, channel count.
-    /// Mirrors the per-struct parsers in the drop zones but lives here so
-    /// SidebarView can use it without depending on a struct that may not exist.
-    private static func applyLoFi(pcm: Data, fromRate: Int) -> (Data, UInt32) {
-        AkaiDiskImage.applyLoFi(pcm: pcm, fromRate: fromRate)
-    }
-
-    private static func parseWAVMinimal(_ data: Data) throws -> (Data, Int, Int) {
-        guard data.count > 44,
-              data[0..<4] == Data("RIFF".utf8),
-              data[8..<12] == Data("WAVE".utf8) else {
-            throw NSError(domain: "WAV", code: 0,
-                          userInfo: [NSLocalizedDescriptionKey: "Not a valid WAV file"])
-        }
-        var offset = 12, sampleRate = 44100, numChannels = 1, bitsPerSample = 16
-        var pcmData = Data()
-        while offset + 8 <= data.count {
-            let id = String(bytes: data[offset..<offset+4], encoding: .ascii) ?? ""
-            let size = Int(data.readLE32(at: offset + 4)); offset += 8
-            if id == "fmt " {
-                numChannels = Int(data.readLE16(at: offset + 2))
-                sampleRate  = Int(data.readLE32(at: offset + 4))
-                bitsPerSample = Int(data.readLE16(at: offset + 14))
-            } else if id == "data" {
-                pcmData = data.subdata(in: offset..<min(offset + size, data.count))
-            }
-            offset += size + (size % 2)
-        }
-        guard !pcmData.isEmpty else {
-            throw NSError(domain: "WAV", code: 1,
-                          userInfo: [NSLocalizedDescriptionKey: "No audio data"])
-        }
-        if bitsPerSample == 24 {
-            let bytesPerFrame = 3 * numChannels
-            var out = Data(); out.reserveCapacity((pcmData.count / bytesPerFrame) * 2 * numChannels)
-            var i = 0
-            while i + bytesPerFrame <= pcmData.count {
-                for ch in 0..<numChannels { out.append(pcmData[i + ch*3 + 1]); out.append(pcmData[i + ch*3 + 2]) }
-                i += bytesPerFrame
-            }
-            return (out, sampleRate, numChannels)
-        }
-        return (pcmData, sampleRate, numChannels)
     }
 
     private func beginVolumeRename() {
@@ -561,9 +488,13 @@ struct SidebarView: View {
         }
         .listStyle(.sidebar)
         .focused($sidebarFocused)
-        .navigationTitle("S3000 Editor")
+        .navigationTitle(diskImage.isLoaded
+            ? (diskImage.imageURL?.lastPathComponent ?? "S3000 Editor")
+            : "S3000 Editor")
         .onAppear {
             deleteKeyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
+                // Keys typed in another disk image's window aren't ours.
+                guard self.diskImage.ownsKeyEvent(event) else { return event }
                 guard !self.diskImage.isEditingText else { return event }
                 // Bow out entirely while a program's keyzone list has an active
                 // selection. NSEvent local monitors fire in REGISTRATION order

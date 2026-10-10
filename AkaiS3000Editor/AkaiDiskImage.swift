@@ -714,6 +714,10 @@ class AkaiDiskImage: ObservableObject {
     /// (the sample is still being written, or `samples` hasn't caught up on
     /// the main thread). Guarded by `importNamesLock`.
     private var reservedImportNames = Set<String>()
+    /// Files dropped on the Programs start screen, waiting for the newly
+    /// created program's editor to open and import them through its normal
+    /// drop flow (layout prompt, key placement, stereo handling).
+    @Published var pendingProgramDrop: PendingProgramDrop? = nil
     private let importNamesLock = NSLock()
 
     @Published var isLoaded    = false
@@ -3386,6 +3390,12 @@ class AkaiDiskImage: ObservableObject {
         hasUnsavedChanges = true
         return progFile
     }
+}
+
+/// See `AkaiDiskImage.pendingProgramDrop`.
+struct PendingProgramDrop: Equatable {
+    let programID: UUID
+    let urls: [URL]
 }
 
 // MARK: - Errors

@@ -3,7 +3,7 @@ import SwiftUI
 /// How new keyzones are laid out on the keyboard when samples are assigned.
 enum KeyzoneLayout {
     case singleKey   // One key per sample, C1 onwards — drum/one-shot style
-    case fullKeyboard // Divide 24–127 evenly across all samples
+    case fullKeyboard // Divide the on-screen keyboard (24–95) evenly across all samples
 }
 
 struct ProgramDetailView: View {
@@ -26,7 +26,7 @@ struct ProgramDetailView: View {
     /// will appear on next assignment). Resets when a different program is opened.
     @State private var keyzoneLayout: KeyzoneLayout? = nil
     @State private var showLayoutPicker = false
-    @State private var pendingLayoutAction: (() -> Void)? = nil
+    @State private var pendingLayoutActions: [() -> Void] = []
     /// Highlights the "Add Samples" drop zone while a file/folder is dragged over
     /// the program view. Bound to the whole-view .onDrop's isTargeted.
     @State private var dropTargeted = false
@@ -318,17 +318,20 @@ struct ProgramDetailView: View {
 
                 // Right: sample picker + piano keyboard + keyzone editor
                 VStack(alignment: .leading, spacing: 0) {
-                    // Add Samples drop zone pinned at top
-                    VStack(alignment: .leading, spacing: 4) {
+                    // Add Samples drop zone pinned at top. Title style, title→box gap
+                    // and 16pt margins match the left column's InfoCards (Program
+                    // Settings); 8 below + the next GroupBox's 8 on top = the left
+                    // column's 16pt gap between cards.
+                    VStack(alignment: .leading, spacing: 6) {
                         Text("Add Samples")
-                            .font(.headline)
-                            .padding(.horizontal, 16)
-                            .padding(.top, 16)
+                            .font(.headline.weight(.semibold))
+                            .foregroundStyle(.primary)
                         SimpleDropZone(isTargeted: dropTargeted)
-                            .padding(.horizontal, 16)
-                            .padding(.bottom, 8)
                     }
-                    .frame(maxWidth: .infinity, maxHeight: 150)
+                    .padding(.horizontal, 16)
+                    .padding(.top, 16)
+                    .padding(.bottom, 8)
+                    .frame(maxWidth: .infinity, alignment: .leading)
 
                     // Everything else scrolls below
                     ScrollView {
@@ -339,7 +342,7 @@ struct ProgramDetailView: View {
                                         ForEach(diskImage.samples) { sample in samplePill(for: sample) }
                                     }
                                 }
-                                .padding(.horizontal).padding(.top, 8).padding(.bottom, 4)
+                                .padding(.horizontal, 16).padding(.top, 8).padding(.bottom, 4)
 
                                 GroupBox("Stereo Right Channel (Zone 2, optional)") {
                                     VStack(alignment: .leading, spacing: 6) {
@@ -350,18 +353,32 @@ struct ProgramDetailView: View {
                                             .font(.caption2).foregroundStyle(.secondary)
                                     }
                                 }
-                                .padding(.horizontal).padding(.bottom, 4)
+                                .padding(.horizontal, 16).padding(.bottom, 4)
                             }
 
                             if !editedProgram.keyzones.isEmpty && anchorKeyzoneIndex != nil {
                                 PianoKeyboardView(
-                                    keyzones: editedProgram.keyzones,
+                                    // Show each zone's real root (from its sample header).
+                                    keyzones: keyzonesWithSampleRoots,
                                     selectedIndex: anchorKeyzoneIndex,
                                     onKeyzoneChanged: { updated in
-                                        if let idx = anchorKeyzoneIndex, idx < editedProgram.keyzones.count {
-                                            applyToSelectedKeyzones(updated, primaryIndex: idx)
-                                            commitProgramEdits()
+                                        guard let idx = anchorKeyzoneIndex, idx < editedProgram.keyzones.count else { return }
+                                        if updated.rootNote != sampleRootBinding(idx).wrappedValue {
+                                            // Root handle dragged → it's the sample's root that moves
+                                            // (for every selected keyzone, like the other handles).
+                                            let targets = [idx] + selectedKeyzoneIndices.subtracting([idx]).sorted()
+                                            NSLog("[ROOT] keyboard drag → %@ for keyzone(s) %@",
+                                                  midiNoteNameStatic(updated.rootNote),
+                                                  targets.map { String($0 + 1) }.joined(separator: ","))
+                                            for i in targets { setSampleRoot(updated.rootNote, forKeyzone: i) }
+                                            return
                                         }
+                                        // Low/High drag: don't let the displayed sample root leak
+                                        // into the keyzone's own (unsaved) root field.
+                                        var zone = updated
+                                        zone.rootNote = editedProgram.keyzones[idx].rootNote
+                                        applyToSelectedKeyzones(zone, primaryIndex: idx)
+                                        commitProgramEdits()
                                     }
                                 )
                                 .frame(height: 140)
@@ -371,19 +388,11 @@ struct ProgramDetailView: View {
                                     HStack {
                                         MidiKeyPicker(label: "Low", value: keyzoneFieldBinding(idx, \.lowKey), onChange: { commitProgramEdits() })
                                         Spacer()
-                                        let sampleRkey: UInt8 = {
-                                            let kzName = editedProgram.keyzones[idx].sampleName
-                                            return diskImage.samples.first(where: {
-                                                ($0.header.name.isEmpty ? $0.directoryEntry.name : $0.header.name) == kzName
-                                            })?.header.midiRootNote ?? editedProgram.keyzones[idx].rootNote
-                                        }()
-                                        HStack {
-                                            Text("Root").frame(width: 80, alignment: .leading).font(.subheadline)
-                                            Text(midiNoteNameStatic(sampleRkey))
-                                                .font(.system(.body, design: .monospaced))
-                                                .foregroundStyle(.secondary)
-                                            Text("(sample root)").font(.caption).foregroundStyle(.tertiary)
-                                        }
+                                        // Root lives in the sample header (S3000 keygroups have
+                                        // no root of their own) — this picker edits the mapped
+                                        // sample(s) directly. See setSampleRoot.
+                                        MidiKeyPicker(label: "Root", value: sampleRootBinding(idx), onChange: {})
+                                            .help("Sets the root note of the sample(s) this keyzone plays. The root belongs to the sample, so any other keyzone or program using the same sample changes too.")
                                         Spacer()
                                         MidiKeyPicker(label: "High", value: keyzoneFieldBinding(idx, \.highKey), onChange: { commitProgramEdits() })
                                     }
@@ -414,6 +423,33 @@ struct ProgramDetailView: View {
         .onChange(of: isDirty) { _, dirty in
             if dirty { diskImage.hasUnsavedChanges = true }
         }
+        .onAppear {
+            NSLog("[IMPORT] ProgramDetailView.onAppear %@ pendingDrop=%@", programFile.program.name,
+                  diskImage.pendingProgramDrop.map { "\($0.urls.count) item(s) for \($0.programID == programFile.id ? "THIS" : "OTHER") program" } ?? "none")
+            // Presenting the layout dialog during onAppear gets swallowed —
+            // wait until the view is actually on screen.
+            DispatchQueue.main.async { consumePendingDrop() }
+        }
+        .onChange(of: diskImage.pendingProgramDrop) { DispatchQueue.main.async { consumePendingDrop() } }
+        .onChange(of: showLayoutPicker) { _, showing in
+            NSLog("[IMPORT] ProgramDetailView showLayoutPicker → %d (layout=%@, queued=%d)",
+                  showing ? 1 : 0,
+                  keyzoneLayout == .singleKey ? "single" : keyzoneLayout == .fullKeyboard ? "full" : "none",
+                  pendingLayoutActions.count)
+            // Picker dismissed without a choice — drop what was waiting.
+            if !showing && keyzoneLayout == nil {
+                if !pendingLayoutActions.isEmpty {
+                    NSLog("[IMPORT] ProgramDetailView layout picker dismissed — discarding %d queued import(s)",
+                          pendingLayoutActions.count)
+                    pendingLayoutActions = []
+                }
+                if let pending = diskImage.pendingProgramDrop, pending.programID == programFile.id {
+                    NSLog("[IMPORT] ProgramDetailView layout picker dismissed — discarding %d handed-over item(s)",
+                          pending.urls.count)
+                    diskImage.pendingProgramDrop = nil
+                }
+            }
+        }
         .confirmationDialog(
             selectedKeyzoneIndices.count > 1 ? "Delete \(selectedKeyzoneIndices.count) keyzones?" : "Delete this keyzone?",
             isPresented: $showDeleteKeyzoneConfirm,
@@ -440,13 +476,11 @@ struct ProgramDetailView: View {
             isPresented: $showLayoutPicker, titleVisibility: .visible) {
             Button("Single Key (C1, C#1, D1…)") {
                 keyzoneLayout = .singleKey
-                pendingLayoutAction?()
-                pendingLayoutAction = nil
+                runPendingLayoutActions()
             }
             Button("Full Keyboard (divide evenly)") {
                 keyzoneLayout = .fullKeyboard
-                pendingLayoutAction?()
-                pendingLayoutAction = nil
+                runPendingLayoutActions()
             }
         } message: {
             Text("Single Key: each sample on its own key from C1 — ideal for one-shots where you want each sound on a separate trigger key.\n\nFull Keyboard: divide the keyboard evenly across all samples — ideal for pitched instruments.")
@@ -486,11 +520,11 @@ struct ProgramDetailView: View {
                     filterResonance: 0, filterModDepth1: 0, filterModDepth2: 0, filterModDepth3: 0,
                     rightSampleName: "", rightPan: 50, playbackMode: .sample,
                     velocityLow: 0, velocityHigh: 127,
-                    env1Attack: 0, env1Decay: 0, env1Sustain: 99, env1Release: 0, pitchMode: 0)
+                    env1Attack: 0, env1Decay: 0, env1Sustain: 99, env1Release: 0, pitchMode: 1)   // CONST — single key, plays at original pitch
             case .fullKeyboard:
                 editedProgram.keyzones.append(AkaiProgramKeyzone(
                     sampleName: sampleName,
-                    lowKey: 24, highKey: 127, rootNote: 60,
+                    lowKey: UInt8(PianoKeyboardView.visibleStartNote), highKey: UInt8(PianoKeyboardView.visibleEndNote), rootNote: 60,
                     tuneOffset: 0, fineTune: 0, volume: 99, pan: 0,
                     filterOffset: 0, filterCutoff: 99, filterKeyFollow: 0,
                     filterResonance: 0, filterModDepth1: 0, filterModDepth2: 0, filterModDepth3: 0,
@@ -609,14 +643,54 @@ struct ProgramDetailView: View {
         diskImage.applyProgramEdits(updated)
     }
 
+    /// Run everything that was waiting for the layout choice (one entry per
+    /// dropped file), in drop order.
+    private func runPendingLayoutActions() {
+        let actions = pendingLayoutActions
+        pendingLayoutActions = []
+        NSLog("[IMPORT] ProgramDetailView layout chosen: %@ — running %d queued import(s)",
+              keyzoneLayout == .singleKey ? "Single Key" : "Full Keyboard", actions.count)
+        actions.forEach { $0() }
+        consumePendingDrop()   // files handed over from the Programs start screen
+    }
+
+    /// Import files handed over from the Programs start screen, through the
+    /// same path as dropping them onto this program.
+    ///
+    /// The files stay in `diskImage.pendingProgramDrop` (not in this view's
+    /// state) until a layout is chosen, because SwiftUI may rebuild this view
+    /// right after it first appears — whichever instance is on screen asks.
+    private func consumePendingDrop() {
+        guard let pending = diskImage.pendingProgramDrop,
+              pending.programID == programFile.id else { return }
+        guard keyzoneLayout != nil else {
+            NSLog("[IMPORT] ProgramDetailView.consumePendingDrop %d item(s) — asking for layout first",
+                  pending.urls.count)
+            showLayoutPicker = true
+            return
+        }
+        diskImage.pendingProgramDrop = nil
+        NSLog("[IMPORT] ProgramDetailView.consumePendingDrop %d item(s) for %@",
+              pending.urls.count, programFile.program.name)
+        let consent = AudioImportPipeline.ResampleConsent()
+        for url in pending.urls {
+            var isDir: ObjCBool = false
+            FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir)
+            if isDir.boolValue { dropFolder(url, consent: consent) }
+            else { dropFile(url, consent: consent) }
+        }
+    }
+
     /// Call this before adding a keyzone. If layout is already chosen, runs
     /// `action` immediately. Otherwise shows the picker and runs `action` after
     /// the user chooses.
     private func withLayout(_ action: @escaping () -> Void) {
         if keyzoneLayout != nil {
+            NSLog("[IMPORT] ProgramDetailView.withLayout: layout already set — running now")
             action()
         } else {
-            pendingLayoutAction = action
+            pendingLayoutActions.append(action)
+            NSLog("[IMPORT] ProgramDetailView.withLayout: no layout yet — queued (%d waiting)", pendingLayoutActions.count)
             showLayoutPicker = true
         }
     }
@@ -637,7 +711,9 @@ struct ProgramDetailView: View {
     /// Compute (lowKey, highKey) for a full-keyboard zone when adding one more
     /// sample. Takes existing keyzones into account and divides remaining range.
     private func nextFullKeyboardRange(forSampleCount total: Int) -> (low: UInt8, high: UInt8) {
-        let keyboardLow = 24; let keyboardHigh = 127
+        // Same range as the on-screen keyboard (C0–B5, 24–95).
+        let keyboardLow = PianoKeyboardView.visibleStartNote
+        let keyboardHigh = PianoKeyboardView.visibleEndNote
         let keysPerZone = max(1, (keyboardHigh - keyboardLow + 1) / max(1, total))
         // Find first free range
         var lo = keyboardLow
@@ -649,9 +725,12 @@ struct ProgramDetailView: View {
         return (UInt8(lo), UInt8(hi))
     }
 
-    /// Redistribute all existing full-keyboard keyzones evenly across 24–127.
+    /// Redistribute all existing full-keyboard keyzones evenly across the
+    /// on-screen keyboard (24–95).
     private func redistributeFullKeyboard() {
-        let keyboardLow = 24; let keyboardHigh = 127
+        // Same range as the on-screen keyboard (C0–B5, 24–95).
+        let keyboardLow = PianoKeyboardView.visibleStartNote
+        let keyboardHigh = PianoKeyboardView.visibleEndNote
         let count = editedProgram.keyzones.count
         guard count > 0 else { return }
         let total = keyboardHigh - keyboardLow + 1
@@ -666,6 +745,89 @@ struct ProgramDetailView: View {
             lo = hi + 1
         }
     }
+    // MARK: - Sample root (edited from the keyzone)
+
+    private func sampleNamed(_ name: String) -> AkaiSample? {
+        let want = name.trimmingCharacters(in: .whitespaces)
+        guard !want.isEmpty else { return nil }
+        return diskImage.samples.first {
+            ($0.header.name.isEmpty ? $0.directoryEntry.name : $0.header.name)
+                .trimmingCharacters(in: .whitespaces) == want
+        }
+    }
+
+    /// Keyzones with `rootNote` replaced by the mapped sample's real root, for
+    /// display (the keyboard's root marker).
+    private var keyzonesWithSampleRoots: [AkaiProgramKeyzone] {
+        editedProgram.keyzones.map { kz in
+            var k = kz
+            if let s = sampleNamed(kz.sampleName) { k.rootNote = s.header.midiRootNote }
+            return k
+        }
+    }
+
+    /// Reads the mapped sample's root; writes go to the sample header(s).
+    private func sampleRootBinding(_ idx: Int) -> Binding<UInt8> {
+        Binding(
+            get: {
+                guard editedProgram.keyzones.indices.contains(idx) else { return 60 }
+                let kz = editedProgram.keyzones[idx]
+                return sampleNamed(kz.sampleName)?.header.midiRootNote ?? kz.rootNote
+            },
+            set: { setSampleRoot($0, forKeyzone: idx) }
+        )
+    }
+
+    /// Set the root note of the sample(s) a keyzone plays — left and, for a
+    /// stereo keygroup, right too, so both halves stay in step. Because the
+    /// root is stored per sample, any other keyzone or program using the same
+    /// sample changes as well; the toast says which.
+    private func setSampleRoot(_ root: UInt8, forKeyzone idx: Int) {
+        guard editedProgram.keyzones.indices.contains(idx) else { return }
+        let kz = editedProgram.keyzones[idx]
+        let names = [kz.sampleName, kz.rightSampleName]
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
+        var changed: [String] = []
+        for name in names {
+            guard var sample = sampleNamed(name), sample.header.midiRootNote != root else { continue }
+            let from = midiNoteNameStatic(sample.header.midiRootNote)
+            sample.header.midiRootNote = root
+            diskImage.applySampleEdits(sample)
+            changed.append(name)
+            NSLog("[ROOT] %@ root %@ → %@ (from keyzone %d of %@)",
+                  name, from, midiNoteNameStatic(root), idx + 1, programFile.program.name)
+        }
+        guard !changed.isEmpty else { return }
+        editedProgram.keyzones[idx].rootNote = root   // keep the in-memory field in step
+
+        // Who else plays these samples?
+        func uses(_ k: AkaiProgramKeyzone) -> Bool {
+            changed.contains(k.sampleName.trimmingCharacters(in: .whitespaces))
+                || changed.contains(k.rightSampleName.trimmingCharacters(in: .whitespaces))
+        }
+        var alsoUsedBy: [String] = []
+        let otherZones = editedProgram.keyzones.indices.filter { $0 != idx && uses(editedProgram.keyzones[$0]) }
+        if !otherZones.isEmpty {
+            alsoUsedBy.append(otherZones.count == 1
+                ? "keyzone \(otherZones[0] + 1)"
+                : "keyzones " + otherZones.map { String($0 + 1) }.joined(separator: ", "))
+        }
+        let otherPrograms = diskImage.programs
+            .filter { $0.id != programFile.id && $0.program.keyzones.contains(where: uses) }
+            .map { $0.program.name.trimmingCharacters(in: .whitespaces) }
+        if !otherPrograms.isEmpty {
+            alsoUsedBy.append((otherPrograms.count == 1 ? "program " : "programs ")
+                + otherPrograms.joined(separator: ", "))
+        }
+
+        let what = changed.joined(separator: " + ")
+        let note = midiNoteNameStatic(root)
+        toast = ToastData(message: alsoUsedBy.isEmpty
+            ? "\(what) root set to \(note)"
+            : "\(what) root set to \(note) — also changes \(alsoUsedBy.joined(separator: " and "))")
+    }
+
     private func toggleSample(_ name: String) {
         guard let idx = anchorKeyzoneIndex, editedProgram.keyzones.indices.contains(idx) else { return }
         if editedProgram.keyzones[idx].sampleName == name { editedProgram.keyzones[idx].sampleName = "" }
@@ -738,11 +900,11 @@ struct ProgramDetailView: View {
                     filterResonance: 0, filterModDepth1: 0, filterModDepth2: 0, filterModDepth3: 0,
                     rightSampleName: "", rightPan: 50, playbackMode: .sample,
                     velocityLow: 0, velocityHigh: 127,
-                    env1Attack: 0, env1Decay: 0, env1Sustain: 99, env1Release: 0, pitchMode: 0)
+                    env1Attack: 0, env1Decay: 0, env1Sustain: 99, env1Release: 0, pitchMode: 1)   // CONST — single key, plays at original pitch
                 editedProgram.keyzones.append(kz)
             case .fullKeyboard:
                 kz = AkaiProgramKeyzone(
-                    sampleName: name, lowKey: 24, highKey: 127, rootNote: 60,
+                    sampleName: name, lowKey: UInt8(PianoKeyboardView.visibleStartNote), highKey: UInt8(PianoKeyboardView.visibleEndNote), rootNote: 60,
                     tuneOffset: 0, fineTune: 0, volume: 99, pan: 0,
                     filterOffset: 0, filterCutoff: 99, filterKeyFollow: 0,
                     filterResonance: 0, filterModDepth1: 0, filterModDepth2: 0, filterModDepth3: 0,
@@ -761,7 +923,9 @@ struct ProgramDetailView: View {
 
     private func dropFile(_ url: URL, consent: AudioImportPipeline.ResampleConsent) {
         let accessing = url.startAccessingSecurityScopedResource()
+        NSLog("[IMPORT] ProgramDetailView.dropFile %@ (securityScope=%d)", url.lastPathComponent, accessing ? 1 : 0)
         guard let wavData = try? Data(contentsOf: url) else {
+            NSLog("[IMPORT] ProgramDetailView.dropFile %@ — could not read file", url.lastPathComponent)
             if accessing { url.stopAccessingSecurityScopedResource() }
             return
         }
@@ -769,6 +933,7 @@ struct ProgramDetailView: View {
         let decoded: WAVImport.Decoded
         do { decoded = try WAVImport.decode(wavData) }
         catch {
+            NSLog("[IMPORT] ProgramDetailView.dropFile %@ — decode failed: %@", url.lastPathComponent, error.localizedDescription)
             dropErrorMessage = "\(url.lastPathComponent): \(error.localizedDescription)"
             showDropError = true
             return
@@ -797,7 +962,10 @@ struct ProgramDetailView: View {
                         let (left, right) = AkaiDiskImage.deinterleaveStereo(pcmData, channels: numChannels)
                         monoData = left
                         if isSingle {
-                            monoName = diskImage.reserveImportNames(for: rawName, stereo: false).left
+                            // Single key keeps only the left channel — still name it as
+                            // the left half of a pair (…-L) so it's clear what it is.
+                            monoName = diskImage.reserveImportNames(for: rawName, stereo: true,
+                                                                    rightToo: false).left
                             rightName = ""
                             rightData = nil
                         } else {
@@ -848,7 +1016,7 @@ struct ProgramDetailView: View {
                         rightPan: 50,
                         playbackMode: .sample,
                         velocityLow: 0, velocityHigh: 127,
-                        pitchMode: 0)
+                        pitchMode: isSingle ? 1 : 0)   // single key: CONST, full keyboard: TRACK
                     DispatchQueue.main.async {
                         editedProgram.keyzones.append(kz)
                         if keyzoneLayout == .fullKeyboard { redistributeFullKeyboard() }
@@ -935,12 +1103,12 @@ struct ProgramDetailView: View {
                                 filterResonance: 0, filterModDepth1: 0, filterModDepth2: 0, filterModDepth3: 0,
                                 rightSampleName: "", rightPan: 50,
                                 playbackMode: .sample, velocityLow: 0, velocityHigh: 127,
-                                env1Attack: 0, env1Decay: 0, env1Sustain: 99, env1Release: 0, pitchMode: 0))
+                                env1Attack: 0, env1Decay: 0, env1Sustain: 99, env1Release: 0, pitchMode: 1))   // CONST — single key, plays at original pitch
                             nextNote += 1
                         } else {
                             newKeyzones.append(AkaiProgramKeyzone(
                                 sampleName: sample.header.name,
-                                lowKey: 24, highKey: 127, rootNote: 60,
+                                lowKey: UInt8(PianoKeyboardView.visibleStartNote), highKey: UInt8(PianoKeyboardView.visibleEndNote), rootNote: 60,
                                 tuneOffset: 0, fineTune: 0, volume: 99, pan: 0,
                                 filterOffset: 0, filterCutoff: 99, filterKeyFollow: 0,
                                 filterResonance: 0, filterModDepth1: 0, filterModDepth2: 0, filterModDepth3: 0,
@@ -1028,9 +1196,9 @@ struct SimpleDropZone: View {
             RoundedRectangle(cornerRadius: 10)
                 .strokeBorder(isTargeted ? Color.accentColor.opacity(0.7) : Color.secondary.opacity(0.25),
                               style: StrokeStyle(lineWidth: isTargeted ? 2 : 1, dash: [6]))
-            VStack(spacing: 10) {
+            VStack(spacing: 6) {
                 Image(systemName: "square.and.arrow.down")
-                    .font(.system(size: 28))
+                    .font(.system(size: 22))
                     .foregroundStyle(isTargeted ? Color.accentColor : .secondary)
                 Text("Drop a sample or folder to create a keyzone(s)")
                     .font(.headline)
@@ -1038,10 +1206,10 @@ struct SimpleDropZone: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
-            .padding(.vertical, 24)
+            .padding(.vertical, 14)
             .frame(maxWidth: .infinity)
         }
-        .frame(minHeight: 100)
+        .frame(height: 100)
         .frame(maxWidth: .infinity)
         .animation(.easeInOut(duration: 0.15), value: isTargeted)
     }
@@ -1437,9 +1605,9 @@ struct ProgramListView: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .fileImporter(isPresented: $showingImport,
                           allowedContentTypes: [.audio],
-                          allowsMultipleSelection: false) { result in
-                guard case .success(let urls) = result, let url = urls.first else { return }
-                importFileAsPreset(url: url)
+                          allowsMultipleSelection: true) { result in
+                guard case .success(let urls) = result else { return }
+                startProgram(with: urls)
             }
         }
         .onDrop(of: [.fileURL], isTargeted: nil) { providers in
@@ -1453,188 +1621,55 @@ struct ProgramListView: View {
     }
 
     private func handleDrop(providers: [NSItemProvider]) -> Bool {
-        guard let provider = providers.first else { return false }
-        provider.loadItem(forTypeIdentifier: "public.file-url") { item, _ in
-            guard let data = item as? Data,
-                  let url = URL(dataRepresentation: data, relativeTo: nil) else { return }
-            let accessing = url.startAccessingSecurityScopedResource()
-            defer { if accessing { url.stopAccessingSecurityScopedResource() } }
-            var isDir: ObjCBool = false
-            FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir)
-            DispatchQueue.main.async {
-                if isDir.boolValue {
-                    importFolderAsDrumPreset(folderURL: url)
-                } else if audioExts.contains(url.pathExtension.lowercased()) {
-                    importFileAsPreset(url: url)
-                } else {
-                    dropError = "\(url.lastPathComponent) is not a supported audio file."
-                    showDropError = true
-                }
+        guard !providers.isEmpty else { return false }
+        // Collect every dropped URL, then start one program with all of them.
+        let group = DispatchGroup()
+        let lock = NSLock()
+        var urls: [(Int, URL)] = []
+        for (i, provider) in providers.enumerated() {
+            group.enter()
+            provider.loadItem(forTypeIdentifier: "public.file-url") { item, _ in
+                defer { group.leave() }
+                guard let data = item as? Data,
+                      let url = URL(dataRepresentation: data, relativeTo: nil) else { return }
+                lock.lock(); urls.append((i, url)); lock.unlock()
             }
+        }
+        group.notify(queue: .main) {
+            startProgram(with: urls.sorted { $0.0 < $1.0 }.map(\.1))
         }
         return true
     }
 
-    private func importFileAsPreset(url: URL) {
-        let accessing = url.startAccessingSecurityScopedResource()
-        guard let wavData = try? Data(contentsOf: url) else {
-            if accessing { url.stopAccessingSecurityScopedResource() }
-            return
+    /// Create an empty program named after the first file/folder, open it, and
+    /// hand the files to its editor so they import exactly as if dropped onto
+    /// an existing program — including the Single Key / Full Keyboard prompt.
+    private func startProgram(with urls: [URL]) {
+        let usable = urls.filter { url in
+            var isDir: ObjCBool = false
+            FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir)
+            return isDir.boolValue || audioExts.contains(url.pathExtension.lowercased())
         }
-        if accessing { url.stopAccessingSecurityScopedResource() }
-        let decoded: WAVImport.Decoded
-        do { decoded = try WAVImport.decode(wavData) }
-        catch {
-            dropError = "\(url.lastPathComponent): \(error.localizedDescription)"
+        NSLog("[IMPORT] ProgramListView.startProgram %d dropped, %d usable", urls.count, usable.count)
+        guard let first = usable.first else {
+            dropError = urls.count == 1
+                ? "\(urls[0].lastPathComponent) is not a supported audio file."
+                : "None of those are supported audio files."
             showDropError = true
             return
         }
-        let pcmData = decoded.pcm
-        let sampleRate = decoded.sampleRate
-        let numChannels = decoded.channels
-        let rawName = url.deletingPathExtension().lastPathComponent
-        let programName = AkaiDiskImage.sanitizeName(String(rawName.prefix(12)))
-        let loFi = lowQualityImport
-        DispatchQueue.global(qos: .userInitiated).async {
-            do {
-                var monoData: Data; let monoName: String
-                if numChannels >= 2 {
-                    let (left, _) = AkaiDiskImage.deinterleaveStereo(pcmData, channels: numChannels)
-                    monoData = left
-                } else {
-                    monoData = pcmData
-                }
-                monoName = diskImage.reserveImportNames(for: rawName, stereo: numChannels >= 2,
-                                                        rightToo: false).left
-                let finalRate: UInt32
-                if loFi {
-                    let (loPCM, loRate) = AkaiDiskImage.applyLoFi(pcm: monoData, fromRate: sampleRate)
-                    monoData = loPCM; finalRate = loRate
-                } else {
-                    finalRate = try AudioImportPipeline.confirmedAkaiRate(fromRate: sampleRate)
-                    if finalRate != UInt32(sampleRate) {
-                        monoData = AkaiDiskImage.resampleToAkaiRate(pcm: monoData, fromRate: sampleRate).0
-                    }
-                }
-                let sample = try diskImage.addImportedSample(
-                    name: monoName, sampleRate: finalRate,
-                    numChannels: 1, pcmData: monoData, forceName: true)
-                let prog = try diskImage.createProgram(name: programName)
-                let kz = AkaiProgramKeyzone(
-                    sampleName: sample.header.name,
-                    lowKey: 24, highKey: UInt8(PianoKeyboardView.visibleEndNote), rootNote: 60,
-                    tuneOffset: 0, fineTune: 0, volume: 99, pan: 0,
-                    filterOffset: 0, filterCutoff: 99, filterKeyFollow: 0,
-                    filterResonance: 0, filterModDepth1: 0,
-                    filterModDepth2: 0, filterModDepth3: 0,
-                    rightSampleName: "", rightPan: 50,
-                    playbackMode: .sample, velocityLow: 0, velocityHigh: 127)
-                DispatchQueue.main.async {
-                    var updated = diskImage.programs.first(where: { $0.id == prog.id }) ?? prog
-                    updated.program.keyzones = [kz]
-                    diskImage.applyProgramEdits(updated)
-                    diskImage.hasUnsavedChanges = true
-                    selectedProgramID = prog.id
-                }
-            } catch {
-                DispatchQueue.main.async {
-                    dropError = error.localizedDescription
-                    showDropError = true
-                }
-            }
-        }
-    }
-
-    private func importFolderAsDrumPreset(folderURL: URL) {
-        let rawName = folderURL.lastPathComponent
-        let programName = AkaiDiskImage.sanitizeName(String(rawName.prefix(12)))
-        guard let contents = try? FileManager.default.contentsOfDirectory(
-            at: folderURL, includingPropertiesForKeys: [.isRegularFileKey],
-            options: [.skipsHiddenFiles]
-        ) else { return }
-        let audioURLs = contents
-            .filter { audioExts.contains($0.pathExtension.lowercased()) }
-            .sorted { $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedAscending }
-        guard !audioURLs.isEmpty else {
-            dropError = "No audio files found in \"\(folderURL.lastPathComponent)\"."
-            showDropError = true
-            return
-        }
+        let rawName = first.hasDirectoryPath
+            ? first.lastPathComponent
+            : first.deletingPathExtension().lastPathComponent
         let prog: AkaiProgramFile
-        do { prog = try diskImage.createProgram(name: programName) }
+        do { prog = try diskImage.createProgram(name: AkaiDiskImage.sanitizeName(String(rawName.prefix(12)))) }
         catch {
             dropError = error.localizedDescription
             showDropError = true
             return
         }
-        let loFi = lowQualityImport
-        DispatchQueue.global(qos: .userInitiated).async {
-            var keyzones: [AkaiProgramKeyzone] = []
-            var nextNote = 36
-            var hitLimit = false; var limitMsg = ""
-            let consent = AudioImportPipeline.ResampleConsent()   // ask once per folder
-            for url in audioURLs {
-                let accessing = url.startAccessingSecurityScopedResource()
-                defer { if accessing { url.stopAccessingSecurityScopedResource() } }
-                do {
-                    guard let wavData = try? Data(contentsOf: url),
-                          let decoded = try? WAVImport.decode(wavData) else { continue }
-                    let pcmData = decoded.pcm
-                    let sampleRate = decoded.sampleRate
-                    let numChannels = decoded.channels
-                    let baseName = url.deletingPathExtension().lastPathComponent
-                    var monoData: Data; var monoName: String
-                    if numChannels >= 2 {
-                        let (left, _) = AkaiDiskImage.deinterleaveStereo(pcmData, channels: numChannels)
-                        monoData = left
-                        monoName = AkaiDiskImage.sanitizeNamePreservingEnd(baseName, maxLen: 10) + "-L"
-                    } else {
-                        monoData = pcmData
-                        monoName = AkaiDiskImage.sanitizeName(String(baseName.prefix(12)))
-                    }
-                    monoName = diskImage.reserveImportNames(for: baseName, stereo: numChannels >= 2, rightToo: false).left
-                    let finalRate: UInt32
-                    if loFi {
-                        let (loPCM, loRate) = AkaiDiskImage.applyLoFi(pcm: monoData, fromRate: sampleRate)
-                        monoData = loPCM; finalRate = loRate
-                    } else {
-                        finalRate = try AudioImportPipeline.confirmedAkaiRate(fromRate: sampleRate, consent: consent)
-                        if finalRate != UInt32(sampleRate) {
-                            monoData = AkaiDiskImage.resampleToAkaiRate(pcm: monoData, fromRate: sampleRate).0
-                        }
-                    }
-                    let sample = try diskImage.addImportedSample(
-                        name: monoName, sampleRate: finalRate,
-                        numChannels: 1, pcmData: monoData, forceName: true)
-                    let note = UInt8(min(nextNote, 127))
-                    var patched = sample; patched.header.midiRootNote = note
-                    diskImage.applySampleEdits(patched)
-                    keyzones.append(AkaiProgramKeyzone(
-                        sampleName: sample.header.name,
-                        lowKey: note, highKey: note, rootNote: 60,
-                        tuneOffset: 0, fineTune: 0, volume: 99, pan: 0,
-                        filterOffset: 0, filterCutoff: 99, filterKeyFollow: 0,
-                        filterResonance: 0, filterModDepth1: 0,
-                        filterModDepth2: 0, filterModDepth3: 0,
-                        rightSampleName: "", rightPan: 50,
-                        playbackMode: .sample, velocityLow: 0, velocityHigh: 127,
-                        env1Attack: 0, env1Decay: 0, env1Sustain: 99, env1Release: 0, pitchMode: 0))
-                    nextNote += 1
-                } catch {
-                    hitLimit = true
-                    limitMsg = "Disk full — only \(keyzones.count) of \(audioURLs.count) samples imported."
-                    break
-                }
-            }
-            DispatchQueue.main.async {
-                if !keyzones.isEmpty {
-                    var updated = diskImage.programs.first(where: { $0.id == prog.id }) ?? prog
-                    updated.program.keyzones = keyzones
-                    diskImage.applyProgramEdits(updated)
-                    diskImage.hasUnsavedChanges = true
-                }
-                if hitLimit { dropError = limitMsg; showDropError = true }
-            }
-        }
+        diskImage.pendingProgramDrop = PendingProgramDrop(programID: prog.id, urls: usable)
+        selectedProgramID = prog.id
     }
+
 }

@@ -249,10 +249,14 @@ struct LegendDot: View {
 enum KeyRole {
     case normal, inRange, low, high, root
 
+    /// How strongly in-range keys are tinted green: 0 = plain key, 1 = full
+    /// green. Was effectively 0.3 on white keys / ~0.6 on black keys.
+    static let rangeTint: Double = 0.15
+
     var whiteColor: Color {
         switch self {
         case .normal:   return .white
-        case .inRange:  return Color(red: 0.7, green: 1.0, blue: 0.7)
+        case .inRange:  return Color(red: 1 - Self.rangeTint, green: 1.0, blue: 1 - Self.rangeTint)
         case .low:      return Color(red: 1.0, green: 0.6, blue: 0.6)
         case .high:     return Color(red: 0.6, green: 0.75, blue: 1.0)
         case .root:     return Color(red: 1.0, green: 0.65, blue: 0.0)
@@ -262,7 +266,11 @@ enum KeyRole {
     var blackColor: Color {
         switch self {
         case .normal:   return Color.black.opacity(0.85)
-        case .inRange:  return Color(red: 0.0, green: 0.55, blue: 0.2)
+        // Normal black ≈ 0.15 grey; mix toward green (0, 0.55, 0.2) by twice the
+        // white-key tint so it reads at a similar strength on the darker key.
+        case .inRange:
+            let t = min(1, Self.rangeTint * 2)
+            return Color(red: 0.15 * (1 - t), green: 0.15 + (0.55 - 0.15) * t, blue: 0.15 + (0.2 - 0.15) * t)
         case .low:      return Color(red: 0.7, green: 0.1, blue: 0.1)
         case .high:     return Color(red: 0.1, green: 0.3, blue: 0.75)
         case .root:     return Color(red: 0.8, green: 0.45, blue: 0.0)

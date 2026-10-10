@@ -389,7 +389,7 @@ struct SidebarView: View {
                         filterModDepth2: 0, filterModDepth3: 0,
                         rightSampleName: "", rightPan: 50,
                         playbackMode: .sample, velocityLow: 0, velocityHigh: 127,
-                        pitchMode: 0))   // TRACK — bendable, unity at its own key
+                        pitchMode: 1))   // CONST — one sample per key, plays at original pitch
                     nextNote += 1
                 } catch AkaiError.cancelled {
                     break   // user declined the resample prompt — keep what's imported so far

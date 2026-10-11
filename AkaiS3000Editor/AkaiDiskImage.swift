@@ -208,7 +208,8 @@ struct AkaiProgramKeyzone {
     var sampleName: String
     var lowKey: UInt8
     var highKey: UInt8
-    var rootNote: UInt8
+    // No root here: on the S3000 a keygroup has no root key — the root is the
+    // sample's own (sample header rkey, AkaiSampleHeader.midiRootNote). Always use that.
     var tuneOffset: Int8
     var fineTune: Int8
     /// Velocity-zone loudness trim (vz+0x10), signed ±50, default 0 (manual:
@@ -352,6 +353,10 @@ struct AkaiProgramKeyzone {
     /// Hardware byte-diff: 0→50 changed kg+0x96: 0x00 → 0x32. Default 50
     /// (factory TEST PROGRAM also has 50 here).
     var lfo1ToPitch: UInt8 = 50
+    /// ENV2 page "velocity > envelope", keygroup offset `0x1C`, signed ±50.
+    /// Default +25 — factory TEST PROGRAM kg+0x1C = 0x19 and shown as +25 on
+    /// the S3000XL; Ohsaki agrees. App used to write 0.
+    var velToEnv2: Int8 = 25
 }
 
 /// The full set of modulation sources selectable for any of the 3 filter
@@ -440,11 +445,12 @@ enum AkaiPlaybackMode: UInt8, CaseIterable, Identifiable {
 
     var displayName: String {
         switch self {
-        case .sample:     return "Sample's Setting"
-        case .loop:       return "Loop In Release"
-        case .loopNotRel: return "Loop Until Release"
-        case .noLoop:     return "No Loop"
-        case .toEnd:      return "Play to End"
+        // Same wording as the sample editor's AkaiSamplePlaybackMode.displayName.
+        case .sample:     return "Sample's Setting (uses the sample's own playback mode)"
+        case .loop:       return "Loop In Release (keeps looping after key released, fades out)"
+        case .loopNotRel: return "Loop Until Release (stops looping when key released, plays tail)"
+        case .noLoop:     return "No Loop (plays once, fades out on key release)"
+        case .toEnd:      return "Play to End (always plays full sample, ignores loop points and key release)"
         }
     }
 
@@ -777,6 +783,19 @@ class AkaiDiskImage: ObservableObject {
     /// created program's editor to open and import them through its normal
     /// drop flow (layout prompt, key placement, stereo handling).
     @Published var pendingProgramDrop: PendingProgramDrop? = nil
+    /// Further presets from the same multi-folder drop, filled one after another.
+    var queuedProgramDrops: [PendingProgramDrop] = []
+    /// Set to ask the window to open a program (ContentView observes it).
+    @Published var programToSelect: UUID? = nil
+
+    /// Move on to the next queued preset: make it pending and open it.
+    func advanceProgramDropQueue() {
+        guard !queuedProgramDrops.isEmpty else { return }
+        let next = queuedProgramDrops.removeFirst()
+        NSLog("[IMPORT] next queued preset — %d item(s), %d more after", next.urls.count, queuedProgramDrops.count)
+        pendingProgramDrop = next
+        programToSelect = next.programID
+    }
     private let importNamesLock = NSLock()
 
     @Published var isLoaded    = false
@@ -1199,7 +1218,6 @@ class AkaiDiskImage: ObservableObject {
             keyzones.append(AkaiProgramKeyzone(
                 sampleName: sname,
                 lowKey: kgKeylo, highKey: kgKeyhi,
-                rootNote: 60,
                 tuneOffset: Int8(bitPattern: fileData[vz + 0x0F]),   // stune
                 fineTune:   Int8(bitPattern: fileData[vz + 0x0E]),   // ctune
                 volume: Int8(bitPattern: fileData[vz + 0x10]),        // loud (±50)
@@ -1232,7 +1250,8 @@ class AkaiDiskImage: ObservableObject {
                 muteGroup:    kg + 0xA0 < fileData.count ? fileData[kg + 0xA0] : 0xFF,
                 fxSend:       kg + 0xA2 < fileData.count ? fileData[kg + 0xA2] : 25,
                 velXfade:     kg + 0x1E < fileData.count ? fileData[kg + 0x1E] : 1,
-                lfo1ToPitch:  kg + 0x96 < fileData.count ? fileData[kg + 0x96] : 50))
+                lfo1ToPitch:  kg + 0x96 < fileData.count ? fileData[kg + 0x96] : 50,
+                velToEnv2:    kg + 0x1C < fileData.count ? Int8(bitPattern: fileData[kg + 0x1C]) : 25))
         }
 
         var program = AkaiProgram(name: name, keyzones: keyzones,
@@ -1273,7 +1292,7 @@ class AkaiDiskImage: ObservableObject {
     @discardableResult
     func createProgram(name rawName: String = "NEW PROGRAM") throws -> AkaiProgramFile {
         guard var data = imageData else { throw AkaiError.noImageLoaded }
-        let name = uniqueProgramName(basedOn: rawName)
+        let name = uniqueProgramName(basedOn: Self.compactName(rawName))
 
         // Build the 0xC0-byte file: program header only, no keygroups yet.
         let progSize = 0xC0
@@ -2058,6 +2077,22 @@ class AkaiDiskImage: ObservableObject {
     /// blanks its directory entry and frees every block in its FAT chain so the
     /// space can be reused. Does not write to disk immediately — call
     /// saveImageToDisk() (or the global Save button) afterwards to persist.
+    /// Samples used by these programs' keyzones (left or right) and by NO other
+    /// program — the ones that would be left orphaned if the programs went.
+    func samplesOnlyUsed(byPrograms ids: Set<UUID>) -> [AkaiSample] {
+        func names(_ p: AkaiProgramFile) -> Set<String> {
+            Set(p.program.keyzones.flatMap { [$0.sampleName, $0.rightSampleName] }
+                .map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty })
+        }
+        let mine = programs.filter { ids.contains($0.id) }.reduce(into: Set<String>()) { $0.formUnion(names($1)) }
+        let others = programs.filter { !ids.contains($0.id) }.reduce(into: Set<String>()) { $0.formUnion(names($1)) }
+        let orphanNames = mine.subtracting(others)
+        return samples.filter {
+            orphanNames.contains(($0.header.name.isEmpty ? $0.directoryEntry.name : $0.header.name)
+                .trimmingCharacters(in: .whitespaces))
+        }
+    }
+
     func deleteProgram(id: UUID) {
         guard let program = programs.first(where: { $0.id == id }) else { return }
         guard var data = imageData else {
@@ -2649,10 +2684,21 @@ class AkaiDiskImage: ObservableObject {
 
         var updated = sample
         updated.header.rawHeader = hdr
-        if let index = samples.firstIndex(where: { $0.id == sample.id }) {
-            samples[index] = updated
+        // Update the in-memory model. Off the main thread (e.g. during an import)
+        // the sample may not be in `samples` yet — addImportedSample appends it
+        // via main.async — so queue this behind that append. Updating directly
+        // here used to find nothing, leaving the UI showing the old root (C3)
+        // while the disk had the new one.
+        let commit = { [weak self] in
+            guard let self else { return }
+            if let index = self.samples.firstIndex(where: { $0.id == sample.id }) {
+                self.samples[index] = updated
+            } else {
+                NSLog("[ROOT] applySampleEdits: %@ not in samples — model not updated", sample.header.name)
+            }
+            self.hasUnsavedChanges = true
         }
-        hasUnsavedChanges = true
+        if Thread.isMainThread { commit() } else { DispatchQueue.main.async(execute: commit) }
         } // end diskQueue.sync
     }
 
@@ -2987,6 +3033,19 @@ class AkaiDiskImage: ObservableObject {
             : "Samples with the same PCM data as \(list) already exist on the disk. Import duplicate samples?"
     }
 
+    /// Fit a name into `maxLen` (default 12) Akai characters, keeping as much of
+    /// it as possible: if it already fits it's left alone (spaces kept);
+    /// otherwise spaces and dashes are squeezed out first, then it's truncated.
+    ///   "Roland CR-78"         → "ROLAND CR-78"   (fits)
+    ///   "Leftfield Noise Kit"  → "LEFTFIELDNOI"
+    static func compactName(_ raw: String, maxLen: Int = 12) -> String {
+        let upper = raw.uppercased().map { allowedNameCharacters.contains($0) ? $0 : "-" }
+        let full = String(upper).trimmingCharacters(in: .whitespaces)
+        if full.count <= maxLen { return full }
+        let squeezed = full.filter { $0 != " " && $0 != "-" }
+        return String(squeezed.prefix(maxLen))
+    }
+
     /// Upper-case, space-free, Akai-charset stem truncated to `maxLen`.
     static func importStem(_ raw: String, maxLen: Int) -> String {
         sanitizeNamePreservingEnd(raw.replacingOccurrences(of: " ", with: ""), maxLen: maxLen)
@@ -3046,8 +3105,14 @@ class AkaiDiskImage: ObservableObject {
         return (left, right)
     }
 
+    /// Free blocks counted from the image itself — safe off the main thread,
+    /// where the @Published `freeBlocks` lags behind background imports.
+    func currentFreeBlocks() -> Int {
+        diskQueue.sync { imageData.map { countFreeBlocks(data: $0) } ?? 0 }
+    }
+
     /// Drop a reservation once the sample is in `samples`.
-    private func releaseImportName(_ name: String) {
+    func releaseImportName(_ name: String) {
         importNamesLock.lock(); defer { importNamesLock.unlock() }
         let was = reservedImportNames.remove(name) != nil
         NSLog("[NAMES] release %@ (%@) — still reserved: [%@]", name,
@@ -3168,6 +3233,7 @@ class AkaiDiskImage: ObservableObject {
             file[kg + 0xA2] = kz?.fxSend ?? 25        // keygroup FX send 0–99 — hardware-confirmed kg+0xA2
             file[kg + 0x1E] = kz?.velXfade ?? 1       // velocity-zone crossfade: 1=ON (factory default)
             file[kg + 0x96] = kz?.lfo1ToPitch ?? 50   // LFO1 > pitch — hardware-confirmed kg+0x96
+            file[kg + 0x1C] = UInt8(bitPattern: kz?.velToEnv2 ?? 25)  // ENV2 velocity > envelope ±50, default +25
             file[kg + 0x95] = kz?.filterResonance ?? 0
             file[kg + 0x97] = UInt8(bitPattern: kz?.filterModDepth1 ?? 0)  // Mod depth #1 (Velocity→Freq) — confirmed offset
             file[kg + 0x98] = UInt8(bitPattern: kz?.filterModDepth2 ?? 0)  // Mod depth #2 (Lfo2→Freq) — confirmed offset
@@ -3190,6 +3256,9 @@ class AkaiDiskImage: ObservableObject {
                     file[vz + 0x11] = UInt8(bitPattern: kz.filterOffset) // filter (fine-tune)
                     file[vz + 0x12] = UInt8(bitPattern: kz.pan)
                     file[vz + 0x13] = kz.playbackMode.rawValue          // pmode
+                    // vz+0x14/0x15: velocity-crossfade factor (sampler-internal). Factory
+                    // = 0xFFFF. Writing 0 made the zone SILENT whenever Xfd was ON.
+                    file[vz + 0x14] = 0xFF; file[vz + 0x15] = 0xFF
                     file[vz + 0x16] = 0xFF; file[vz + 0x17] = 0xFF       // shdra = none
                 } else if z == 1, let kz = kz, !kz.rightSampleName.trimmingCharacters(in: .whitespaces).isEmpty {
                     // Velocity zone 2: the stereo RIGHT channel (real hardware
@@ -3207,12 +3276,16 @@ class AkaiDiskImage: ObservableObject {
                     file[vz + 0x11] = UInt8(bitPattern: kz.filterOffset)
                     file[vz + 0x12] = UInt8(bitPattern: kz.rightPan)
                     file[vz + 0x13] = kz.playbackMode.rawValue
+                    file[vz + 0x14] = 0xFF; file[vz + 0x15] = 0xFF       // xfade factor — see zone 1
                     file[vz + 0x16] = 0xFF; file[vz + 0x17] = 0xFF
                 } else {
+                    // Empty zone — exactly as the factory TEST PROGRAM: velocity 0–0 (so
+                    // it never overlaps the real zones in a crossfade), pmode 0, 0xFF×4.
                     for (i, b) in emptyName.enumerated() { file[vz + i] = b }
                     file[vz + 0x0C] = 0
-                    file[vz + 0x0D] = 127
-                    file[vz + 0x13] = 0x03
+                    file[vz + 0x0D] = 0
+                    file[vz + 0x13] = 0x00
+                    file[vz + 0x14] = 0xFF; file[vz + 0x15] = 0xFF
                     file[vz + 0x16] = 0xFF; file[vz + 0x17] = 0xFF
                 }
             }
@@ -3225,8 +3298,12 @@ class AkaiDiskImage: ObservableObject {
     /// updating the directory entry's start/size) if the keygroup count changed
     /// the file's size — the program-detail counterpart to applySampleEdits.
     /// Picked up by a later Save All (saveImageToDisk).
-    func applyProgramEdits(_ programFile: AkaiProgramFile) {
-        guard var data = imageData else { return }
+    @discardableResult
+    func applyProgramEdits(_ programFile: AkaiProgramFile) -> Bool {
+        guard var data = imageData else {
+            NSLog("[PROGSAVE] applyProgramEdits %@: no image loaded", programFile.program.name)
+            return false
+        }
         let fileData = buildProgramFileData(
             name: programFile.program.name,
             midiChannel: programFile.program.midiChannel,
@@ -3253,6 +3330,9 @@ class AkaiDiskImage: ObservableObject {
         let requiredBlocks = (fileData.count + bs - 1) / bs
         let oldStartBlock = programFile.offset / bs
         let oldChain = fatChain(from: oldStartBlock, data: data)
+        NSLog("[PROGSAVE] applyProgramEdits %@: %d keygroup(s), %d bytes → needs %d block(s), has %d, free %d (thread=%@)",
+              programFile.program.name, programFile.program.keyzones.count, fileData.count,
+              requiredBlocks, oldChain.count, freeBlocks, Thread.isMainThread ? "main" : "BACKGROUND")
 
         var startBlock = oldStartBlock
         func writeFile(across chain: [Int]) {
@@ -3283,7 +3363,9 @@ class AkaiDiskImage: ObservableObject {
                 // Not enough room to grow — leave the disk untouched rather than
                 // half-write a corrupt program. The in-memory model still has the
                 // attempted edit; it just won't persist until there's space.
-                return
+                NSLog("[PROGSAVE] applyProgramEdits %@ FAILED: disk full — needs %d block(s), only %d free after releasing the old %d. Keygroups NOT written.",
+                      programFile.program.name, requiredBlocks, countFreeBlocks(data: data), oldChain.count)
+                return false
             }
             for i in 0..<newBlocks.count {
                 let value: UInt16 = (i == newBlocks.count - 1) ? AkaiDiskFormat.fatEnd : UInt16(newBlocks[i + 1])
@@ -3324,8 +3406,13 @@ class AkaiDiskImage: ObservableObject {
         updated.directoryEntry = updatedEntry
         if let index = programs.firstIndex(where: { $0.id == programFile.id }) {
             programs[index] = updated
+            NSLog("[PROGSAVE] applyProgramEdits %@ OK: %d keygroup(s) at block %d, free now %d",
+                  programFile.program.name, updated.program.keyzones.count, startBlock, freeBlocks)
+        } else {
+            NSLog("[PROGSAVE] applyProgramEdits %@: written to image but program id NOT FOUND in model", programFile.program.name)
         }
         hasUnsavedChanges = true
+        return true
     }
 
     // MARK: - Rename

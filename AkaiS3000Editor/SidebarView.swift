@@ -21,6 +21,10 @@ struct SidebarView: View {
 
     @State private var programToDelete: AkaiProgramFile? = nil
     @State private var showDeleteProgramConfirm = false
+    /// Samples left unused after deleting program(s) — offered for deletion too.
+    @State private var orphanSamples: [AkaiSample] = []
+    @State private var showOrphanSamplesConfirm = false
+    @State private var orphanSamplesFromCount = 1
     /// Multi-selection set for programs, mirroring selectedSampleIDs.
     @State private var selectedProgramIDs: Set<UUID> = []
     @State private var programSelectionAnchorID: UUID? = nil
@@ -119,10 +123,20 @@ struct SidebarView: View {
         }
     }
 
+    /// After deleting programs, offer to delete samples nothing else uses.
+    private func offerOrphanSamples(_ orphans: [AkaiSample], programCount: Int) {
+        guard !orphans.isEmpty else { return }
+        orphanSamples = orphans
+        orphanSamplesFromCount = programCount
+        DispatchQueue.main.async { showOrphanSamplesConfirm = true }   // after the first dialog closes
+    }
+
     private func deleteProgramSelection() {
         let ids = selectedProgramIDs
         guard !ids.isEmpty else { return }
+        let orphans = diskImage.samplesOnlyUsed(byPrograms: ids)
         diskImage.deletePrograms(ids: ids)
+        offerOrphanSamples(orphans, programCount: ids.count)
         if let sel = selectedProgramID, ids.contains(sel) { selectedProgramID = nil }
         selectedProgramIDs.removeAll()
         programSelectionAnchorID = nil
@@ -263,7 +277,7 @@ struct SidebarView: View {
         guard panel.runModal() == .OK, let url = panel.url else { return }
 
         let rawName = url.deletingPathExtension().lastPathComponent
-        let programName = AkaiDiskImage.sanitizeName(String(rawName.prefix(12)))
+        let programName = rawName   // createProgram fits it to 12 chars (compactName)
 
         let prog: AkaiProgramFile
         do { prog = try diskImage.createProgram(name: programName) }
@@ -285,8 +299,7 @@ struct SidebarView: View {
                     numChannels: 1, pcmData: ch.pcm, forceName: true)
                 let kz = AkaiProgramKeyzone(
                     sampleName: sample.header.name,
-                    lowKey: 24, highKey: UInt8(PianoKeyboardView.visibleEndNote), rootNote: 60,
-                    tuneOffset: 0, fineTune: 0, volume: 0, pan: 0,
+                    lowKey: 24, highKey: UInt8(PianoKeyboardView.visibleEndNote), tuneOffset: 0, fineTune: 0, volume: 0, pan: 0,
                     filterOffset: 0, filterCutoff: 99, filterKeyFollow: 0,
                     filterResonance: 0, filterModDepth1: 0,
                     filterModDepth2: 0, filterModDepth3: 0,
@@ -330,7 +343,7 @@ struct SidebarView: View {
         // Derive program name from folder name: strip spaces, sanitize to Akai
         // charset, truncate to 12 chars.
         let rawName = folderURL.lastPathComponent
-        let programName = AkaiDiskImage.sanitizeName(String(rawName.prefix(12)))
+        let programName = rawName   // createProgram fits it to 12 chars (compactName)
 
         // Collect audio files sorted alphabetically.
         let audioExts: Set<String> = ["wav", "wave", "aif", "aiff", "aifc"]
@@ -378,12 +391,11 @@ struct SidebarView: View {
                         name: ch.name, sampleRate: ch.sampleRate,
                         numChannels: 1, pcmData: ch.pcm, forceName: true)
                     let note = UInt8(min(nextNote, 127))
-                    var patched = sample; patched.header.midiRootNote = note
+                    var patched = sample; patched.header.midiRootNote = 60   // CONST → root C3 = original pitch
                     diskImage.applySampleEdits(patched)
                     keyzones.append(AkaiProgramKeyzone(
                         sampleName: sample.header.name,
-                        lowKey: note, highKey: note, rootNote: 60,
-                        tuneOffset: 0, fineTune: 0, volume: 0, pan: 0,
+                        lowKey: note, highKey: note, tuneOffset: 0, fineTune: 0, volume: 0, pan: 0,
                         filterOffset: 0, filterCutoff: 99, filterKeyFollow: 0,
                         filterResonance: 0, filterModDepth1: 0,
                         filterModDepth2: 0, filterModDepth3: 0,
@@ -594,7 +606,9 @@ struct SidebarView: View {
             isPresented: $showDeleteProgramConfirm, titleVisibility: .visible) {
             Button("Delete Program", role: .destructive) {
                 if let prog = programToDelete {
+                    let orphans = diskImage.samplesOnlyUsed(byPrograms: [prog.id])
                     diskImage.deleteProgram(id: prog.id)
+                    offerOrphanSamples(orphans, programCount: 1)
                     if selectedProgramID == prog.id { selectedProgramID = nil }
                     programToDelete = nil
                 }
@@ -603,6 +617,22 @@ struct SidebarView: View {
             Button("Cancel", role: .cancel) { programToDelete = nil }
         } message: {
             Text("This removes the program from the list. The disk image file is not modified until you save.")
+        }
+        .confirmationDialog(orphanSamplesFromCount == 1
+                ? "Also delete the following samples only mapped to this preset?"
+                : "Also delete the following samples only mapped to these presets?",
+            isPresented: $showOrphanSamplesConfirm, titleVisibility: .visible) {
+            Button(orphanSamples.count == 1 ? "Delete Sample" : "Delete \(orphanSamples.count) Samples", role: .destructive) {
+                let ids = Set(orphanSamples.map(\.id))
+                diskImage.deleteSamples(ids: ids)
+                if let sel = selectedSampleID, ids.contains(sel) { selectedSampleID = nil }
+                selectedSampleIDs.subtract(ids)
+                orphanSamples = []
+            }
+            Button("Keep Samples", role: .cancel) { orphanSamples = [] }
+        } message: {
+            Text(orphanSamples.map { ($0.header.name.isEmpty ? $0.directoryEntry.name : $0.header.name)
+                .trimmingCharacters(in: .whitespaces) }.joined(separator: ", "))
         }
         .confirmationDialog("Delete \(selectedProgramIDs.count) programs?",
             isPresented: $showBatchDeleteProgramConfirm, titleVisibility: .visible) {

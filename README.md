@@ -440,7 +440,7 @@ other   next block number
 19       C  0  velocity > filter release
 1a       C  0  off velocity > filter release
 1b       C  0  key > decay & release
-1c       C 25  velocity > filter envelope output
+1c       C 25  velocity > envelope (ENV2 page), signed ±50, default +25  *
 1d       C  0  envelope > pitch
 1e       C  1  velocity zone crossfade (0=off, 1=on)
 1f       C n/a # of velocity zones (internal)
@@ -448,6 +448,7 @@ other   next block number
 22-82           4 velocity zones (0x18 bytes each, see below)
 83       C  0  fixed rate detune
 84       C  0  attack hold until loop  [Ohsaki] / pitchMode TRACK/CONST [our use]  ?
+                CONST plays every key as if C3 were pressed — sample root must be C3 (60) for original pitch  *
 85-88    C4 0  constant pitch zones 1-4: 0=track, 1=const  [Ohsaki]
 89-8c    C4 0  output number offset zones 1-4
 8d-94    v4 0  velocity > sample start zones 1-4
@@ -478,11 +479,12 @@ a2       C 25  FX send 0-99 (per keygroup)  *
 12       C  0  pan offset
 13       C  0  loop mode: 0=sample setting, 1=loop, 2=loop until release,
                            3=no loop, 4=play to end
-14-15    C2    reserved
+14-15    C2    velocity-crossfade factor (internal) — must be ffff (factory); 0000 = zone silent when Xfd ON (likely)  ?
 16-17    x2    sample header block address (internal)
 
 Zone 1 = primary sample. Zone 2 = stereo right channel (panned hard L/R).
 Zones 3-4 unused in this app.
+Empty zones: velocity 0-0 (not 0-127), pmode 0, 14-17 = ffffffff — as factory.
 ```
 
 #### Filter mod sources (0x54-0x56, index 0-13)

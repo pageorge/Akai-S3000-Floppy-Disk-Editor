@@ -11,7 +11,11 @@ enum PianoDragMode {
 struct PianoKeyboardView: View {
     let keyzones: [AkaiProgramKeyzone]
     let selectedIndex: Int?
+    /// Root of the selected zone's SAMPLE (keygroups have no root of their own).
+    var selectedRoot: UInt8? = nil
     var onKeyzoneChanged: ((AkaiProgramKeyzone) -> Void)? = nil
+    /// Root marker dragged — caller sets the sample's root.
+    var onRootChanged: ((UInt8) -> Void)? = nil
 
     /// The full visible key range of this keyboard. Used elsewhere (e.g. a new
     /// keyzone's default high key) so "the max key you can see" always matches
@@ -32,7 +36,7 @@ struct PianoKeyboardView: View {
     }
     private var lowKey:  Int { Int(selectedZone?.lowKey  ?? 0) }
     private var highKey: Int { Int(selectedZone?.highKey ?? 0) }
-    private var rootKey: Int { Int(selectedZone?.rootNote ?? 0) }
+    private var rootKey: Int { Int(selectedRoot ?? 255) }   // 255 = none shown
 
     private func keyRole(_ note: Int) -> KeyRole {
         guard selectedZone != nil else { return .normal }
@@ -165,7 +169,9 @@ struct PianoKeyboardView: View {
                             switch dragMode {
                             case .lowKey:  zone.lowKey   = UInt8(min(note, Int(zone.highKey)))
                             case .highKey: zone.highKey  = UInt8(max(note, Int(zone.lowKey)))
-                            case .rootKey: zone.rootNote = UInt8(max(0, min(note, 127)))
+                            case .rootKey:
+                                onRootChanged?(UInt8(max(0, min(note, 127))))
+                                return
                             case .none: break
                             }
                             onKeyzoneChanged?(zone)

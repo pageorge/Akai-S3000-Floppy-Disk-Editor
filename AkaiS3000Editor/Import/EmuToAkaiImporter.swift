@@ -254,7 +254,6 @@ extension AkaiDiskImage {
             sampleName: left,
             lowKey: UInt8(max(0, min(127, r.lowKey))),
             highKey: UInt8(max(0, min(127, r.highKey))),
-            rootNote: UInt8(max(0, min(127, sampleRoot))),
             tuneOffset: Int8(max(-36, min(36, semis))),
             fineTune: Int8(fine),
             // Zone loudness is a ±50 trim: EMU full level (127) → 0, silence → −50.

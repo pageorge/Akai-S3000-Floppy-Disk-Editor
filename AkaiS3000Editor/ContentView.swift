@@ -145,6 +145,12 @@ struct ContentView: View {
                             Label("New Disk Image", systemImage: "plus")
                         }
                         .help("Create a new blank disk image (opens in a new window)")
+                        Button {
+                            openDiskImage()
+                        } label: {
+                            Label("Open Disk Image", systemImage: "folder")
+                        }
+                        .help("Open another disk image (opens in its own window)")
 
                         Button {
                             saveAll()
@@ -206,6 +212,12 @@ struct ContentView: View {
         }
         .onChange(of: selectedMultiID) { _, _ in
             scheduleContentReady()
+        }
+        .onChange(of: diskImage.programToSelect) { _, id in
+            guard let id else { return }
+            selectedTab = .programs
+            selectedProgramID = id
+            diskImage.programToSelect = nil
         }
         .onAppear {
             handleInitialRequest()

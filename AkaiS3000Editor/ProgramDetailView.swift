@@ -28,6 +28,11 @@ struct ProgramDetailView: View {
     @AppStorage("programSettingsExpanded") private var programSettingsExpanded = true
     @State private var showLayoutPicker = false
     @State private var pendingLayoutActions: [() -> Void] = []
+    /// Single Key follow-up answer: true = one-shot (Play to End), false = gated.
+    @State private var singleKeyPlaysToEnd: Bool? = nil
+    @State private var showSingleKeyPlaybackPicker = false
+    /// Playback mode for new Single Key keyzones.
+    private var singleKeyPlayback: AkaiPlaybackMode { singleKeyPlaysToEnd == true ? .toEnd : .sample }
     /// Highlights the "Add Samples" drop zone while a file/folder is dragged over
     /// the program view. Bound to the whole-view .onDrop's isTargeted.
     @State private var dropTargeted = false
@@ -257,9 +262,15 @@ struct ProgramDetailView: View {
                     .fixedSize(horizontal: false, vertical: true)
 
                     VStack(alignment: .leading, spacing: 6) {
-                        Text("Keyzones")
-                            .font(.headline.weight(.semibold))
-                            .foregroundStyle(.primary)
+                        HStack(spacing: 6) {
+                            Text("Keyzones")
+                                .font(.headline.weight(.semibold))
+                                .foregroundStyle(.primary)
+                            Text("(\(editedProgram.keyzones.count))")
+                                .font(.headline)
+                                .foregroundStyle(.secondary)
+                                .monospacedDigit()
+                        }
                         VStack(spacing: 0) {
                         HStack {
                             Spacer()
@@ -275,7 +286,8 @@ struct ProgramDetailView: View {
                         .padding(.bottom, 4)
                     List {
                         ForEach(Array(editedProgram.keyzones.enumerated()), id: \.offset) { idx, kz in
-                            KeyzoneRow(keyzone: kz, sampleNames: diskImage.samples.map { $0.header.name })
+                            KeyzoneRow(keyzone: kz, root: sampleRoot(forKeyzone: idx),
+                                       sampleNames: diskImage.samples.map { $0.header.name })
                                 .listRowBackground(selectedKeyzoneIndices.contains(idx) ? Color.accentColor.opacity(0.15) : Color.clear)
                                 .contentShape(Rectangle())
                                 .onTapGesture {
@@ -403,27 +415,23 @@ struct ProgramDetailView: View {
 
                             if !editedProgram.keyzones.isEmpty && anchorKeyzoneIndex != nil {
                                 PianoKeyboardView(
-                                    // Show each zone's real root (from its sample header).
-                                    keyzones: keyzonesWithSampleRoots,
+                                    keyzones: editedProgram.keyzones,
                                     selectedIndex: anchorKeyzoneIndex,
+                                    // Root marker = the selected zone's SAMPLE root.
+                                    selectedRoot: anchorKeyzoneIndex.flatMap { sampleRoot(forKeyzone: $0) },
                                     onKeyzoneChanged: { updated in
                                         guard let idx = anchorKeyzoneIndex, idx < editedProgram.keyzones.count else { return }
-                                        if updated.rootNote != sampleRootBinding(idx).wrappedValue {
-                                            // Root handle dragged → it's the sample's root that moves
-                                            // (for every selected keyzone, like the other handles).
-                                            let targets = [idx] + selectedKeyzoneIndices.subtracting([idx]).sorted()
-                                            NSLog("[ROOT] keyboard drag → %@ for keyzone(s) %@",
-                                                  midiNoteNameStatic(updated.rootNote),
-                                                  targets.map { String($0 + 1) }.joined(separator: ","))
-                                            for i in targets { setSampleRoot(updated.rootNote, forKeyzone: i) }
-                                            return
-                                        }
-                                        // Low/High drag: don't let the displayed sample root leak
-                                        // into the keyzone's own (unsaved) root field.
-                                        var zone = updated
-                                        zone.rootNote = editedProgram.keyzones[idx].rootNote
-                                        applyToSelectedKeyzones(zone, primaryIndex: idx)
+                                        applyToSelectedKeyzones(updated, primaryIndex: idx)
                                         commitProgramEdits()
+                                    },
+                                    onRootChanged: { note in
+                                        // Root marker dragged → the sample's root moves (for every
+                                        // selected keyzone, like the other handles).
+                                        guard let idx = anchorKeyzoneIndex, idx < editedProgram.keyzones.count else { return }
+                                        let targets = [idx] + selectedKeyzoneIndices.subtracting([idx]).sorted()
+                                        NSLog("[ROOT] keyboard drag → %@ for keyzone(s) %@",
+                                              midiNoteNameStatic(note), targets.map { String($0 + 1) }.joined(separator: ","))
+                                        for i in targets { setSampleRoot(note, forKeyzone: i) }
                                     }
                                 )
                                 .frame(height: 140)
@@ -475,6 +483,10 @@ struct ProgramDetailView: View {
             // wait until the view is actually on screen.
             DispatchQueue.main.async { consumePendingDrop() }
         }
+        .onDisappear {
+            NSLog("[IMPORT] ProgramDetailView.onDisappear %@ (view had %d keyzone(s))",
+                  programFile.program.name, editedProgram.keyzones.count)
+        }
         .onChange(of: diskImage.pendingProgramDrop) { DispatchQueue.main.async { consumePendingDrop() } }
         .onChange(of: showLayoutPicker) { _, showing in
             NSLog("[IMPORT] ProgramDetailView showLayoutPicker → %d (layout=%@, queued=%d)",
@@ -492,6 +504,10 @@ struct ProgramDetailView: View {
                     NSLog("[IMPORT] ProgramDetailView layout picker dismissed — discarding %d handed-over item(s)",
                           pending.urls.count)
                     diskImage.pendingProgramDrop = nil
+                    if !diskImage.queuedProgramDrops.isEmpty {
+                        NSLog("[IMPORT] …and %d queued preset(s)", diskImage.queuedProgramDrops.count)
+                        diskImage.queuedProgramDrops = []
+                    }
                 }
             }
         }
@@ -517,11 +533,37 @@ struct ProgramDetailView: View {
         } message: {
             Text(dropErrorMessage)
         }
+        .confirmationDialog("How should each sample play?",
+            isPresented: $showSingleKeyPlaybackPicker, titleVisibility: .visible) {
+            Button("One-shot — always play to the end") {
+                singleKeyPlaysToEnd = true
+                runPendingLayoutActions()
+            }
+            Button("Gated — stop when the key is released") {
+                singleKeyPlaysToEnd = false
+                runPendingLayoutActions()
+            }
+        } message: {
+            Text("One-shot plays the whole sample even if you only tap the key — best for drums and hits. Gated stops the sound when you let go.")
+        }
+        .onChange(of: showSingleKeyPlaybackPicker) { _, showing in
+            // Dismissed without an answer — treat like cancelling the layout question.
+            if !showing && singleKeyPlaysToEnd == nil {
+                NSLog("[IMPORT] single-key playback question dismissed — cancelling import")
+                keyzoneLayout = nil
+                pendingLayoutActions = []
+                if let pending = diskImage.pendingProgramDrop, pending.programID == programFile.id {
+                    diskImage.pendingProgramDrop = nil
+                }
+                diskImage.queuedProgramDrops = []
+            }
+        }
         .confirmationDialog("How should samples be mapped to keys?",
             isPresented: $showLayoutPicker, titleVisibility: .visible) {
             Button("Single Key (C1, C#1, D1…)") {
                 keyzoneLayout = .singleKey
-                runPendingLayoutActions()
+                // Follow-up: one-shot or gated. Presented after this dialog closes.
+                DispatchQueue.main.async { showSingleKeyPlaybackPicker = true }
             }
             Button("Full Keyboard (divide evenly)") {
                 keyzoneLayout = .fullKeyboard
@@ -556,21 +598,19 @@ struct ProgramDetailView: View {
             let newKZ: AkaiProgramKeyzone
             switch keyzoneLayout {
             case .singleKey, nil:
-                let (lo, hi, root) = nextSingleKey()
+                let (lo, hi, _) = nextSingleKey()
                 newKZ = AkaiProgramKeyzone(
                     sampleName: sampleName,
-                    lowKey: lo, highKey: hi, rootNote: root,
-                    tuneOffset: 0, fineTune: 0, volume: 0, pan: 0,
+                    lowKey: lo, highKey: hi, tuneOffset: 0, fineTune: 0, volume: 0, pan: 0,
                     filterOffset: 0, filterCutoff: 99, filterKeyFollow: 0,
                     filterResonance: 0, filterModDepth1: 0, filterModDepth2: 0, filterModDepth3: 0,
-                    rightSampleName: "", rightPan: 50, playbackMode: .sample,
+                    rightSampleName: "", rightPan: 50, playbackMode: singleKeyPlayback,
                     velocityLow: 0, velocityHigh: 127,
                     env1Attack: 0, env1Decay: 0, env1Sustain: 99, env1Release: 0, pitchMode: 1)   // CONST — single key, plays at original pitch
             case .fullKeyboard:
                 editedProgram.keyzones.append(AkaiProgramKeyzone(
                     sampleName: sampleName,
-                    lowKey: UInt8(PianoKeyboardView.visibleStartNote), highKey: UInt8(PianoKeyboardView.visibleEndNote), rootNote: 60,
-                    tuneOffset: 0, fineTune: 0, volume: 0, pan: 0,
+                    lowKey: UInt8(PianoKeyboardView.visibleStartNote), highKey: UInt8(PianoKeyboardView.visibleEndNote), tuneOffset: 0, fineTune: 0, volume: 0, pan: 0,
                     filterOffset: 0, filterCutoff: 99, filterKeyFollow: 0,
                     filterResonance: 0, filterModDepth1: 0, filterModDepth2: 0, filterModDepth3: 0,
                     rightSampleName: "", rightPan: 50, playbackMode: .sample,
@@ -634,7 +674,6 @@ struct ProgramDetailView: View {
             var kz = editedProgram.keyzones[idx]
             if old.lowKey != newValue.lowKey { kz.lowKey = newValue.lowKey }
             if old.highKey != newValue.highKey { kz.highKey = newValue.highKey }
-            if old.rootNote != newValue.rootNote { kz.rootNote = newValue.rootNote }
             if old.tuneOffset != newValue.tuneOffset { kz.tuneOffset = newValue.tuneOffset }
             if old.fineTune != newValue.fineTune { kz.fineTune = newValue.fineTune }
             if old.volume != newValue.volume { kz.volume = newValue.volume }
@@ -665,6 +704,7 @@ struct ProgramDetailView: View {
             if old.muteGroup != newValue.muteGroup { kz.muteGroup = newValue.muteGroup }
             if old.fxSend != newValue.fxSend { kz.fxSend = newValue.fxSend }
             if old.lfo1ToPitch != newValue.lfo1ToPitch { kz.lfo1ToPitch = newValue.lfo1ToPitch }
+            if old.velToEnv2 != newValue.velToEnv2 { kz.velToEnv2 = newValue.velToEnv2 }
             editedProgram.keyzones[idx] = kz
         }
     }
@@ -688,7 +728,13 @@ struct ProgramDetailView: View {
         isDirty = true
         var updated = diskImage.programs.first(where: { $0.id == programFile.id }) ?? programFile
         updated.program = editedProgram
-        diskImage.applyProgramEdits(updated)
+        NSLog("[PROGSAVE] commitProgramEdits %@: view has %d keyzone(s), model had %d",
+              editedProgram.name, editedProgram.keyzones.count, updated.program.keyzones.count)
+        if !diskImage.applyProgramEdits(updated) {
+            NSLog("[PROGSAVE] commitProgramEdits %@: FAILED to write program", editedProgram.name)
+            dropErrorMessage = "Not enough free space on the disk to save this program's \(editedProgram.keyzones.count) keyzones. Delete some samples and try again."
+            showDropError = true
+        }
     }
 
     /// Run everything that was waiting for the layout choice (one entry per
@@ -721,12 +767,17 @@ struct ProgramDetailView: View {
         NSLog("[IMPORT] ProgramDetailView.consumePendingDrop %d item(s) for %@",
               pending.urls.count, programFile.program.name)
         let consent = AudioImportPipeline.ResampleConsent()
+        let group = DispatchGroup()
         for url in pending.urls {
             var isDir: ObjCBool = false
             FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir)
-            if isDir.boolValue { dropFolder(url, consent: consent) }
-            else { dropFile(url, consent: consent) }
+            group.enter()
+            if isDir.boolValue { dropFolder(url, consent: consent, onDone: { group.leave() }) }
+            else { dropFile(url, consent: consent, onDone: { group.leave() }) }
         }
+        // Only after this preset's imports have landed (so nothing is lost when
+        // the view switches) open the next preset from the same drop, if any.
+        group.notify(queue: .main) { [diskImage] in diskImage.advanceProgramDropQueue() }
     }
 
     /// Call this before adding a keyzone. If layout is already chosen, runs
@@ -753,7 +804,7 @@ struct ProgramDetailView: View {
             nextNote = 36 // C1
         }
         let note = UInt8(min(nextNote, 127))
-        return (note, note, note)
+        return (note, note, 60)   // single key = CONST → root C3
     }
 
     /// Compute (lowKey, highKey) for a full-keyboard zone when adding one more
@@ -818,14 +869,11 @@ struct ProgramDetailView: View {
         }
     }
 
-    /// Keyzones with `rootNote` replaced by the mapped sample's real root, for
-    /// display (the keyboard's root marker).
-    private var keyzonesWithSampleRoots: [AkaiProgramKeyzone] {
-        editedProgram.keyzones.map { kz in
-            var k = kz
-            if let s = sampleNamed(kz.sampleName) { k.rootNote = s.header.midiRootNote }
-            return k
-        }
+    /// The root of the sample a keyzone plays — the ONLY root there is (S3000
+    /// keygroups have none). nil if the keyzone has no sample.
+    private func sampleRoot(forKeyzone idx: Int) -> UInt8? {
+        guard editedProgram.keyzones.indices.contains(idx) else { return nil }
+        return sampleNamed(editedProgram.keyzones[idx].sampleName)?.header.midiRootNote
     }
 
     /// Reads the mapped sample's root; writes go to the sample header(s).
@@ -833,8 +881,7 @@ struct ProgramDetailView: View {
         Binding(
             get: {
                 guard editedProgram.keyzones.indices.contains(idx) else { return 60 }
-                let kz = editedProgram.keyzones[idx]
-                return sampleNamed(kz.sampleName)?.header.midiRootNote ?? kz.rootNote
+                return sampleRoot(forKeyzone: idx) ?? 60
             },
             set: { setSampleRoot($0, forKeyzone: idx) }
         )
@@ -862,7 +909,6 @@ struct ProgramDetailView: View {
                   name, from, midiNoteNameStatic(root), idx + 1, programFile.program.name)
         }
         guard !changed.isEmpty else { return [] }
-        editedProgram.keyzones[idx].rootNote = root   // keep the in-memory field in step
         guard announce else { return changed }
 
         // Who else plays these samples?
@@ -958,30 +1004,28 @@ struct ProgramDetailView: View {
             let kz: AkaiProgramKeyzone
             switch keyzoneLayout {
             case .singleKey, nil:
-                let (lo, hi, root) = nextSingleKey()
-                // Patch sample rkey to match pad key for unity TRACK pitch.
+                let (lo, hi, _) = nextSingleKey()
+                // Single key = CONST, which plays as if C3 were pressed — so root C3 = original pitch.
                 if let sample = diskImage.samples.first(where: {
                     ($0.header.name.isEmpty ? $0.directoryEntry.name : $0.header.name) == name
-                }), sample.header.midiRootNote != lo {
+                }), sample.header.midiRootNote != 60 {
                     let from = midiNoteNameStatic(sample.header.midiRootNote)
-                    let to = midiNoteNameStatic(lo)
-                    var patched = sample; patched.header.midiRootNote = lo
+                    let to = midiNoteNameStatic(60)
+                    var patched = sample; patched.header.midiRootNote = 60   // CONST → root C3 = original pitch
                     diskImage.applySampleEdits(patched)
                     toast = ToastData(message: "\"\(name)\" root changed \(from) → \(to)")
                 }
                 kz = AkaiProgramKeyzone(
-                    sampleName: name, lowKey: lo, highKey: hi, rootNote: root,
-                    tuneOffset: 0, fineTune: 0, volume: 0, pan: 0,
+                    sampleName: name, lowKey: lo, highKey: hi, tuneOffset: 0, fineTune: 0, volume: 0, pan: 0,
                     filterOffset: 0, filterCutoff: 99, filterKeyFollow: 0,
                     filterResonance: 0, filterModDepth1: 0, filterModDepth2: 0, filterModDepth3: 0,
-                    rightSampleName: "", rightPan: 50, playbackMode: .sample,
+                    rightSampleName: "", rightPan: 50, playbackMode: singleKeyPlayback,
                     velocityLow: 0, velocityHigh: 127,
                     env1Attack: 0, env1Decay: 0, env1Sustain: 99, env1Release: 0, pitchMode: 1)   // CONST — single key, plays at original pitch
                 editedProgram.keyzones.append(kz)
             case .fullKeyboard:
                 kz = AkaiProgramKeyzone(
-                    sampleName: name, lowKey: UInt8(PianoKeyboardView.visibleStartNote), highKey: UInt8(PianoKeyboardView.visibleEndNote), rootNote: 60,
-                    tuneOffset: 0, fineTune: 0, volume: 0, pan: 0,
+                    sampleName: name, lowKey: UInt8(PianoKeyboardView.visibleStartNote), highKey: UInt8(PianoKeyboardView.visibleEndNote), tuneOffset: 0, fineTune: 0, volume: 0, pan: 0,
                     filterOffset: 0, filterCutoff: 99, filterKeyFollow: 0,
                     filterResonance: 0, filterModDepth1: 0, filterModDepth2: 0, filterModDepth3: 0,
                     rightSampleName: "", rightPan: 50, playbackMode: .sample,
@@ -997,12 +1041,14 @@ struct ProgramDetailView: View {
         }
     }
 
-    private func dropFile(_ url: URL, consent: AudioImportPipeline.ResampleConsent) {
+    private func dropFile(_ url: URL, consent: AudioImportPipeline.ResampleConsent,
+                          onDone: (() -> Void)? = nil) {
         let accessing = url.startAccessingSecurityScopedResource()
         NSLog("[IMPORT] ProgramDetailView.dropFile %@ (securityScope=%d)", url.lastPathComponent, accessing ? 1 : 0)
         guard let wavData = try? Data(contentsOf: url) else {
             NSLog("[IMPORT] ProgramDetailView.dropFile %@ — could not read file", url.lastPathComponent)
             if accessing { url.stopAccessingSecurityScopedResource() }
+            onDone?()
             return
         }
         if accessing { url.stopAccessingSecurityScopedResource() }
@@ -1012,6 +1058,7 @@ struct ProgramDetailView: View {
             NSLog("[IMPORT] ProgramDetailView.dropFile %@ — decode failed: %@", url.lastPathComponent, error.localizedDescription)
             dropErrorMessage = "\(url.lastPathComponent): \(error.localizedDescription)"
             showDropError = true
+            onDone?()
             return
         }
         let pcmData = decoded.pcm
@@ -1022,6 +1069,7 @@ struct ProgramDetailView: View {
 
         withLayout {
             let isSingle = keyzoneLayout == .singleKey
+            let singleMode = singleKeyPlayback
             let keyRange: (low: UInt8, high: UInt8, root: UInt8)
             if isSingle {
                 keyRange = nextSingleKey()
@@ -1071,7 +1119,7 @@ struct ProgramDetailView: View {
                         forceName: true)
                     // For single-key: patch rkey to match pad for unity TRACK pitch.
                     if isSingle {
-                        var patched = sample; patched.header.midiRootNote = keyRange.low
+                        var patched = sample; patched.header.midiRootNote = 60   // CONST plays as if C3 pressed → root C3 = original pitch
                         diskImage.applySampleEdits(patched)
                     }
                     // For full keyboard: import right channel and link it to the keyzone.
@@ -1084,13 +1132,12 @@ struct ProgramDetailView: View {
                     }
                     let kz = AkaiProgramKeyzone(
                         sampleName: sample.header.name,
-                        lowKey: keyRange.low, highKey: keyRange.high, rootNote: keyRange.root,
-                        tuneOffset: 0, fineTune: 0, volume: 0, pan: rightSampleName.isEmpty ? 0 : -50,   // stereo pair: left hard left (L50), right hard right
+                        lowKey: keyRange.low, highKey: keyRange.high, tuneOffset: 0, fineTune: 0, volume: 0, pan: rightSampleName.isEmpty ? 0 : -50,   // stereo pair: left hard left (L50), right hard right
                         filterOffset: 0, filterCutoff: 99, filterKeyFollow: 0,
                         filterResonance: 0, filterModDepth1: 0, filterModDepth2: 0, filterModDepth3: 0,
                         rightSampleName: rightSampleName,
                         rightPan: 50,
-                        playbackMode: .sample,
+                        playbackMode: isSingle ? singleMode : .sample,
                         velocityLow: 0, velocityHigh: 127,
                         pitchMode: isSingle ? 1 : 0)   // single key: CONST, full keyboard: TRACK
                     DispatchQueue.main.async {
@@ -1100,47 +1147,74 @@ struct ProgramDetailView: View {
                         selectedKeyzoneIndices = [newIdx]
                         anchorKeyzoneIndex = newIdx
                         commitProgramEdits()
+                        onDone?()
                     }
                 } catch {
                     DispatchQueue.main.async {
                         dropErrorMessage = error.localizedDescription
                         showDropError = true
+                        onDone?()
                     }
                 }
             }
         }
     }
 
-    private func dropFolder(_ folderURL: URL, consent: AudioImportPipeline.ResampleConsent) {
+    private func dropFolder(_ folderURL: URL, consent: AudioImportPipeline.ResampleConsent,
+                            onDone: (() -> Void)? = nil) {
         guard let contents = try? FileManager.default.contentsOfDirectory(
             at: folderURL, includingPropertiesForKeys: [.isRegularFileKey],
             options: [.skipsHiddenFiles]
-        ) else { return }
+        ) else {
+            NSLog("[IMPORT] dropFolder %@: could not list folder", folderURL.lastPathComponent)
+            onDone?(); return
+        }
         let audioURLs = contents
             .filter { audioExts.contains($0.pathExtension.lowercased()) }
             .sorted { $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedAscending }
         guard !audioURLs.isEmpty else {
             dropErrorMessage = "No audio files found in \"\(folderURL.lastPathComponent)\"."
             showDropError = true
+            onDone?()
             return
         }
         let loFi = lowQualityImport
+        NSLog("[IMPORT] dropFolder %@: %d audio file(s) of %d item(s), free blocks %d",
+              folderURL.lastPathComponent, audioURLs.count, contents.count, diskImage.freeBlocks)
 
         withLayout {
             let isSingle = keyzoneLayout != .fullKeyboard
+            let singleMode = singleKeyPlayback
             var nextNote: Int
             if let last = editedProgram.keyzones.last {
                 nextNote = last.lowKey == last.highKey ? Int(last.highKey) + 1 : 36
             } else {
                 nextNote = 36
             }
+            NSLog("[IMPORT] dropFolder %@: layout=%@ startNote=%d", folderURL.lastPathComponent,
+                  isSingle ? "single" : "full", nextNote)
+            let started = Date()
+            // Room the program file itself will need: 0xC0 header + 0xC0 per keygroup.
+            let existingKeyzones = editedProgram.keyzones.count
+            let bs = AkaiDiskFormat.blockSize
+            let programBlocksNow = (Int(diskImage.programs.first(where: { $0.id == programFile.id })?
+                .directoryEntry.size ?? 0) + bs - 1) / bs
+            func programBlocks(_ keyzones: Int) -> Int { ((1 + keyzones) * 0xC0 + bs - 1) / bs }
             DispatchQueue.global(qos: .userInitiated).async {
                 var newKeyzones: [AkaiProgramKeyzone] = []
-                for url in audioURLs {
+                var stopReason = "all files done"
+                var diskFull = false
+                for (i, url) in audioURLs.enumerated() {
                     let accessing = url.startAccessingSecurityScopedResource()
                     defer { if accessing { url.stopAccessingSecurityScopedResource() } }
-                    guard let wavData = try? Data(contentsOf: url),
-                          let decoded = try? WAVImport.decode(wavData) else { continue }
+                    guard let wavData = try? Data(contentsOf: url) else {
+                        NSLog("[IMPORT] dropFolder [%d/%d] %@: could not READ — skipped", i + 1, audioURLs.count, url.lastPathComponent)
+                        continue
+                    }
+                    guard let decoded = try? WAVImport.decode(wavData) else {
+                        NSLog("[IMPORT] dropFolder [%d/%d] %@: could not DECODE (%d bytes) — skipped", i + 1, audioURLs.count, url.lastPathComponent, wavData.count)
+                        continue
+                    }
                     let pcmData = decoded.pcm
                     let sampleRate = decoded.sampleRate
                     let numChannels = decoded.channels
@@ -1164,39 +1238,71 @@ struct ProgramDetailView: View {
                                 monoData = AkaiDiskImage.resampleToAkaiRate(pcm: monoData, fromRate: sampleRate).0
                             }
                         }
+                        // Keep enough free blocks for the program to grow to hold this keyzone.
+                        let sampleBlocks = (AkaiDiskFormat.sampleHeaderSize + monoData.count + bs - 1) / bs
+                        let programGrowth = max(0, programBlocks(existingKeyzones + newKeyzones.count + 1) - programBlocksNow)
+                        let free = diskImage.currentFreeBlocks()
+                        if sampleBlocks + programGrowth > free {
+                            diskImage.releaseImportName(monoName)
+                            stopReason = "disk full at [\(i + 1)/\(audioURLs.count)] \(url.lastPathComponent): sample needs \(sampleBlocks) + program \(programGrowth) block(s), \(free) free"
+                            NSLog("[IMPORT] dropFolder %@", stopReason)
+                            diskFull = true
+                            break
+                        }
                         let sample = try diskImage.addImportedSample(
                             name: monoName, sampleRate: finalRate, numChannels: 1, pcmData: monoData,
                             forceName: true)
+                        NSLog("[IMPORT] dropFolder [%d/%d] %@ → %@ (%d Hz, %d bytes), free blocks %d",
+                              i + 1, audioURLs.count, url.lastPathComponent, sample.header.name,
+                              Int(finalRate), monoData.count, diskImage.currentFreeBlocks())
                         let note = UInt8(min(nextNote, 127))
                         if isSingle {
-                            var patched = sample; patched.header.midiRootNote = note
+                            var patched = sample; patched.header.midiRootNote = 60   // CONST → root C3 = original pitch
                             diskImage.applySampleEdits(patched)
                             newKeyzones.append(AkaiProgramKeyzone(
                                 sampleName: sample.header.name,
-                                lowKey: note, highKey: note, rootNote: note,
-                                tuneOffset: 0, fineTune: 0, volume: 0, pan: 0,
+                                lowKey: note, highKey: note, tuneOffset: 0, fineTune: 0, volume: 0, pan: 0,
                                 filterOffset: 0, filterCutoff: 99, filterKeyFollow: 0,
                                 filterResonance: 0, filterModDepth1: 0, filterModDepth2: 0, filterModDepth3: 0,
                                 rightSampleName: "", rightPan: 50,
-                                playbackMode: .sample, velocityLow: 0, velocityHigh: 127,
+                                playbackMode: singleMode, velocityLow: 0, velocityHigh: 127,
                                 env1Attack: 0, env1Decay: 0, env1Sustain: 99, env1Release: 0, pitchMode: 1))   // CONST — single key, plays at original pitch
                             nextNote += 1
                         } else {
                             newKeyzones.append(AkaiProgramKeyzone(
                                 sampleName: sample.header.name,
-                                lowKey: UInt8(PianoKeyboardView.visibleStartNote), highKey: UInt8(PianoKeyboardView.visibleEndNote), rootNote: 60,
-                                tuneOffset: 0, fineTune: 0, volume: 0, pan: 0,
+                                lowKey: UInt8(PianoKeyboardView.visibleStartNote), highKey: UInt8(PianoKeyboardView.visibleEndNote), tuneOffset: 0, fineTune: 0, volume: 0, pan: 0,
                                 filterOffset: 0, filterCutoff: 99, filterKeyFollow: 0,
                                 filterResonance: 0, filterModDepth1: 0, filterModDepth2: 0, filterModDepth3: 0,
                                 rightSampleName: "", rightPan: 50,
                                 playbackMode: .sample, velocityLow: 0, velocityHigh: 127,
                                 env1Attack: 0, env1Decay: 0, env1Sustain: 99, env1Release: 0))
                         }
-                    } catch { break } // disk full
+                    } catch {
+                        diskFull = true
+                        stopReason = "stopped at [\(i + 1)/\(audioURLs.count)] \(url.lastPathComponent): \(error.localizedDescription)"
+                        NSLog("[IMPORT] dropFolder %@", stopReason)
+                        break
+                    }
                 }
+                NSLog("[IMPORT] dropFolder %@: background done in %.1fs — %d keyzone(s) built, %@",
+                      folderURL.lastPathComponent, Date().timeIntervalSince(started), newKeyzones.count, stopReason)
                 DispatchQueue.main.async {
-                    guard !newKeyzones.isEmpty else { return }
+                    defer { onDone?() }
+                    if diskFull {
+                        dropErrorMessage = "The disk is full. Imported \(newKeyzones.count) of \(audioURLs.count) samples from \"\(folderURL.lastPathComponent)\"."
+                        showDropError = true
+                    }
+                    NSLog("[IMPORT] dropFolder %@: main — view shows %@ with %d keyzone(s); model has %d",
+                          folderURL.lastPathComponent, editedProgram.name, editedProgram.keyzones.count,
+                          diskImage.programs.first(where: { $0.id == programFile.id })?.program.keyzones.count ?? -1)
+                    guard !newKeyzones.isEmpty else {
+                        NSLog("[IMPORT] dropFolder %@: NO keyzones to add", folderURL.lastPathComponent)
+                        return
+                    }
                     editedProgram.keyzones.append(contentsOf: newKeyzones)
+                    NSLog("[IMPORT] dropFolder %@: appended → view now %d keyzone(s)",
+                          folderURL.lastPathComponent, editedProgram.keyzones.count)
                     if !isSingle { redistributeFullKeyboard() }
                     let newIdx = editedProgram.keyzones.count - 1
                     selectedKeyzoneIndices = [newIdx]; anchorKeyzoneIndex = newIdx
@@ -1295,6 +1401,8 @@ struct SimpleDropZone: View {
 
 struct KeyzoneRow: View {
     let keyzone: AkaiProgramKeyzone
+    /// The sample's root (keygroups have no root of their own).
+    let root: UInt8?
     let sampleNames: [String]
     var body: some View {
         HStack(spacing: 8) {
@@ -1311,7 +1419,7 @@ struct KeyzoneRow: View {
                     }
                 }
                 HStack(spacing: 8) {
-                    Text("Root: \(midiNoteName(keyzone.rootNote))").font(.caption).foregroundStyle(.blue)
+                    Text("Root: \(root.map { midiNoteName($0) } ?? "–")").font(.caption).foregroundStyle(.blue)
                     if keyzone.lowKey == keyzone.highKey {
                         Text("Single: \(midiNoteName(keyzone.lowKey))").font(.caption).foregroundStyle(.secondary)
                     } else {
@@ -1689,7 +1797,7 @@ struct ProgramListView: View {
             Divider()
             VStack(spacing: 16) {
                 ContentUnavailableView(diskImage.programs.isEmpty ? "No Programs" : "Add Programs", systemImage: "pianokeys",
-                    description: Text("Right-click Programs in the sidebar to create one, or drag a sample onto this panel to create a preset from a single sample, or drag a folder to map each file to its own key."))
+                    description: Text("Drag a sample here or browse to import and create a preset, or right-click Programs in the sidebar to create a new program."))
                 Button {
                     showingImport = true
                 } label: {
@@ -1755,18 +1863,34 @@ struct ProgramListView: View {
             showDropError = true
             return
         }
-        let rawName = first.hasDirectoryPath
-            ? first.lastPathComponent
-            : first.deletingPathExtension().lastPathComponent
-        let prog: AkaiProgramFile
-        do { prog = try diskImage.createProgram(name: AkaiDiskImage.sanitizeName(String(rawName.prefix(12)))) }
-        catch {
-            dropError = error.localizedDescription
-            showDropError = true
-            return
+        _ = first
+        // One preset per folder; any loose files go together in one more preset.
+        func isDir(_ u: URL) -> Bool {
+            var d: ObjCBool = false
+            FileManager.default.fileExists(atPath: u.path, isDirectory: &d)
+            return d.boolValue
         }
-        diskImage.pendingProgramDrop = PendingProgramDrop(programID: prog.id, urls: usable)
-        selectedProgramID = prog.id
+        let folders = usable.filter(isDir)
+        let files = usable.filter { !isDir($0) }
+        var groups: [(name: String, urls: [URL])] = folders.map { ($0.lastPathComponent, [$0]) }
+        if let f = files.first { groups.append((f.deletingPathExtension().lastPathComponent, files)) }
+
+        var drops: [PendingProgramDrop] = []
+        for g in groups {
+            do {
+                let prog = try diskImage.createProgram(name: g.name)
+                drops.append(PendingProgramDrop(programID: prog.id, urls: g.urls))
+            } catch {
+                dropError = error.localizedDescription
+                showDropError = true
+                break
+            }
+        }
+        guard let firstDrop = drops.first else { return }
+        NSLog("[IMPORT] ProgramListView.startProgram → %d preset(s)", drops.count)
+        diskImage.queuedProgramDrops = Array(drops.dropFirst())
+        diskImage.pendingProgramDrop = firstDrop
+        selectedProgramID = firstDrop.programID
     }
 
 }
